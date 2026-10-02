@@ -20,8 +20,8 @@ test('filterByName：默认按 serverName，可指定字段', () => {
 })
 
 test('tabLabel：标签带计数（0 也照实显示）', () => {
-  assert.equal(tabLabel('MCP', 5), 'MCP (5)')
-  assert.equal(tabLabel('Skills', 0), 'Skills (0)')
+  assert.equal(tabLabel('MCP', 5), 'MCP（5）')
+  assert.equal(tabLabel('Skills', 0), 'Skills（0）')
 })
 
 test('serversForScope：缺省 scope 视为全局', () => {

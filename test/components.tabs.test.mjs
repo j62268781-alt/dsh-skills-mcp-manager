@@ -13,8 +13,8 @@ test('tabStrip：标签带计数，激活态只落在一个上', () => {
   const node = tabStrip({ h, active: 'skills', counts: { mcp: 5, skills: 0 }, onSelect: () => {} })
   assert.equal(node.props.className, 'smp-tabs')
   const [mcp, skills] = node.children
-  assert.equal(mcp.children[0], 'MCP (5)')
-  assert.equal(skills.children[0], 'Skills (0)')
+  assert.equal(mcp.children[0], 'MCP（5）')
+  assert.equal(skills.children[0], 'Skills（0）')
   assert.equal(mcp.props['data-active'], false)
   assert.equal(skills.props['data-active'], true)
 })
@@ -29,6 +29,6 @@ test('tabStrip：点击回调传出 tab id', () => {
 
 test('tabStrip：缺计数时显示 0，不显示 undefined', () => {
   const node = tabStrip({ h, active: 'mcp', onSelect: () => {} })
-  assert.equal(node.children[0].children[0], 'MCP (0)')
-  assert.equal(node.children[1].children[0], 'Skills (0)')
+  assert.equal(node.children[0].children[0], 'MCP（0）')
+  assert.equal(node.children[1].children[0], 'Skills（0）')
 })
