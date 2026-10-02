@@ -14,7 +14,12 @@ await build({
   format: 'esm',
   platform: 'browser',
   target: 'es2022',
-  external: ['react', '@deepseek-ai/*'],
-  loader: { '.css': 'text' },
+  external: ['react', 'react/*', '@deepseek-ai/*'],
+  // JSX 用 React.createElement 作为工厂（classic transform），而不是自动运行时的
+  // react/jsx-runtime —— 后者不一定被 DSH 的 ModuleLoader 提供，前者一定是（已是 external）。
+  jsx: 'transform',
+  jsxFactory: 'React.createElement',
+  jsxFragment: 'React.Fragment',
+  loader: { '.jsx': 'jsx', '.js': 'jsx', '.css': 'text' },
   logLevel: 'info',
 })
