@@ -31,6 +31,7 @@ import { IMPORT_SOURCES, adaptImportedEntry, envLines, headerLines, importFilePa
 import { scanImportSource } from './import/scan.js'
 import { beat, beatFile } from './diagnostics/heartbeat.js'
 import { projectRootOf, reconcileSkills, scopeRoot } from './skills/reconcile.js'
+import { discoverSkills } from './skills/discover.js'
 import { mountedKeyOf, projectServersFor, serverMountConfig, setMountClient, workingDirectoryOf } from './project/mount.js'
 
 setMountClient(mcpClient)
@@ -173,6 +174,14 @@ export const Config = z.object({
    * with, and the panel should show what the profile already configures.
    */
   profileServers: z.array(ProfileRow).default([]).volatile(),
+  /** Read-only: skills already on disk in DSH's roots (not managed by this panel). */
+  discoveredSkills: z.array(z.object({
+    name: z.string().default(''),
+    description: z.string().default(''),
+    path: z.string().default(''),
+    source: z.string().default(''),
+    scope: z.string().default('global'),
+  })).default([]).volatile(),
 })
 
 /** Bookkeeping for the skill files this plugin owns. */
@@ -383,12 +392,34 @@ export function apply(ctx, config) {
   let lastBeat = { at: '', observed: { servers: [], skills: [] }, changed: {}, mounted: 0, agents: [] }
   const projection = { loaderFound: null, rows: null, wrote: false, error: null }
   const rowOps = { pending: 0, applied: 0, error: null }
+  /** Latest disk-skill scan, refreshed on a timer (the scan itself is async). */
+  let discoveredSkills = []
+  const refreshDiscovered = async (projectRoot) => {
+    try {
+      discoveredSkills = await discoverSkills({
+        projectRoots: projectRoot === '' ? [] : [projectRoot],
+        dshHome: resolveDshHome(),
+        agentsHome: process.env.DSH_AGENTS_HOME ?? join(homedir(), '.agents'),
+      })
+    } catch {
+      discoveredSkills = []
+    }
+  }
+
   ctx.inject(['settings'], (inner) => {
     // Seed from the value already stored in this namespace: a recomposition must
     // not re-write identical rows, or the write would trigger the next reload.
     const stored = config?.profileServers?.get?.() ?? config?.profileServers
     const storedSpaces = config?.workspaces?.get?.() ?? config?.workspaces
     let published = JSON.stringify([Array.isArray(stored) ? stored : [], Array.isArray(storedSpaces) ? storedSpaces : []])
+    inner.effect(() => {
+      const timer = setInterval(() => {
+        const cwd = [...agents.values()].map((entry) => entry.cwd).find((value) => typeof value === 'string' && value !== '') ?? ''
+        void refreshDiscovered(cwd === '' ? '' : projectRootOf(cwd))
+      }, 5000)
+      return () => clearInterval(timer)
+    })
+
     const publish = () => {
       const { loaderFound, rows, error } = configuredMcpRows(ctx)
       projection.loaderFound = loaderFound
@@ -399,16 +430,17 @@ export function apply(ctx, config) {
       const spaces = configuredWorkspaces(ctx)
       const cwds = [...agents.values()].map((entry) => entry.cwd).filter((cwd) => typeof cwd === 'string' && cwd !== '')
       const currentWorkspace = cwds[0] ?? ''
+      const currentProjectRoot = currentWorkspace === '' ? '' : projectRootOf(currentWorkspace)
 
       if (error !== undefined) projection.error = error
-      const key = JSON.stringify([plain, spaces, currentWorkspace])
+      const key = JSON.stringify([plain, spaces, currentWorkspace, discoveredSkills])
       if (key === published) return
       // Never erase a good projection because the Loader read came back empty.
       if (plain.length === 0 && !loaderFound) {
         projection.error = projection.error ?? 'loader unavailable'
         return
       }
-      Promise.resolve(inner.settings.update('skills-mcp-panel', { profileServers: plain, workspaces: spaces, currentWorkspace }))
+      Promise.resolve(inner.settings.update('skills-mcp-panel', { profileServers: plain, workspaces: spaces, currentWorkspace, discoveredSkills }))
         .then(() => {
           published = key
           projection.wrote = true
