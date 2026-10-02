@@ -79,3 +79,16 @@
 .smp-button:disabled{opacity:.4;cursor:not-allowed}
 .smp-actionsRow{display:flex;align-items:center;gap:8px;margin-top:10px}
 .smp-error{color:var(--dsw-alias-state-error-primary,var(--dsw-alias-label-primary));font-size:12px;line-height:18px}
+
+/* Skill preview body: plain text on purpose (no markdown renderer in the panel). */
+.smp-preview {
+  margin: 0;
+  max-height: 52vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--dsh-text-secondary, inherit);
+}
