@@ -27,6 +27,8 @@ import { commandEnv, parseEnv, resolveCommand, setHomeResolver, spawnEnv, splitA
 import * as mcpClient from '@deepseek-ai/dsh-mcp-client';
 import { withFileLock, writeFileAtomic } from '@deepseek-ai/dsh-atomic-write';
 import { applyRowOp, setPatchIO } from './patch/apply.js';
+import { IMPORT_SOURCES, adaptImportedEntry, envLines, headerLines, importFilePath, parseJsonLoose } from './import/sources.js';
+import { scanImportSource } from './import/scan.js';
 setPatchIO({ withFileLock, writeFileAtomic });
 import { isMap, isSeq, parseDocument } from 'yaml';
 export const name = 'skills-mcp-panel';
@@ -302,146 +304,6 @@ function stdioMountConfig(server) {
  * Only tools that actually read a project-scoped file are listed; the rest keep
  * their MCP servers in user-level config, which is out of scope for this import.
  */
-const IMPORT_SOURCES = [
-    { id: 'claude', label: 'Claude', project: ['.mcp.json'], global: ['~/.claude.json'], keys: ['mcpServers'] },
-    { id: 'codex', label: 'Codex', project: ['.codex/config.toml'], global: ['~/.codex/config.toml'], keys: [], supported: false },
-    { id: 'chatgpt', label: 'ChatGPT', project: [], global: [], keys: [] },
-    { id: 'cursor', label: 'Cursor', project: ['.cursor/mcp.json'], global: ['~/.cursor/mcp.json'], keys: ['mcpServers'] },
-    { id: 'gemini', label: 'Gemini CLI', project: ['.gemini/settings.json'], global: ['~/.gemini/settings.json'], keys: ['mcpServers'] },
-    { id: 'antigravity', label: 'Google Antigravity', project: ['.antigravity/mcp.json'], global: [], keys: ['mcpServers'] },
-    { id: 'reasonix', label: 'Reasonix', project: [], global: [], keys: [] },
-    { id: 'opencode', label: 'opencode', project: ['opencode.json'], global: ['~/.config/opencode/opencode.json'], keys: ['mcp'], shape: 'opencode' },
-    { id: 'mimocode', label: 'MimoCode', project: ['.mimo/mcp.json'], global: [], keys: ['mcpServers'] },
-    { id: 'teleagent', label: 'TeleAgent', project: [], global: [], keys: [] },
-    { id: 'kilo', label: 'Kilo Code', project: [], global: [], keys: ['mcpServers'] },
-    { id: 'zcode', label: 'ZCode', project: [], global: [], keys: [] },
-    { id: 'grok', label: 'Grok', project: [], global: [], keys: [] },
-    { id: 'openclaw', label: 'OpenClaw', project: [], global: [], keys: [] },
-    { id: 'pi', label: 'Pi', project: [], global: [], keys: [] },
-    { id: 'hermes', label: 'Hermes', project: [], global: [], keys: [] },
-    { id: 'kimi', label: 'KIMI', project: ['.kimi/mcp.json'], global: ['~/.kimi/mcp.json'], keys: ['mcpServers'] },
-    { id: 'qoder', label: 'Qoder', project: ['.qoder/mcp.json'], global: ['~/.qoder/mcp.json'], keys: ['mcpServers'] },
-    { id: 'workbuddy', label: 'WorkBuddy', project: [], global: [], keys: [] },
-    { id: 'qwen', label: 'Qwen', project: ['.qwen/settings.json'], global: ['~/.qwen/settings.json'], keys: ['mcpServers'] },
-    { id: 'continue', label: 'Continue', project: ['.continue/config.json'], global: ['~/.continue/config.json'], keys: ['mcpServers'] },
-    { id: 'cline', label: 'Cline', project: [], global: [], keys: ['mcpServers'] },
-    { id: 'goose', label: 'goose', project: [], global: ['~/.config/goose/config.yaml'], keys: [], supported: false },
-    { id: 'zed', label: 'Zed', project: ['.zed/settings.json'], global: ['~/.config/zed/settings.json'], keys: ['context_servers'], shape: 'zed' },
-    { id: 'crush', label: 'Crush', project: ['crush.json', '.crush.json'], global: ['~/.config/crush/crush.json'], keys: ['mcp'] },
-    { id: 'vscode', label: 'VS Code', project: ['.vscode/mcp.json'], global: ['~/Library/Application Support/Code/User/mcp.json'], keys: ['servers', 'mcpServers'] },
-];
-/** Absolute path for a source entry: `~/…` is user-level, otherwise project-relative. */
-function importFilePath(relative, project) {
-    return relative.startsWith('~/') ? join(homedir(), relative.slice(2)) : join(project, relative);
-}
-/** JSON.parse that tolerates the comments/trailing commas editors allow. */
-function parseJsonLoose(text) {
-    const cleaned = String(text)
-        .replace(/^\s*\/\/.*$/gm, '')
-        .replace(/\/\*[\s\S]*?\*\//g, '')
-        .replace(/,(\s*[}\]])/g, '$1');
-    return JSON.parse(cleaned);
-}
-/** HTTP headers record -> the panel's KEY=VALUE lines. */
-function headerLines(headers) {
-    if (headers === null || typeof headers !== 'object' || Array.isArray(headers))
-        return '';
-    return Object.entries(headers).map(([key, value]) => `${key}=${String(value)}`).join('\n');
-}
-/** Env record -> the panel's KEY=VALUE lines. */
-function envLines(env) {
-    if (env === null || typeof env !== 'object' || Array.isArray(env))
-        return '';
-    return Object.entries(env).map(([key, value]) => `${key}=${String(value)}`).join('\n');
-}
-/** One tool's entry -> the panel's server shape, or null when unsupported. */
-function adaptImportedEntry(name, spec, shape) {
-    if (spec === null || typeof spec !== 'object' || Array.isArray(spec))
-        return null;
-    if (shape === 'zed') {
-        const command = spec.command;
-        if (typeof command === 'string') {
-            return { serverName: name, transport: 'stdio', command, args: Array.isArray(spec.args) ? spec.args.map(String) : [], env: envLines(spec.env), url: '', headers: '' };
-        }
-        if (command !== null && typeof command === 'object' && typeof command.path === 'string') {
-            return { serverName: name, transport: 'stdio', command: command.path, args: Array.isArray(command.args) ? command.args.map(String) : [], env: envLines(command.env), url: '', headers: '' };
-        }
-        if (typeof spec.url === 'string' && spec.url !== '') {
-            return { serverName: name, transport: 'streamable-http', url: spec.url, headers: headerLines(spec.headers), command: '', args: [], env: '' };
-        }
-        return null;
-    }
-    if (shape === 'opencode') {
-        if (Array.isArray(spec.command) && spec.command.length > 0) {
-            const [command, ...args] = spec.command.map(String);
-            return { serverName: name, transport: 'stdio', command, args, env: envLines(spec.environment ?? spec.env), url: '', headers: '' };
-        }
-        if (typeof spec.url === 'string' && spec.url !== '') {
-            return { serverName: name, transport: 'streamable-http', url: spec.url, headers: headerLines(spec.headers), command: '', args: [], env: '' };
-        }
-        return null;
-    }
-    if (typeof spec.url === 'string' && spec.url !== '') {
-        return { serverName: name, transport: 'streamable-http', url: spec.url, headers: headerLines(spec.headers), command: '', args: [], env: '' };
-    }
-    if (typeof spec.command === 'string' && spec.command !== '') {
-        return { serverName: name, transport: 'stdio', command: spec.command, args: Array.isArray(spec.args) ? spec.args.map(String) : [], env: envLines(spec.env), url: '', headers: '' };
-    }
-    return null;
-}
-/**
- * Scan one tool's project files. Returns what exists, what parsed, what the
- * panel would import (as project-scoped panel entries) and why anything failed.
- */
-function scanImportSource(scope, project, sourceId) {
-    const source = IMPORT_SOURCES.find((item) => item.id === sourceId);
-    if (source === undefined)
-        return { files: [], servers: [], error: `unknown import source "${sourceId}"` };
-    const paths = (scope === 'global' ? source.global : source.project) ?? [];
-    if (paths.length === 0)
-        return { files: [], servers: [], error: `${source.label} 目前没有已知的${scope === 'global' ? '用户级' : '项目级'} MCP 配置文件（该工具把 MCP 配置放在别处或仅支持全局）` };
-    if (source.supported === false)
-        return { files: paths.map((path) => ({ path, exists: existsSync(importFilePath(path, project)), servers: [], unsupported: 0, error: '' })), servers: [], error: `${source.label} 目前只有 TOML 配置，暂不支持自动导入` };
-    const files = [];
-    const servers = [];
-    const taken = new Set();
-    for (const relative of paths) {
-        const file = importFilePath(relative, project);
-        const report = { path: relative, exists: existsSync(file), servers: [], unsupported: 0, error: '' };
-        if (report.exists) {
-            try {
-                const document = parseJsonLoose(readFileSync(file, 'utf8'));
-                for (const key of source.keys) {
-                    const table = document?.[key];
-                    if (table === null || typeof table !== 'object' || Array.isArray(table))
-                        continue;
-                    for (const [name, spec] of Object.entries(table)) {
-                        const adapted = adaptImportedEntry(name, spec, source.shape ?? 'default');
-                        if (adapted === null || !/^[A-Za-z0-9_-]{1,32}$/.test(adapted.serverName) || taken.has(adapted.serverName)) {
-                            report.unsupported += 1;
-                            continue;
-                        }
-                        taken.add(adapted.serverName);
-                        report.servers.push(adapted.serverName);
-                        servers.push({
-                            scope: scope === 'global' ? 'global' : project,
-                            id: adapted.serverName, serverName: adapted.serverName,
-                            enabled: true, runtime: 'auto',
-                            source: relative, transport: adapted.transport, url: adapted.url, command: adapted.command,
-                            args: adapted.args, env: adapted.env, headers: adapted.headers,
-                        });
-                    }
-                }
-            }
-            catch (error) {
-                report.error = String(error?.message ?? error);
-            }
-        }
-        files.push(report);
-    }
-    return { files, servers };
-}
-/** Translate one panel entry into the shipped mcp-client config, or null when unusable. */
 function serverMountConfig(server) {
     if (!server?.serverName)
         return null;
