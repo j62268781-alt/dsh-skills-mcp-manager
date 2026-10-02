@@ -404,3 +404,33 @@ npm run deploy  # 安装进 desktop profile（旧版自动备份）
 ```
 
 模块职责与本次修复的静默失败清单见 `CHANGELOG.md` 的 0.3.0 一节。
+
+
+## 重构状态（截至本轮）
+
+已完成：
+
+- **Host 半**：9 个模块（`src/index.js` 只留入口与装配），从 1120 行降到 575 行
+- **Client 半**：15 个模块（样式 / CRUD / 组件），`lib/src/client.js` 余 908 行组件主体
+- **测试**：21 个 `test/*.test.mjs`，94 项断言全绿（`npm test`）
+- **安装脚本**：`npm run deploy`（拷贝式安装 + 旧版自动备份 + 回滚只需改名）
+- **仓库**：https://github.com/j62268781-alt/dsh-skills-mcp-panel （tag `v0.3.0` 起）
+
+已知未尽事项：
+
+1. `lib/src/client.js` 仍有约 908 行 React 主体未拆（表单渲染 / 卡片组装 / 状态装配）。
+   这三块互相咬合，逐轮小步拆解的收益低于风险，因此暂缓。
+2. **安装换代尚未在真机验证**：新布局（`exports["."] → ./dist/index.js`）已在沙箱里
+   通过"按 exports 加载 + apply() 正常"的预演，但尚未在真实 app 重启后验收。
+   当前 profile 里运行的仍是重构前那份**已验证可用**的版本（回滚点保留）。
+   验收方式：`npm run deploy` → 重启 DSH → 检查设置面板可打开、条目数不变、
+   增删改/停用/删除弹窗正常、`mcp__*` 工具数不变；异常则把 `.backup-<时间戳>` 改回原名即可。
+
+## 已知的坑（避免重犯）
+
+- 客户端测试的 createElement 替身必须像 React 一样扁平化 children：
+  `children.flat(Infinity)`，否则 `node.children[i]` 会拿到 `undefined`。
+- 提交前用 `fail` 计数门禁：`npm test | grep "^ℹ fail"` 得到 0 才提交
+  （`| grep` 会吞掉退出码，不能只靠 `&&` 串联）。
+- 客户端改动后必须跑 `npm run build:client`（esbuild 是客户端唯一的语法闸门）。
+- 空 `catch` 会吞掉缺导入这类 ReferenceError，改动时用 `SMP_DEBUG=1` 复现。
