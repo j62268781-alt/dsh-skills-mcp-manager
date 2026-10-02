@@ -29,7 +29,7 @@
     "build:client": "node esbuild.config.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "check": "node --check src/index.js && node --check lib/client.js",
-    "test": "node --test test/",
+    "test": "node --import ./scripts/jsx-register.mjs --test test/",
     "verify": "node verify-served.mjs",
     "deploy": "node scripts/deploy.mjs"
   },
