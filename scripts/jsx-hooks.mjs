@@ -15,8 +15,8 @@ export async function load(url, context, nextLoad) {
   const { code } = await transform(source, {
     loader: 'jsx',
     jsx: 'transform',
-    jsxFactory: 'React.createElement',
-    jsxFragment: 'React.Fragment',
+    jsxFactory: '__dshReact.createElement',
+    jsxFragment: '__dshReact.Fragment',
     format: 'esm',
     target: 'node20',
     sourcefile: url,
