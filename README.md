@@ -436,12 +436,18 @@ npm run deploy  # 安装进 desktop profile（旧版自动备份）
 - 空 `catch` 会吞掉缺导入这类 ReferenceError，改动时用 `SMP_DEBUG=1` 复现。
 
 
-## JSX 迁移进度（进行中）
+## JSX 迁移（已完成）
 
-Client 半正在从 `h(...)` 调用写法迁移到 JSX。规则：**就地改写、签名不变、调用点不动**，
-每块改完都必须过 `npm run gate`（build:client + npm test + 预览基线）才提交。
+Client 半已全部改为 JSX：`lib/src/**` 的渲染模块都是 `.jsx`，`lib/src/client.js`（入口与装配）
+也就地改用 JSX；`lib/src/client.js` 里不再有 `h(...)` 调用（`grep -c "h('"` = 0）。
 
-已完成：
+规则与验收方式（每一块都照此执行）：
+
+- **就地改写、签名不变、调用点不动**；每块改完必须过 `npm run gate`
+  （`build:client` + `npm test` + 离线预览基线：条目 13 / 停用 4 / 删除 5 / tab `MCP（5）|Skills（1）`）
+- 不改 profile 安装（全程未做安装换代，运行中的仍是重构前的已验证版本）
+
+已完成清单：
 
 | 文件 | 说明 |
 |---|---|
@@ -451,22 +457,11 @@ Client 半正在从 `h(...)` 调用写法迁移到 JSX。规则：**就地改写
 | `lib/src/components/group.jsx` | 分组标题行 + 副标题 |
 | `lib/src/components/dialog.jsx` | 官方 Modal 删除确认 |
 | `lib/src/components/card.jsx` | 详情字段表（`detailNodes`）|
-| `lib/src/components/chevron.jsx` · `field.jsx` · `buttons.jsx` 相关 | 小组件 |
-| `lib/src/client.js` 的 `addButton` / `card()` | 就地 JSX 化 |
-| `lib/src/config.js` · `importSources.js` | 纯逻辑/纯数据（无需 JSX）|
+| `lib/src/components/chevron.jsx` · `field.jsx` | 小组件 |
+| `lib/src/client.js` | `card()` / `profileCard()` / `serverForm()` / `skillForm()` / `importCard()` / `tierSection()` / 四个列表 / 页面根 return / 调试块 —— 全部就地 JSX 化 |
+| `lib/src/config.js` · `importSources.js` | 纯逻辑/纯数据（无渲染，无需 JSX）|
 
 无需迁移（纯逻辑，不含渲染）：`components/form.js` · `components/sections.js` · `components/filters.js`。
-
-`lib/src/client.js` 现状：**870 行 · `h(` 调用剩余 120 处**，剩余块（按建议顺序）：
-
-| 块 | 起始行 | 行数 | 块内 h( |
-|---|---|---|---|
-| `profileCard()` | ~310 | ~77 | 18 |
-| `serverForm()` | ~524 | ~90 | 19 |
-| `importCard` | ~387 | ~137 | 36 |
-| `skillForm()` + 页面装配 | ~614 | ~256 | 47 |
-
-收尾判据：`grep -c 'h(' lib/src/client.js` 归零、`npm run gate` 全绿、推送同步。
 
 ### JSX 的两条硬约束（踩过坑，务必遵守）
 
