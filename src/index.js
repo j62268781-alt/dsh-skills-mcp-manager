@@ -174,6 +174,14 @@ export const Config = z.object({
    * with, and the panel should show what the profile already configures.
    */
   profileServers: z.array(ProfileRow).default([]).volatile(),
+  /**
+   * Resolved skill directories, so the UI can show real OS-correct paths instead
+   * of "$DSH_HOME"/"~" (Windows uses backslashes and %USERPROFILE%).
+   */
+  skillDirs: z.object({
+    userDsh: z.string().default(''),
+    userAgents: z.string().default(''),
+  }).default({ userDsh: '', userAgents: '' }).volatile(),
   /** Read-only: skills already on disk in DSH's roots (not managed by this panel). */
   discoveredSkills: z.array(z.object({
     name: z.string().default(''),
@@ -439,20 +447,29 @@ export function apply(ctx, config) {
       // Loader config values can be YAML nodes (Scalar & friends carry iterators);
       // the settings validator only accepts plain JSON, so normalise first.
       const plain = JSON.parse(JSON.stringify(rows))
-      const spaces = configuredWorkspaces(ctx)
+      const spaces = configuredWorkspaces(ctx).map((workspace) => ({
+        ...workspace,
+        agentsSkillsDir: workspace.path === '' ? '' : join(workspace.path, '.agents', 'skills'),
+      }))
       const cwds = [...agents.values()].map((entry) => entry.cwd).filter((cwd) => typeof cwd === 'string' && cwd !== '')
       const currentWorkspace = cwds[0] ?? ''
       const currentProjectRoot = currentWorkspace === '' ? '' : projectRootOf(currentWorkspace)
 
       if (error !== undefined) projection.error = error
-      const key = JSON.stringify([plain, spaces, currentWorkspace, discoveredSkills])
+      const skillDirs = {
+        userDsh: join(resolveDshHome(), 'skills'),
+        userAgents: join(process.env.DSH_AGENTS_HOME ?? join(homedir(), '.agents'), 'skills'),
+      }
+      const key = JSON.stringify([plain, spaces, currentWorkspace, discoveredSkills, skillDirs])
       if (key === published) return
       // Never erase a good projection because the Loader read came back empty.
       if (plain.length === 0 && !loaderFound) {
         projection.error = projection.error ?? 'loader unavailable'
         return
       }
-      Promise.resolve(inner.settings.update('skills-mcp-panel', { profileServers: plain, workspaces: spaces, currentWorkspace, discoveredSkills }))
+      Promise.resolve(inner.settings.update('skills-mcp-panel', {
+          profileServers: plain, workspaces: spaces, currentWorkspace, discoveredSkills, skillDirs,
+        }))
         .then(() => {
           published = key
           projection.wrote = true
