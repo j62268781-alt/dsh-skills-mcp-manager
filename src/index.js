@@ -32,6 +32,7 @@ import { scanImportSource } from './import/scan.js'
 import { beat, beatFile } from './diagnostics/heartbeat.js'
 import { projectRootOf, reconcileSkills, scopeRoot } from './skills/reconcile.js'
 import { discoverSkills } from './skills/discover.js'
+import { createSkill, deleteSkill, renameSkill, updateSkill, writableRoots } from './skills/write.js'
 import { mountedKeyOf, projectServersFor, serverMountConfig, setMountClient, workingDirectoryOf } from './project/mount.js'
 
 setMountClient(mcpClient)
@@ -132,6 +133,24 @@ export const Config = z.object({
     nonce: z.string().default(''),
   }).default({}).volatile(),
   /** The scan answer for the latest request. */
+  /** Skill write request from the panel (create/update/rename/delete on disk). */
+  skillRequest: z.object({
+    op: z.string().default(''),
+    scope: z.string().default(''),
+    id: z.string().default(''),
+    project: z.string().default(''),
+    name: z.string().default(''),
+    prevName: z.string().default(''),
+    description: z.string().default(''),
+    body: z.string().default(''),
+    nonce: z.string().default(''),
+  }).default({}).volatile(),
+  skillResult: z.object({
+    ok: z.boolean().default(false),
+    reason: z.string().default(''),
+    name: z.string().default(''),
+    nonce: z.string().default(''),
+  }).default({}).volatile(),
   importResult: z.object({
     nonce: z.string().default(''),
     source: z.string().default(''),
@@ -314,6 +333,8 @@ export function apply(ctx, config) {
    * back — imports are explicit and land in the panel's own project entries.
    */
   const importState = { nonce: '', result: null }
+  /** Nonce of the last skill write we executed (the panel polls by changing it). */
+  let seenSkillNonce = ''
 
   let stops = []
   let mountedKey = null
@@ -532,6 +553,41 @@ export function apply(ctx, config) {
     // project files and writes the answer back for the panel to preview.
     let seenNonce = ''
     const importTimer = setInterval(() => {
+      {
+        const skillReq = config?.skillRequest?.get?.() ?? config?.skillRequest
+        const skillNonce = typeof skillReq?.nonce === 'string' ? skillReq.nonce : ''
+        if (skillNonce !== '' && skillNonce !== seenSkillNonce) {
+          seenSkillNonce = skillNonce
+          const op = String(skillReq?.op ?? '')
+          const roots = writableRoots({
+            dshHome: resolveDshHome(),
+            agentsHome: process.env.DSH_AGENTS_HOME ?? join(homedir(), '.agents'),
+            projectRoot: skillReq?.project === '' ? '' : projectRootOf(String(skillReq.project)),
+          })
+          const target = roots.find((entry) => entry.scope === skillReq?.scope && entry.id === skillReq?.id)
+          void (async () => {
+            let result
+            if (target === undefined) {
+              result = { ok: false, reason: '未知的写入区域', name: '', nonce: skillNonce }
+            } else {
+              const payload = {
+                dir: target.dir, name: String(skillReq?.name ?? ''),
+                description: String(skillReq?.description ?? ''), body: String(skillReq?.body ?? ''),
+              }
+              const done = op === 'create' ? await createSkill(payload)
+                : op === 'rename' ? await renameSkill({ ...payload, from: String(skillReq?.prevName ?? '') })
+                  : op === 'delete' ? await deleteSkill(payload)
+                    : await updateSkill(payload)
+              result = { ok: done.ok === true, reason: String(done.reason ?? ''), name: String(done.name ?? ''), nonce: skillNonce }
+            }
+            await Promise.resolve(inner.settings.update('skills-mcp-panel', { skillResult: result }))
+            // Announce the change to every running client and rescan the disk now.
+            invalidate()
+            await refreshDiscovered(roots.map((entry) => projectRootOf(entry.dir)))
+          })()
+        }
+      }
+
       const request = config?.importRequest?.get?.() ?? config?.importRequest
       const nonce = typeof request?.nonce === 'string' ? request.nonce : ''
       if (nonce === '' || nonce === seenNonce) return
