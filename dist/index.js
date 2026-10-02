@@ -31,6 +31,8 @@ import { IMPORT_SOURCES, adaptImportedEntry, envLines, headerLines, importFilePa
 import { scanImportSource } from './import/scan.js';
 import { beat, beatFile } from './diagnostics/heartbeat.js';
 import { projectRootOf, reconcileSkills, scopeRoot } from './skills/reconcile.js';
+import { mountedKeyOf, projectServersFor, serverMountConfig, setMountClient, workingDirectoryOf } from './project/mount.js';
+setMountClient(mcpClient);
 setPatchIO({ withFileLock, writeFileAtomic });
 import { isMap, isSeq, parseDocument } from 'yaml';
 export const name = 'skills-mcp-panel';
@@ -171,82 +173,6 @@ const mcpPlugin = {
     Config: mcpClient.Config,
 };
 /** Stable identity of the global servers that should be mounted. */
-function mountedKeyOf(servers) {
-    return JSON.stringify(servers.filter((server) => server.scope === 'global' && server.enabled !== false));
-}
-/**
- * stdio mount config.
- *
- * `npx`-style commands prefer the harness's own runtime (`node` + `pnpx`), which
- * works regardless of the user's shell PATH and of a broken shared npm cache.
- * Anything else resolves through the login shell.
- */
-function stdioMountConfig(server) {
-    const raw = String(server.command ?? '');
-    const args = Array.isArray(server.args) ? server.args : [];
-    const userEnv = parseEnv(server.env);
-    const base = raw.split('/').pop() ?? '';
-    const npmFamily = /^(npx|npm|pnpx|pnpm)(-cli)?(\.(js|cjs|mjs))?$/.test(base);
-    // Some published servers break under pnpm's strict dependency layout
-    // (ERR_PACKAGE_PATH_NOT_EXPORTED), so an entry may opt into the user's npx.
-    const runtime = server.runtime === 'system' ? null : bundledRuntime();
-    if (runtime !== null && npmFamily) {
-        // `npx -y <pkg> …` → `<node> <pnpx.mjs> <pkg> …`
-        const cleaned = args.filter((arg) => arg !== '-y' && arg !== '--yes');
-        return {
-            transport: 'stdio', serverName: server.serverName,
-            command: runtime.node,
-            args: [runtime.pnpx, ...cleaned],
-            // the shims run `exec node …`, so the runtime's bin dir must be on PATH
-            env: { PATH: `${runtime.binDir}:${loginPath() || '/usr/bin:/bin'}`, ...userEnv },
-        };
-    }
-    const resolved = resolveCommand(raw);
-    return {
-        transport: 'stdio', serverName: server.serverName, command: resolved, args,
-        env: { ...commandEnv(resolved), ...userEnv },
-    };
-}
-/**
- * Project-level MCP config files, per tool, as those tools document them.
- *
- * Only tools that actually read a project-scoped file are listed; the rest keep
- * their MCP servers in user-level config, which is out of scope for this import.
- */
-function serverMountConfig(server) {
-    if (!server?.serverName)
-        return null;
-    const mountConfig = server.transport === 'stdio'
-        ? stdioMountConfig(server)
-        : {
-            transport: 'streamable-http', serverName: server.serverName, url: server.url,
-            headers: parseEnv(server.headers),
-        };
-    const missing = mountConfig.transport === 'stdio' ? !mountConfig.command : !mountConfig.url;
-    return missing ? null : mountConfig;
-}
-/** The agent's working directory, tolerating the Session shapes in play. */
-function workingDirectoryOf(agent) {
-    const session = agent?.session;
-    return session?.cwd ?? session?.header?.cwd ?? agent?.cwd ?? agent?.options?.cwd ?? null;
-}
-/**
- * Project-scoped servers that apply to a working directory.
- *
- * A configured project scope is matched as a directory prefix, so a session
- * started anywhere inside the project — not only at its root — gets the servers.
- */
-function projectServersFor(servers, cwd) {
-    if (typeof cwd !== 'string' || cwd === '')
-        return [];
-    return servers.filter((server) => {
-        const scope = server.scope;
-        if (!scope || scope === 'global' || server.enabled === false)
-            return false;
-        const base = scope.replace(/\/+$/, '');
-        return cwd === base || cwd.startsWith(`${base}/`);
-    });
-}
 /** Keep the last rewrites so a bad edit is always recoverable. */
 /** Workspaces the registry knows, reduced to what the project picker needs. */
 function configuredWorkspaces(ctx) {
