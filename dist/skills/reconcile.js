@@ -4,7 +4,7 @@
  * (project), and removes directories that are no longer configured.
  */
 import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { dshHome } from '../runtime/env.js';
 const stateFile = () => join(dshHome(), 'skills-mcp-panel.state.json');
@@ -85,7 +85,13 @@ export async function reconcileSkills(ctx, skills) {
             ctx.logger.warn('skills-mcp-panel: cannot remove %s', path);
         }
     }
+    try {
+        await mkdir(dirname(stateFile()), { recursive: true });
+        await writeFile(stateFile(), `${JSON.stringify({ files: owned }, null, 2)}\n`);
+    }
+    catch (error) {
+        if (process.env.SMP_DEBUG)
+            console.error('[skills-mcp-panel] cannot write skill state', error);
+    }
     return result;
-    await mkdir(dirname(stateFile()), { recursive: true });
-    await writeFile(stateFile(), `${JSON.stringify({ files: owned }, null, 2)}\n`);
 }

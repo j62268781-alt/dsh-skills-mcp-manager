@@ -86,8 +86,11 @@ export async function reconcileSkills(ctx, skills) {
       ctx.logger.warn('skills-mcp-panel: cannot remove %s', path)
     }
   }
+  try {
+    await mkdir(dirname(stateFile()), { recursive: true })
+    await writeFile(stateFile(), `${JSON.stringify({ files: owned }, null, 2)}\n`)
+  } catch (error) {
+    if (process.env.SMP_DEBUG) console.error('[skills-mcp-panel] cannot write skill state', error)
+  }
   return result
-
-  await mkdir(dirname(stateFile()), { recursive: true })
-  await writeFile(stateFile(), `${JSON.stringify({ files: owned }, null, 2)}\n`)
 }
