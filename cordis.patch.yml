@@ -1,0 +1,11 @@
+# Bundle patch for @local/dsh-skills-mcp-panel.
+# One Host row; the Client half rides along through the package's `dsh.client`
+# declaration. `servers` / `skills` are `.volatile()`, so the panel's own page
+# (and the generic settings form) can edit them; edits persist right here in
+# the active profile's patch.
+- insert:
+    - id: skills-mcp-panel
+      name: '@local/dsh-skills-mcp-panel'
+      config:
+        servers: []
+        skills: []

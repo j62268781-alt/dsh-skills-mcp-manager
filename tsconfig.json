@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": [
+      "es2022"
+    ],
+    "outDir": "dist",
+    "allowJs": true,
+    "checkJs": false,
+    "rootDir": "src",
+    "strict": false,
+    "declaration": false,
+    "sourceMap": false,
+    "verbatimModuleSyntax": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noEmitOnError": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": [
+    "src"
+  ]
+}
