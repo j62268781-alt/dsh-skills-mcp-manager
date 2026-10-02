@@ -23,6 +23,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import z from '@deepseek-ai/schemastery';
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths';
+import { commandEnv, parseEnv, resolveCommand, setHomeResolver, spawnEnv, splitArgs } from './runtime/env.js';
 import * as mcpClient from '@deepseek-ai/dsh-mcp-client';
 import { withFileLock, writeFileAtomic } from '@deepseek-ai/dsh-atomic-write';
 import { isMap, isSeq, parseDocument } from 'yaml';
@@ -87,6 +88,7 @@ const RowOp = z.object({
     /** toggle: the desired enabled state of the row. */
     enabled: z.boolean().default(true),
 });
+setHomeResolver(resolveDshHome);
 export const Config = z.object({
     servers: z.array(Server).default([]).volatile(),
     skills: z.array(Skill).default([]).volatile(),
@@ -258,102 +260,6 @@ const mcpPlugin = {
 /** Stable identity of the global servers that should be mounted. */
 function mountedKeyOf(servers) {
     return JSON.stringify(servers.filter((server) => server.scope === 'global' && server.enabled !== false));
-}
-const commandCache = new Map();
-/**
- * Resolve a bare stdio command through the user's login shell.
- *
- * A desktop-launched Host inherits PATH=/usr/bin:/bin:/usr/sbin:/sbin, so `npx`
- * and friends are invisible; an absolute path always passes through untouched.
- */
-function resolveCommand(command) {
-    const raw = String(command ?? '');
-    if (raw === '' || raw.includes('/'))
-        return raw;
-    if (commandCache.has(raw))
-        return commandCache.get(raw);
-    let resolved = raw;
-    try {
-        const found = execFileSync('/bin/zsh', ['-lc', `command -v ${JSON.stringify(raw)}`], { encoding: 'utf8', timeout: 5000 }).trim();
-        if (found !== '')
-            resolved = found.split('\n').pop().trim();
-    }
-    catch {
-        // keep the raw spelling; the spawn error is the user's signal
-    }
-    commandCache.set(raw, resolved);
-    return resolved;
-}
-let cachedLoginPath = null;
-/** The user's login-shell PATH, resolved once. */
-function loginPath() {
-    if (cachedLoginPath !== null)
-        return cachedLoginPath;
-    try {
-        const out = execFileSync('/bin/zsh', ['-lc', 'print -r -- $PATH'], { encoding: 'utf8', timeout: 5000 }).trim();
-        cachedLoginPath = out === '' ? '' : out.split('\n').pop().trim();
-    }
-    catch {
-        cachedLoginPath = '';
-    }
-    return cachedLoginPath;
-}
-/**
- * Extra child environment for a stdio server.
- *
- * A desktop-launched Host inherits `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, where
- * neither `node` nor `npx` exists — a spawn of `/opt/homebrew/bin/npx` then dies
- * in its `#!/usr/bin/env node` shebang. So every stdio server gets the login
- * shell's PATH.
- */
-/** Parse `KEY=VALUE` lines into a child-environment dict. */
-function parseEnv(text) {
-    const out = {};
-    for (const line of String(text ?? '').split('\n')) {
-        const trimmed = line.trim();
-        if (trimmed === '' || trimmed.startsWith('#'))
-            continue;
-        const at = trimmed.indexOf('=');
-        if (at <= 0)
-            continue;
-        out[trimmed.slice(0, at).trim()] = trimmed.slice(at + 1).trim();
-    }
-    return out;
-}
-let cachedRuntime;
-/** The harness's bundled runtime: Node plus pnpm/pnpx (it ships no npm/npx). */
-function bundledRuntime() {
-    if (cachedRuntime !== undefined)
-        return cachedRuntime;
-    cachedRuntime = null;
-    try {
-        const root = join(resolveDshHome(), 'dsh-runtimes');
-        for (const id of readdirSync(root)) {
-            const node = join(root, id, 'dependencies', 'node', 'bin', 'node');
-            const pnpx = join(root, id, 'dependencies', 'pnpm', 'bin', 'pnpx.mjs');
-            if (existsSync(node) && existsSync(pnpx)) {
-                cachedRuntime = { node, pnpx, binDir: dirname(node) };
-                break;
-            }
-        }
-    }
-    catch {
-        // no bundled runtime: fall back to the login shell
-    }
-    return cachedRuntime;
-}
-function commandEnv(command) {
-    const env = {};
-    const path = loginPath();
-    if (path !== '')
-        env.PATH = path;
-    // NOTE: do not inject npm_config_cache here. A redirected cache makes
-    // `npx -y <pkg>` die silently inside the app's child environment (verified:
-    // same binary + same cache works from a login shell, fails when spawned by
-    // the Host, while dropping the variable starts the server immediately).
-    // npm-family commands therefore use the user's own cache; when that cache has
-    // root-owned leftovers, fix it with `sudo chown -R $(whoami) ~/.npm`.
-    return env;
 }
 /**
  * stdio mount config.
@@ -576,27 +482,6 @@ function projectServersFor(servers, cwd) {
  * needs to show.
  */
 const YAML_JS_TAG = { tag: 'tag:yaml.org,2002:js', resolve: (value) => value };
-/** Space-separated argument text -> argv list. */
-function splitArgs(text) {
-    const trimmed = String(text ?? '').trim();
-    return trimmed === '' ? [] : trimmed.split(/\s+/);
-}
-/**
- * Child environment written into a profile row.
- *
- * A desktop-launched Host runs with `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, where
- * `node` does not exist — a row with `command: npx` would die in its
- * `#!/usr/bin/env node` shebang. Writing the bundled runtime's bin directory in
- * front of the login PATH makes such a row work with no host-side patching.
- */
-function spawnEnv(extra) {
-    const env = { ...(extra ?? {}) };
-    const runtime = bundledRuntime();
-    const path = runtime !== null ? `${runtime.binDir}:${loginPath() || '/usr/bin:/bin'}` : loginPath();
-    if (path !== '')
-        env.PATH = path;
-    return env;
-}
 /** Keep the last rewrites so a bad edit is always recoverable. */
 async function backupPatch(before) {
     try {
