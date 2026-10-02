@@ -44,10 +44,10 @@ export function entryDetailPairs(server = {}, scopeLabel = '') {
   ]
 }
 
-/** Flatten label/value pairs into alternating key and value nodes. */
-export function detailNodes(pairs, h, keyPrefix = 'd') {
+/** Flatten label/value pairs into alternating key and value nodes (JSX). */
+export function detailNodes(pairs, keyPrefix = 'd') {
   return pairs.flatMap(([key, value]) => [
-    h('span', { className: 'smp-detailsKey', key: `${keyPrefix}-k-${key}` }, key),
-    h('span', { className: 'smp-detailsValue', key: `${keyPrefix}-v-${key}` }, value || '—'),
+    <span className="smp-detailsKey" key={`${keyPrefix}-k-${key}`}>{key}</span>,
+    <span className="smp-detailsValue" key={`${keyPrefix}-v-${key}`}>{value || '—'}</span>,
   ])
 }
