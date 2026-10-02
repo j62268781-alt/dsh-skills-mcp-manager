@@ -14,6 +14,10 @@ import { homedir } from 'node:os';
  * injects the app's own resolver (which also handles a symlinked home).
  */
 let homeResolver = () => process.env.DSH_HOME ?? join(homedir(), '.dsh');
+/** Current `$DSH_HOME` (the injected resolver when the host provided one). */
+export function dshHome() {
+    return homeResolver();
+}
 /** Inject the host application's home resolver. */
 export function setHomeResolver(resolve) {
     if (typeof resolve === 'function')

@@ -16,6 +16,11 @@ import { homedir } from 'node:os'
  */
 let homeResolver = () => process.env.DSH_HOME ?? join(homedir(), '.dsh')
 
+/** Current `$DSH_HOME` (the injected resolver when the host provided one). */
+export function dshHome() {
+  return homeResolver()
+}
+
 /** Inject the host application's home resolver. */
 export function setHomeResolver(resolve) {
   if (typeof resolve === 'function') homeResolver = resolve

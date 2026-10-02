@@ -26,6 +26,9 @@ import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { commandEnv, parseEnv, resolveCommand, setHomeResolver, spawnEnv, splitArgs } from './runtime/env.js'
 import * as mcpClient from '@deepseek-ai/dsh-mcp-client'
 import { withFileLock, writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
+import { applyRowOp, setPatchIO } from './patch/apply.js'
+
+setPatchIO({ withFileLock, writeFileAtomic })
 import { isMap, isSeq, parseDocument } from 'yaml'
 
 export const name = 'skills-mcp-panel'
@@ -495,14 +498,7 @@ function projectServersFor(servers, cwd) {
   })
 }
 
-/**
- * MCP rows the active profile already configures with the shipped client.
- *
- * Read from the Loader (the panel's own settings document cannot see them,
- * because those rows declare no volatile fields), reduced to what a panel row
- * needs to show.
- */
-const YAML_JS_TAG = { tag: 'tag:yaml.org,2002:js', resolve: (value) => value }
+
 
 
 
@@ -518,78 +514,6 @@ const YAML_JS_TAG = { tag: 'tag:yaml.org,2002:js', resolve: (value) => value }
 
 
 /** Keep the last rewrites so a bad edit is always recoverable. */
-async function backupPatch(before) {
-  try {
-    const dir = join(resolveDshHome(), 'skills-mcp-panel.backups')
-    await mkdir(dir, { recursive: true })
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-    await writeFile(join(dir, `cordis.patch.yml.${stamp}.bak`), before)
-  } catch (error) {
-    // a missing backup must not block a legitimate edit
-  }
-}
-
-/**
- * Apply one panel command to the active profile patch.
- *
- * Uses the same lock and atomic write the official config editor uses, re-parses
- * the result before writing it, and keeps a backup of the previous content.
- */
-async function applyRowOp(ctx, op) {
-  const profile = ctx.get?.('profileContext') ?? ctx.profileContext
-  const dir = profile?.dir
-  if (typeof dir !== 'string' || dir === '') throw new Error('profileContext unavailable')
-  const path = join(dir, 'cordis.patch.yml')
-  return withFileLock(join(dir, 'package.json'), async () => {
-    const before = await readFile(path, 'utf8')
-    const document = parseDocument(before, { customTags: [YAML_JS_TAG] })
-    if (document.errors[0] !== undefined) throw document.errors[0]
-    let changed = false
-    if (op.op === 'add') {
-      const transport = op.transport === '' ? 'streamable-http' : op.transport
-      const config = { serverName: op.serverName, transport }
-      if (transport === 'stdio') {
-        config.command = op.command === '' ? 'npx' : op.command
-        config.args = splitArgs(op.args)
-        config.env = spawnEnv(parseEnv(op.env))
-      } else {
-        config.url = op.url
-        const headers = parseEnv(op.headers)
-        if (Object.keys(headers).length > 0) config.headers = headers
-      }
-      changed = insertRow(document, op.entryId !== '' ? op.entryId : `mcp-${op.serverName}`, config)
-    } else if (op.op === 'toggle') {
-      changed = setRowDisabled(document, op.entryId, op.enabled === false)
-    } else if (op.op === 'delete') {
-      changed = removeRow(document, op.entryId)
-    } else {
-      const fields = {}
-      if (op.serverName !== '') fields.serverName = op.serverName
-      if (op.transport !== '') fields.transport = op.transport
-      if (op.transport === 'stdio') {
-        fields.command = op.command
-        fields.args = splitArgs(op.args)
-        fields.url = null
-        if (op.env !== '') fields.env = spawnEnv(parseEnv(op.env))
-      } else {
-        fields.url = op.url
-        fields.command = null
-        fields.args = null
-        if (op.headers !== '') fields.headers = parseEnv(op.headers)
-      }
-      for (const [field, value] of Object.entries(fields)) {
-        changed = setRowConfigField(document, op.entryId, field, value) || changed
-      }
-    }
-    if (!changed) throw new Error(`row "${op.entryId}" not found in the profile patch`)
-    const after = document.toString()
-    parseDocument(after, { customTags: [YAML_JS_TAG] })   // gate: never write invalid YAML
-    await backupPatch(before)
-    await writeFileAtomic(path, after, {})
-    ctx.logger.info('skills-mcp-panel: %s profile row %s', op.op, op.entryId)
-    return true
-  })
-}
 
 /** Workspaces the registry knows, reduced to what the project picker needs. */
 function configuredWorkspaces(ctx) {
