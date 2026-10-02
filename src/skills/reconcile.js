@@ -4,7 +4,7 @@
  * (project), and removes directories that are no longer configured.
  */
 import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { dshHome } from '../runtime/env.js'
 

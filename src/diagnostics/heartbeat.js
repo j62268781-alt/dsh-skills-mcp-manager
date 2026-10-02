@@ -12,8 +12,8 @@ export async function beat(payload) {
   try {
     await mkdir(dirname(beatFile()), { recursive: true })
     await writeFile(beatFile(), `${JSON.stringify(payload, null, 2)}\n`)
-  } catch {
-    // diagnostics never break the plugin
+  } catch (error) {
+    if (process.env.SMP_DEBUG) console.error(`[skills-mcp-panel] %s`, error)
   }
 }
 

@@ -19,5 +19,5 @@ test('beat：写入可解析的 JSON，保留我们关心的字段', async () =>
   assert.equal(parsed.tick, 7)
   assert.equal(parsed.rowOps.applied, 2)
   assert.equal(parsed.mounted, 3)
-  assert.ok(typeof parsed.lastBeat === 'object' && parsed.lastBeat !== null, '应带有合并用的 lastBeat')
+  assert.equal(parsed.at, '2026-10-02T00:00:00.000Z')
 })

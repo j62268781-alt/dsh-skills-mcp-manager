@@ -7,7 +7,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 /**
  * Where `$DSH_HOME` lives. Defaults to `$DSH_HOME` or `~/.dsh`; the plugin entry
