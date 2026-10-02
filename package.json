@@ -24,10 +24,12 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "npm run build:host && npm run build:client",
+    "build:host": "tsc -p tsconfig.json",
+    "build:client": "node esbuild.config.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "check": "node --check src/index.js && node --check lib/client.js",
-    "test": "node test-import-sources.mjs",
+    "test": "node --test test/",
     "verify": "node verify-served.mjs"
   },
   "peerDependencies": {
@@ -60,5 +62,9 @@
     "README.md",
     "LICENSE",
     "CHANGELOG.md"
-  ]
+  ],
+  "devDependencies": {
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.3"
+  }
 }
