@@ -394,10 +394,10 @@ export function apply(ctx, config) {
   const rowOps = { pending: 0, applied: 0, error: null }
   /** Latest disk-skill scan, refreshed on a timer (the scan itself is async). */
   let discoveredSkills = []
-  const refreshDiscovered = async (projectRoot) => {
+  const refreshDiscovered = async (projectRoots) => {
     try {
       discoveredSkills = await discoverSkills({
-        projectRoots: projectRoot === '' ? [] : [projectRoot],
+        projectRoots: projectRoots.slice(0, 12),
         dshHome: resolveDshHome(),
         agentsHome: process.env.DSH_AGENTS_HOME ?? join(homedir(), '.agents'),
       })
@@ -413,10 +413,22 @@ export function apply(ctx, config) {
     const storedSpaces = config?.workspaces?.get?.() ?? config?.workspaces
     let published = JSON.stringify([Array.isArray(stored) ? stored : [], Array.isArray(storedSpaces) ? storedSpaces : []])
     inner.effect(() => {
-      const timer = setInterval(() => {
-        const cwd = [...agents.values()].map((entry) => entry.cwd).find((value) => typeof value === 'string' && value !== '') ?? ''
-        void refreshDiscovered(cwd === '' ? '' : projectRootOf(cwd))
-      }, 5000)
+      const scan = () => {
+        const roots = []
+        const add = (dir) => {
+          if (typeof dir !== 'string' || dir === '') return
+          const root = projectRootOf(dir)
+          if (!roots.includes(root)) roots.push(root)
+        }
+        for (const entry of agents.values()) add(entry.cwd)
+        for (const workspace of configuredWorkspaces(ctx)) {
+          // configuredWorkspaces returns { path, title } objects
+          add(typeof workspace === "string" ? workspace : workspace?.path)
+        }
+        void refreshDiscovered(roots)
+      }
+      scan()
+      const timer = setInterval(scan, 5000)
       return () => clearInterval(timer)
     })
 
