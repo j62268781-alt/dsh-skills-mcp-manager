@@ -392,6 +392,18 @@ args:    [<DSH_HOME>/mcp-runtime/<name>/node_modules/<pkg>/<bin>.js]
 
 ---
 
+> **克隆后先构建**：仓库只提交源码 —— `dist/`（Host 半，tsc 产物）与 `lib/client.js`（Client 半，
+> esbuild 单文件产物）都在 `.gitignore` 里。因此别人拿到仓库后先跑一次：
+>
+> ```bash
+> npm install
+> npm run build      # dist/ + lib/client.js
+> npm run deploy     # 会自动先构建（predeploy），再拷贝进 desktop profile（旧版自动备份）
+> ```
+>
+> `npm run gate`（构建 + 测试 + 预览基线）本身也会构建，所以开发时不必手动 build。
+
+
 ## 工程结构（重构后）
 
 插件按 `create-dsh-plugin` 的 `panel` 模板组织：Host 半在 `src/`（tsc → `dist/`），

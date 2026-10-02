@@ -1,3 +1,7 @@
 node_modules/
 .DS_Store
 *.log
+# 构建产物（由 npm run build 生成，可从源码再生）
+dist/
+lib/client.js
+*.tsbuildinfo
