@@ -388,3 +388,19 @@ args:    [<DSH_HOME>/mcp-runtime/<name>/node_modules/<pkg>/<bin>.js]
 - 面板只显示“自己管理的条目”；磁盘上由其它工具放进来的 skill 不会列在这里（模型侧照常可见）。
 - 项目级 MCP 的挂载在 v1.1；当前会保存配置但不生效。
 - 安装/卸载走 profile，第三方 Host 代码在 harness 进程内运行。
+
+
+---
+
+## 工程结构（重构后）
+
+插件按 `create-dsh-plugin` 的 `panel` 模板组织：Host 半在 `src/`（tsc → `dist/`），
+Client 半在 `lib/src/`（esbuild → 单文件 `lib/client.js`），测试在 `test/` 按接口拆分。
+
+```bash
+npm test        # 80 项接口测试（node --test test/）
+npm run build   # Host(tsc) + Client(esbuild)
+npm run deploy  # 安装进 desktop profile（旧版自动备份）
+```
+
+模块职责与本次修复的静默失败清单见 `CHANGELOG.md` 的 0.3.0 一节。
