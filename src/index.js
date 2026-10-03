@@ -577,6 +577,10 @@ export function apply(ctx, config) {
         })
         .finally(() => {
           rowOps.pending = 0
+          // Row ops change the profile; recompute and publish at once instead of
+          // waiting for the 2s tick plus the 5s publish timer (that pair made the first
+          // create look slow while the write itself had long finished).
+          try { tick(); publish() } catch (error) { console.error('[skills-mcp-panel] post-drain refresh failed:', error) }
           applying = false
           beat({ ...lastBeat, at: new Date().toISOString(), rowOps })
           // The Loader hot-reloads the patch a moment after the write; republish
