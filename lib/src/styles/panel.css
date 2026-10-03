@@ -181,3 +181,15 @@ div[role='dialog']:has(.smp-skillDialogBody),
 .smp-cardIdentity .smp-tag {
   margin-left: 6px;
 }
+
+/* Temporary timing probe (removed once the refresh lag is pinned). */
+.smp-probe {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border: 1px dashed rgba(127, 127, 127, 0.45);
+  border-radius: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  opacity: 0.85;
+}
