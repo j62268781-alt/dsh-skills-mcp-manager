@@ -654,10 +654,18 @@ export function apply(ctx, config) {
                 dir: target.dir, name: String(skillReq?.name ?? ''),
                 description: String(skillReq?.description ?? ''), body: String(skillReq?.body ?? ''),
               }
-              const done = op === 'create' ? await createSkill(payload)
-                : op === 'rename' ? await renameSkill({ ...payload, from: String(skillReq?.prevName ?? ''), to: String(skillReq?.name ?? '') })
-                  : op === 'delete' ? await deleteSkill(payload)
-                    : await updateSkill(payload)
+              // A disk op that throws (a failing copy, a permission error) must
+              // still produce an answer: without a receipt the panel's card kept
+              // spinning on 「删除中…」 forever.
+              let done
+              try {
+                done = op === 'create' ? await createSkill(payload)
+                  : op === 'rename' ? await renameSkill({ ...payload, from: String(skillReq?.prevName ?? ''), to: String(skillReq?.name ?? '') })
+                    : op === 'delete' ? await deleteSkill(payload)
+                      : await updateSkill(payload)
+              } catch (error) {
+                done = { ok: false, reason: String(error?.message ?? error) }
+              }
               result = { ok: done.ok === true, reason: String(done.reason ?? ''), name: String(done.name ?? ''), body: '', nonce: skillNonce , at: new Date().toISOString() }
             }
             // A skill op must never throw out of here: an exception used to escape

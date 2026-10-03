@@ -29,6 +29,19 @@ if (!combo) {
 }
 console.log('✓ boot 数据包含本插件（combo', combo.length, '字符）')
 const text = await (await fetch(`http://${authority}/${combo}`, { headers: { cookie } })).text()
-const checks = ['.smp-page', 'data-variant=outline', 'settings.section', '.smp-tag', '添加服务器']
-for (const needle of checks) console.log(`  ${text.includes(needle) ? '✓' : '✗'} ${needle}`)
-process.exit(checks.every((needle) => text.includes(needle)) ? 0 : 1)
+// esbuild emits ASCII-only output, so every Chinese string arrives as `\uXXXX`.
+// Searching the raw body made non-ASCII needles fail even on a correct bundle.
+const decoded = text.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+const checks = [
+  '.smp-page',
+  'data-variant=outline',
+  'settings.section',
+  '.smp-tag',
+  '添加服务器',
+  // The delete-flow fix: a receipt-less delete must not spin forever, and the
+  // delete status must be a plain status rather than the danger button.
+  '删除没有回执',
+  'smp-pending',
+]
+for (const needle of checks) console.log(`  ${decoded.includes(needle) ? '✓' : '✗'} ${needle}`)
+process.exit(checks.every((needle) => decoded.includes(needle)) ? 0 : 1)
