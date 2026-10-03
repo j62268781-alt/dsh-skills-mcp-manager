@@ -35,6 +35,7 @@ export function skillDialogView({
         </>
       }
     >
+      <div className="smp-skillDialogBody" key="body">
       <div className="smp-formGrid" key="grid">
         {field('区域', (
           <select
@@ -60,6 +61,7 @@ export function skillDialogView({
         ), true)}
       </div>
       {error !== '' ? <div className="smp-error" key="err" style={{ marginTop: 8 }}>{error}</div> : null}
+      </div>
     </Modal>
   )
 }

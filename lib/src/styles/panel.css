@@ -91,6 +91,17 @@
   text-overflow: ellipsis;
 }
 
+/* The skill dialog body already lands on the description's box (274→1166) once
+   the dialog is widened, so it needs no side padding — adding one only squeezed
+   the form fields 48px narrower than the header text. */
+.smp-skillDialogBody {
+  width: auto;
+  max-width: 100%;
+  min-width: 0;
+  padding: 6px 0 10px;
+  box-sizing: border-box;
+}
+
 /* Skill preview.
    The official modal must be widened itself — forcing a min-width on the inner
    wrapper just clipped the text against the modal's own overflow. `:has()` lets
@@ -98,7 +109,11 @@
 div:has(> .smp-previewWrap),
 div[role='dialog']:has(.smp-previewWrap),
 [class*='modal']:has(.smp-previewWrap),
-[class*='Modal']:has(.smp-previewWrap) {
+[class*='Modal']:has(.smp-previewWrap),
+/* Add/edit skill dialog: same width as the preview. */
+div[role='dialog']:has(.smp-skillDialogBody),
+[class*='modal']:has(.smp-skillDialogBody),
+[class*='Modal']:has(.smp-skillDialogBody) {
   width: min(940px, 92vw) !important;
   max-width: 92vw !important;
 }
