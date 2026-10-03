@@ -527,4 +527,28 @@ function sanitizeProfile(binName, profileDir, bundles) {
 4. 检查是否残留会重放的一次性请求：`grep -n "nonce" cordis.patch.yml`，把 `skills-mcp-panel` 段落里的
    `skillRequest` 的 `nonce` 清成 `""`（否则重启会重放同一条请求）
 5. 本插件自己的写前备份在 `~/.dsh/skills-mcp-panel.backups/cordis.patch.yml.<ISO 时间戳>.bak`
+### 部署闸门（2026-10-03 新增）
 
+`npm run deploy` 在**拷贝之前**先执行一次 `scripts/host-smoke.mjs`（真实加载 + 三通道请求）。
+冒烟不通过就打印「已中止部署，profile 未被改动」并以退出码 1 结束 —— **绝不会把一个装上去就崩的
+版本拷进 profile**。通过后才走原有的"旧版本备份 + 拷贝"流程。
+
+验证方式（含对照，可复现）：
+
+```bash
+# ① 坏构建必须被拦下，且 profile 一字未改
+printf '\nthrow new Error("boom")\n' >> src/index.js
+mkdir -p /tmp/smp-fake-profile
+DSH_PROFILE_DIR=/tmp/smp-fake-profile node scripts/deploy.mjs   # 期望：退出码 1 + 「已中止部署」
+ls /tmp/smp-fake-profile/node_modules/@local/dsh-skills-mcp-panel # 期望：不存在
+git checkout -- src/index.js
+
+# ② 正常构建应成功
+DSH_PROFILE_DIR=/tmp/smp-fake-profile node scripts/deploy.mjs   # 期望：退出码 0 + dist/index.js 就位
+rm -rf /tmp/smp-fake-profile
+```
+
+顺带核清一条部署环境事实：**profile 的 `node_modules` 里既没有 `yaml` 也没有 `@deepseek-ai/*`**
+（`@deepseek-ai` 目录下 0 个包）。插件能加载，是因为 DSH 用自带的 in-memory 解析
+（`@deepseek-ai/dsh-app-boot/profile-resolution`）把 `@deepseek-ai/*` 路由到 app 内部。
+所以**不要**尝试"部署后就地加载已部署目录"来自检（必然误报），只能在 staging 里验 —— 也就是 smoke 的做法。
