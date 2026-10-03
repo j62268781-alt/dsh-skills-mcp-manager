@@ -92,3 +92,9 @@
   line-height: 1.55;
   color: var(--dsh-text-secondary, inherit);
 }
+
+/* Skill source tag sits next to the name: give it the same breathing room the
+   MCP rows' "配置文件" tag has in smp-cardEnd. */
+.smp-cardIdentity .smp-tag {
+  margin-left: 6px;
+}
