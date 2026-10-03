@@ -159,6 +159,19 @@ try {
   // an empty list, so the smoke must prove the channel actually publishes.
   const discovered = Array.isArray(live.discoveredSkills) ? live.discoveredSkills : []
   note(discovered.some((skill) => skill.name === 'smoke-discovered'), '磁盘技能发现通道发布了 staged 技能')
+  // The list must stay small: bodies are fetched on demand, never published here.
+  note(discovered.every((skill) => skill.body === undefined), '列表不夹带正文（体积不会随技能数膨胀）')
+
+  // Channel 5: on-demand body read. The preview asks for the file by path and the
+  // Host verifies that path came from the latest scan before reading it.
+  const target = discovered.find((skill) => skill.name === 'smoke-discovered')
+  const readNonce = String(Date.now())
+  live.skillRequest = { op: 'read', scope: '', id: '', project: '', path: target?.path ?? '', name: '', prevName: '', description: '', body: '', nonce: readNonce }
+  await new Promise((resolve) => setTimeout(resolve, 250))
+  const readResult = live.skillResult ?? {}
+  note(readResult.nonce === readNonce && readResult.ok === true, 'read 通道回执成功（按需读取正文）')
+  note(typeof readResult.body === 'string' && readResult.body.includes('发现'), 'read 通道返回了正文内容')
+  note(live.skillRequest?.nonce === '', 'read 处理完清空了请求（防重放）')
   note(typeof live.discoveryInfo?.at === 'string' && live.discoveryInfo.at !== '', 'discoveryInfo 记录了扫描时间（诊断通道可用）')
 } catch (error) {
   note(false, '冒烟脚本自身出错：' + error.message)
@@ -173,5 +186,5 @@ if (problems.length > 0) {
   console.log('  ✗ Host 冒烟失败：' + problems.join(' | '))
   process.exit(1)
 }
-console.log('  ✓ Host 冒烟通过：加载 / skillRequest / importRequest / rowOps 排空 / 磁盘技能发现 全部正常')
+console.log('  ✓ Host 冒烟通过：加载 / skillRequest / importRequest / rowOps 排空 / 磁盘技能发现 / 按需读正文 全部正常')
 process.exit(0)

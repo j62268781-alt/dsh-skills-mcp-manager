@@ -4,7 +4,7 @@
  *
  * No footer button: the modal already carries a close control in its header.
  */
-export function skillPreviewDialog({ skill, primitives, onClose }) {
+export function skillPreviewDialog({ skill, body = '', pending = false, primitives, onClose }) {
   if (skill === null || skill === undefined) return null
   const Modal = primitives?.Modal
   if (Modal === undefined) return null
@@ -27,7 +27,9 @@ export function skillPreviewDialog({ skill, primitives, onClose }) {
       <div className="smp-previewWrap" key="wrap">
         {/* A <div> with pre-wrap, not <pre>: <pre> refuses to shrink below its
             longest unbreakable run, which pushed lines past the right padding. */}
-        <div className="smp-preview" key="body">{skill.body ?? ''}</div>
+        <div className="smp-preview" key="body">
+          {pending ? '读取中…' : (body !== '' ? body : (skill.body ?? ''))}
+        </div>
       </div>
     </Modal>
   )

@@ -43,8 +43,8 @@ export function parseFrontmatter(markdown) {
   }
 }
 
-/** Bytes of SKILL.md body we publish for the preview dialog. */
-const BODY_LIMIT = 4000
+/** Bytes of SKILL.md body returned on demand for the preview dialog. */
+const BODY_LIMIT = 20000
 
 /** The markdown body without the frontmatter block, capped for the projection. */
 export function bodyOf(markdown) {
@@ -61,7 +61,6 @@ async function readSkillFile(file, name, base) {
     name: typeof meta.name === 'string' && meta.name !== '' ? meta.name : name,
     description: typeof meta.description === 'string' ? meta.description : '',
     path: file,
-    body: bodyOf(text),
     source: base.source,
     scope: base.scope,
   }

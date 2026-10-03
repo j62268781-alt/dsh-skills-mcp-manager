@@ -31,7 +31,7 @@ import { IMPORT_SOURCES, adaptImportedEntry, envLines, headerLines, importFilePa
 import { scanImportSource } from './import/scan.js'
 import { beat, beatFile } from './diagnostics/heartbeat.js'
 import { projectRootOf, reconcileSkills, scopeRoot } from './skills/reconcile.js'
-import { discoverSkills } from './skills/discover.js'
+import { bodyOf, discoverSkills } from './skills/discover.js'
 import { createSkill, deleteSkill, renameSkill, updateSkill, writableRoots } from './skills/write.js'
 import { mountedKeyOf, projectServersFor, serverMountConfig, setMountClient, workingDirectoryOf } from './project/mount.js'
 
@@ -130,6 +130,8 @@ export const Config = z.object({
     /** `global` reads the tool's user-level file, `project` the selected workspace. */
     scope: z.string().default('project'),
     project: z.string().default(''),
+    /** For `op: 'read'`: the SKILL.md path, which must be in the current scan. */
+    path: z.string().default(''),
     nonce: z.string().default(''),
   }).default({}).volatile(),
   /** The scan answer for the latest request. */
@@ -149,6 +151,8 @@ export const Config = z.object({
     ok: z.boolean().default(false),
     reason: z.string().default(''),
     name: z.string().default(''),
+    /** Body text, only for the on-demand `read` op (never stored in the list). */
+    body: z.string().default(''),
     nonce: z.string().default(''),
   }).default({}).volatile(),
   importResult: z.object({
@@ -596,8 +600,22 @@ export function apply(ctx, config) {
           void (async () => {
            try {
             let result
-            if (target === undefined) {
-              result = { ok: false, reason: '未知的写入区域', name: '', nonce: skillNonce }
+            if (op === 'read') {
+              // Only ever read a file the latest scan actually found.
+              const wanted = String(skillReq?.path ?? '')
+              const known = Array.isArray(discoveredSkills) && discoveredSkills.some((entry) => entry.path === wanted)
+              if (!known) {
+                result = { ok: false, reason: '该技能不在当前扫描结果里', name: '', body: '', nonce: skillNonce }
+              } else {
+                try {
+                  const text = await readFile(wanted, 'utf8')
+                  result = { ok: true, reason: '', name: '', body: bodyOf(text), nonce: skillNonce }
+                } catch (error) {
+                  result = { ok: false, reason: String(error?.message ?? error), name: '', body: '', nonce: skillNonce }
+                }
+              }
+            } else if (target === undefined) {
+              result = { ok: false, reason: '未知的写入区域', name: '', body: '', nonce: skillNonce }
             } else {
               const payload = {
                 dir: target.dir, name: String(skillReq?.name ?? ''),
@@ -607,7 +625,7 @@ export function apply(ctx, config) {
                 : op === 'rename' ? await renameSkill({ ...payload, from: String(skillReq?.prevName ?? ''), to: String(skillReq?.name ?? '') })
                   : op === 'delete' ? await deleteSkill(payload)
                     : await updateSkill(payload)
-              result = { ok: done.ok === true, reason: String(done.reason ?? ''), name: String(done.name ?? ''), nonce: skillNonce }
+              result = { ok: done.ok === true, reason: String(done.reason ?? ''), name: String(done.name ?? ''), body: '', nonce: skillNonce }
             }
             // A skill op must never throw out of here: an exception used to escape
             // the plugin load and DSH exited with "fatal load failure", taking the
@@ -616,7 +634,7 @@ export function apply(ctx, config) {
               await Promise.resolve(inner.settings.update('skills-mcp-panel', {
                 skillResult: result,
                 // Clear the request in the same write so a restart cannot replay it.
-                skillRequest: { op: '', scope: '', id: '', project: '', name: '', prevName: '', description: '', body: '', nonce: '' },
+                skillRequest: { op: '', scope: '', id: '', project: '', path: '', name: '', prevName: '', description: '', body: '', nonce: '' },
               }))
               await refreshDiscovered(roots.map((entry) => projectRootOf(entry.dir)))
             } catch (error) {
