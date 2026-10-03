@@ -6,8 +6,7 @@
  * mount config shapes can be unit-tested without the app runtime.
  */
 import { join } from 'node:path'
-import { bundledRuntime, parseEnv, resolveCommand } from '../runtime/env.js'
-import { loginPath } from '../runtime/env.js'
+import { bundledRuntime, commandEnv, loginPath, parseEnv, resolveCommand } from '../runtime/env.js'
 
 /** The host MCP client (name + scope mount entry points). */
 let client = { name: '@deepseek-ai/dsh-mcp-client' }

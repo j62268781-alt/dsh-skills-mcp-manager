@@ -32,10 +32,11 @@
     "test": "node --import ./scripts/jsx-register.mjs --test test/",
     "verify": "node verify-served.mjs",
     "deploy": "node scripts/deploy.mjs",
-    "gate": "npm run build:client && npm test && npm run smoke && node scripts/preview-check.mjs",
+    "gate": "npm run check:names && npm run build:client && npm test && npm run smoke && node scripts/preview-check.mjs",
     "preview": "node scripts/preview-check.mjs",
     "predeploy": "npm run build",
-    "smoke": "node scripts/host-smoke.mjs"
+    "smoke": "node scripts/host-smoke.mjs",
+    "check:names": "node scripts/undefined-check.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-mcp-client": "*",
