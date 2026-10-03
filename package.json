@@ -51,7 +51,7 @@
     "build:client": "node esbuild.config.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "check": "node --check src/index.js && node --check lib/client.js",
-    "test": "node --import ./scripts/jsx-register.mjs --test test/",
+    "test": "node --import ./scripts/jsx-register.mjs --test",
     "verify": "node verify-served.mjs",
     "deploy": "node scripts/deploy.mjs",
     "gate": "npm run check:names && npm run build:client && npm test && npm run smoke && node scripts/preview-check.mjs",

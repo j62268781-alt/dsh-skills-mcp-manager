@@ -219,6 +219,12 @@ test('客户端删除流程：删除中不出现按钮边框，回执到达后�
     runtime.render()
     assert.ok(find((node) => textOf(node).includes('test-skills') && String(node.props.className ?? '').includes('smp-card')), '创建后没有出现卡片')
 
+    // 创建的回执已经被消费掉了，换成一条不会匹配任何 nonce 的惰性回执（at 为空，
+    // 连「新鲜回执」的兜底匹配也不会命中）。否则创建与删除落在同一毫秒时，
+    // nonce 会撞车、上一次的回执被当成删除的回执，删除中的状态就一闪而过了。
+    doc.skillResult = { ok: false, reason: '', name: '', body: '', at: '', nonce: 'consumed' }
+    runtime.render()
+
     // 2) Delete it: while in flight the card must show a plain status, not a button.
     click(find((node) => String(node.props.className ?? '').includes('smp-button')
       && String(node.props['data-variant']) === 'danger' && textOf(node).trim() === '删除'))

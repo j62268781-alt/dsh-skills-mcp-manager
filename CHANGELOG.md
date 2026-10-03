@@ -21,6 +21,11 @@
 - **CI 发布**：新增 `.github/workflows/publish.yml` —— 发布 GitHub Release（tag `v<版本>`）即自动
   核对版本 → 构建 → 跑门禁 → 发包到 npm；优先走 npm 可信发布（OIDC，无需 secret），
   没配 Trusted Publisher 时回退到 `NPM_TOKEN`；支持手动触发与 `dry_run` 演练
+- 修复：请求 nonce 从 `String(Date.now())` 改为 `时间戳36进制-序号`。同一毫秒内发出的两次
+  操作会生成同一个 nonce，于是「上一次的回执」被当成这一次的回执（删除/保存的转圈一闪而过）；
+  客户端集成测试在 Node 18 上偶发复现
+- 修复：`npm test` 不再把目录当参数传给 `node --test`（Node 24 会报
+  `ERR_UNSUPPORTED_DIR_IMPORT`），改用 test runner 的默认发现，18/20/22/24/26 都一致
 - 设置命名空间仍是 `skills-mcp-panel`：**已有配置不迁移、不丢**（它只与行 id 有关，与包名无关）
 
 ## 0.3.2 — README 重写为面向用户的插件说明（含两张面板截图）+ 三处小修
