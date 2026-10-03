@@ -80,24 +80,63 @@
 .smp-actionsRow{display:flex;align-items:center;gap:8px;margin-top:10px}
 .smp-error{color:var(--dsw-alias-state-error-primary,var(--dsw-alias-label-primary));font-size:12px;line-height:18px}
 
-/* Skill preview: the official modal sizes to its content, so the wrapper sets a
-   comfortable reading width and the body gets padding + a soft surface. */
+/* Card description (the subtitle under a title): always exactly two lines at
+   most, with an ellipsis — long skill descriptions used to push the layout. */
+.smp-cardDescription {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
+}
+
+/* Skill preview.
+   The official modal must be widened itself — forcing a min-width on the inner
+   wrapper just clipped the text against the modal's own overflow. `:has()` lets
+   us reach the dialog that contains the preview. */
+div:has(> .smp-previewWrap),
+div[role='dialog']:has(.smp-previewWrap),
+[class*='modal']:has(.smp-previewWrap),
+[class*='Modal']:has(.smp-previewWrap) {
+  width: min(940px, 92vw) !important;
+  max-width: 92vw !important;
+}
+
 .smp-previewWrap {
-  min-width: min(860px, 76vw);
-  max-width: 920px;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   padding: 2px 2px 6px;
 }
 
-/* Skill preview body: plain text on purpose (no markdown renderer in the panel). */
+/* Description + file path: the path is long, so it gets its own wrapped line. */
+.smp-previewMeta { display: block; }
+.smp-previewDesc { margin-bottom: 6px; overflow-wrap: anywhere; }
+.smp-previewPath {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  opacity: 0.75;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
 .smp-preview {
   margin: 0;
   padding: 14px 16px;
   background: var(--dsh-bg-secondary, rgba(127, 127, 127, 0.07));
   border-radius: 10px;
   max-height: 62vh;
-  overflow: auto;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  /* Wrap instead of rendering past the edge; vertical scroll only. */
+  overflow-x: hidden;
+  overflow-y: auto;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
   word-break: break-word;
+  min-width: 0;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 13px;
   line-height: 1.65;

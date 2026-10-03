@@ -22,8 +22,10 @@ test('skillPreviewDialog：标题带 agents|dsh tag，描述含描述与文件�
   const node = skillPreviewDialog({ skill, primitives, onClose() {} })
   assert.equal(node.props.title, 'dart-add-unit-test（agents）')
   assert.equal(node.props.closeLabel, '关闭')
-  assert.match(node.props.description, /为 Dart 加单测/)
-  assert.match(node.props.description, /SKILL\.md/)
+  assert.equal(node.props.footer, undefined, '不应再有底部关闭按钮（右上角已有）')
+  const metaText = JSON.stringify(node.props.description)
+  assert.match(metaText, /为 Dart 加单测/, '描述应出现在 description 节点里')
+  assert.match(metaText, /SKILL\.md/, '文件路径应出现在 description 节点里（独立一行、可换行）')
   assert.equal(typeof node.props.onClose, 'function')
 })
 
