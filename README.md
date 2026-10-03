@@ -6,10 +6,8 @@
 
 [![DSH](https://img.shields.io/badge/DSH-0.2.0--rc.2%20实测-4c6ef5)](#)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![tests](https://img.shields.io/badge/npm%20test-140%20passed-2ea043)](#开发与自测)
+[![tests](https://img.shields.io/badge/npm%20test-140%20passed-2ea043)](#)
 [![runtime deps](https://img.shields.io/badge/运行时依赖-0-8a8f99)](#工作原理)
-
-开发手记（真机验证记录 / 事故复盘 / 踩坑清单）→ [`docs/ENGINEERING.md`](docs/ENGINEERING.md)
 
 </div>
 
@@ -21,10 +19,10 @@ DSH 插件：把 **Skills** 与 **MCP** 的管理搬进 **设置 → Skills & MC
 - 🔌 **MCP**：全局条目就是 profile `cordis.patch.yml` 里的**真实 Loader 行**（和内置的 context7 那几行完全同构），增删改停写回配置文件；项目级条目只挂到该项目里运行的 agent
 - 📥 **MCP 导入**：一键扫描 Claude Code / Cursor / VS Code / Gemini / Codex 等 **26 个来源**的用户级或项目级配置，预览后导入
 - ↩️ **两级分明**：同一个页面里切换「全局」和「项目」，项目选择器带工作区补全
-- 🧯 **不炸宿主**：插件里绝不把异常抛出去（否则 DSH 会隔离整个 profile 配置），并有加载冒烟与部署闸门把关
+- 🧯 **不动坏你的配置**：插件里绝不把异常抛出去（DSH 会因此隔离整个 profile 配置），写 `cordis.patch.yml` 前自动备份、写前重新校验
 - 📦 **零运行时依赖**：`react` / `yaml` 都用宿主已有的那份，插件本体不带第三方运行时依赖
 
-**目录**：[界面预览](#界面预览) · [安装](#安装) · [使用](#使用) · [工作原理](#工作原理) · [开发与自测](#开发与自测) · [诊断与恢复](#诊断与恢复) · [已知边界](#已知边界) · [发布](#发布) · [License](#license)
+**目录**：[界面预览](#界面预览) · [安装](#安装) · [使用](#使用) · [工作原理](#工作原理) · [已知边界](#已知边界) · [更多文档](#更多文档) · [License](#license)
 
 ## 界面预览
 
@@ -33,12 +31,12 @@ DSH 插件：把 **Skills** 与 **MCP** 的管理搬进 **设置 → Skills & MC
 > 重新生成：`node scripts/screenshots.mjs`。
 
 <p align="center">
-  <img src="docs/images/mcp-panel.png" width="1000" alt="MCP 面板：全局配置文件行、项目级条目、导入与搜索">
+  <img src="https://raw.githubusercontent.com/j62268781-alt/dsh-skills-mcp-manager/HEAD/docs/images/mcp-panel.png" width="1000" alt="MCP 面板：全局配置文件行、项目级条目、导入与搜索">
   <br><sub>MCP 面板 · 全局（配置文件行 + 停用/编辑/删除）· 项目级 · 导入 MCP</sub>
 </p>
 
 <p align="center">
-  <img src="docs/images/skills-panel.png" width="1000" alt="技能面板：全局技能与项目级技能，预览/编辑/删除">
+  <img src="https://raw.githubusercontent.com/j62268781-alt/dsh-skills-mcp-manager/HEAD/docs/images/skills-panel.png" width="1000" alt="技能面板：全局技能与项目级技能，预览/编辑/删除">
   <br><sub>技能面板 · 全局技能 / 项目级技能 · 预览 / 编辑 / 删除</sub>
 </p>
 
@@ -90,8 +88,6 @@ npm run deploy     # 拷贝进 profile；部署前先跑加载冒烟，失败则
 // $DSH_HOME/profiles/desktop/package.json
 { "dsh": { "profile": { "bundles": [ /* … */ "dsh-skills-mcp-manager" ] } } }
 ```
-
-发布者请看 [`docs/PUBLISHING.md`](docs/PUBLISHING.md)（npm 发包 + 上架插件市场）。
 
 ## 使用
 
@@ -145,41 +141,7 @@ cordis.patch.yml                                   声明插件行（本包自�
 
 **全局 MCP**：对 `cordis.patch.yml` 的写入照抄官方 config-editor 的做法——同一把文件锁、原子写、写前重新 `parseDocument` 校验、每次改写前自动备份，块外的用户内容逐字节保留（注释、`!!js` 表达式都不会被写坏）。
 
-**安全边界**：DSH 的 `sanitizeProfile` 会在**插件加载或通道处理抛出未捕获异常**时，把用户整份 `cordis.patch.yml` 改名隔离并禁用其它插件。所以本插件的通道处理体一律双层 `try/catch`，并在部署前用真实加载冒烟把关。
-
-**客户端约束**：DSH 把 client bundle 当经典脚本求值（官方产物 0 个顶层 `import`），因此 JSX 走全局工厂 `__dshReact.createElement`，由入口 `globalThis.__dshReact = require('react')` 注入。
-
-## 开发与自测
-
-```bash
-npm test            # 140 项接口测试（node --test test/）
-npm run build       # Host(tsc) + Client(esbuild)
-npm run check:names # 未定义名字检查（tsc --checkJs，含客户端 TDZ 类错误）
-npm run smoke       # 按 DSH 的形状真实加载插件，灌入三个通道的请求
-npm run gate        # check:names → build:client → test → smoke → 离线预览基线
-npm run deploy      # 部署（部署前自动跑 smoke；失败即中止，profile 不动）
-npm run verify      # 校验运行中的 app 正在服务当前的 client bundle
-node scripts/screenshots.mjs   # 重新生成 README 的两张截图
-```
-
-- **`npm run smoke`** 是部署闸门：按 DSH 的方式加载 `dist/index.js`，依次灌入 `skillRequest` / `importRequest` / 一条无法应用的 `rowOps`，断言「无异常逃逸、有回执、请求被清空、文件真的落盘、删除后列表同轮更新」
-- **`npm run gate`** 的最后一步用离线预览页 + headless Chrome 比对 UI 基线；缺 `/tmp/preview` 夹具或 Chrome 时会**跳过**，不会假失败
-- 客户端改动只有 esbuild 能兜住语法，所以改完 `lib/src/**` 一定跑一次 `npm run build:client`
-
-## 诊断与恢复
-
-| 文件 | 用途 |
-|---|---|
-| `$DSH_HOME/skills-mcp-panel.heartbeat.json` | 每次状态变化写一份：观测到的 servers/skills、挂载数、是否根 scope、上次对账的增删结果、最后一次技能操作的回执 |
-| `$DSH_HOME/skills-mcp-panel.state.json` | 插件写出的技能文件清单（据此回收） |
-| `$DSH_HOME/skills-mcp-panel.backups/` | 每次改写 `cordis.patch.yml` 前的自动备份 |
-| 面板 URL 加 `?smp=debug` | 多出一个「Loader 诊断」分组，列出 Loader 里所有 mcp 相关行 |
-
-两个 `.json` 随时可删，会自动重建。
-
-**如果 profile 被隔离**（症状：模型列表消失、插件被禁用）：数据没丢，原始文件在
-`$DSH_HOME/profiles/<profile>/cordis.patch.yml.bak-<毫秒>`。恢复步骤（含「清掉会重放的一次性请求」这一步）
-写在 [`docs/ENGINEERING.md`](docs/ENGINEERING.md) 的「恢复手册」一节。
+**安全边界**：DSH 的 `sanitizeProfile` 会在**插件加载或通道处理抛出未捕获异常**时，把用户整份 `cordis.patch.yml` 改名隔离并禁用其它插件。所以本插件的每个通道处理都包了双层 `try/catch`：宁可回一条失败原因，也不让异常逃出去。
 
 ## 已知边界
 
@@ -187,21 +149,16 @@ node scripts/screenshots.mjs   # 重新生成 README 的两张截图
 - **项目级 MCP 对 subagent 不可见**：subagent 只继承 root 作用域；需要所有 agent 都用就配成全局
 - **stdio MCP 首次启动要等**：`npx` 首次下载包约 1–2 分钟，这期间挂载已建立但工具还没注册
 - `command: npx` 走**用户自己的 npm 缓存**；`~/.npm` 里若有 root 所有的文件会 `EACCES`，一次性修复：`sudo chown -R $(whoami):staff ~/.npm`
-- 改 Host 半的代码必须**重启 DSH**（模块被缓存）；Client 半改完刷新页面即可
-- 第三方 bundle 用的是官方 settings 通道，不是自定义 remote 命名空间
+- 装/更新之后：Client 半刷新页面即可，Host 半的改动需要重启 DSH（安装器与市场都会提示）
 
-## 发布
+## 更多文档
 
-维护者流程见 [`docs/PUBLISHING.md`](docs/PUBLISHING.md)。要点：
-
-- npm 包名 **`dsh-skills-mcp-manager`**（`dsh-skills-mcp-panel` 已被他人占用，所以不用它）
-- `prepack` 会自动 build，`npm publish` 不需要先手动构建；发完记得发 GitHub Release（上传带版本号 + 无版本号两个 tarball）
-- 市场收录入口是 [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)：
-  提一个**只加一条**的 PR，内容就是本仓库的 [`docs/market-entry.yml`](docs/market-entry.yml)
-
-## 更新日志
-
-见 [`CHANGELOG.md`](CHANGELOG.md)。
+| 文档 | 给谁看 |
+|---|---|
+| [`CHANGELOG.md`](CHANGELOG.md) | 每个版本改了什么 |
+| [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | 改这个插件的人：自测命令、诊断文件、故障恢复 |
+| [`docs/PUBLISHING.md`](docs/PUBLISHING.md) | 维护者：npm 发包、GitHub Release、上架插件市场 |
+| [`docs/ENGINEERING.md`](docs/ENGINEERING.md) | 开发手记（真机验证记录 / 事故复盘 / 踩坑清单，历史归档） |
 
 ## License
 
