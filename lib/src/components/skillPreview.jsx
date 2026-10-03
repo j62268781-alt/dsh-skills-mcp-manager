@@ -25,7 +25,9 @@ export function skillPreviewDialog({ skill, primitives, onClose }) {
       }
     >
       <div className="smp-previewWrap" key="wrap">
-        <pre className="smp-preview" key="body">{skill.body ?? ''}</pre>
+        {/* A <div> with pre-wrap, not <pre>: <pre> refuses to shrink below its
+            longest unbreakable run, which pushed lines past the right padding. */}
+        <div className="smp-preview" key="body">{skill.body ?? ''}</div>
       </div>
     </Modal>
   )

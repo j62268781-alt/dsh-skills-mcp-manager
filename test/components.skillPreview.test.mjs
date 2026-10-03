@@ -35,10 +35,10 @@ test('skillPreviewDialog：dsh 来源推导为 dsh；正文放在 children 里',
   const wrap = node.props.children
   assert.equal(wrap.type, 'div')
   assert.equal(wrap.props.className, 'smp-previewWrap', '正文外面要有容器（官方 Modal 按内容定宽，靠它给足宽度）')
-  const pre = wrap.props.children
-  assert.equal(pre.type, 'pre')
-  assert.equal(pre.props.className, 'smp-preview')
-  assert.match(pre.props.children, /# 正文/)
+  const body = wrap.props.children
+  assert.equal(body.type, 'div', '正文用 div（<pre> 不肯收缩，会把行挤到右边缘外）')
+  assert.equal(body.props.className, 'smp-preview')
+  assert.match(body.props.children, /# 正文/)
 })
 
 test('skillPreviewDialog：正文缺失时不崩，渲染空串', () => {

@@ -130,13 +130,14 @@ div[role='dialog']:has(.smp-previewWrap),
   width: 100%;
   max-width: 100%;
   box-sizing: border-box;
-  /* Wrap instead of rendering past the edge; vertical scroll only. */
-  overflow-x: hidden;
+  /* Wrap at the padding edge; vertical scroll only, never silently clipped. */
   overflow-y: auto;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
   min-width: 0;
+  /* Equal gutters on both sides for every wrapped line. */
+  text-align: left;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 13px;
   line-height: 1.65;
