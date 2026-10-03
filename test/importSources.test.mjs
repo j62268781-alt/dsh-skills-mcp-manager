@@ -1,10 +1,10 @@
-/** importSources 接口测试：25 项、id 唯一、标签为纯名字。 */
+/** importSources 接口测试：26 项、id 唯一、标签为纯名字。 */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { IMPORT_CHOICES } from '../lib/src/importSources.js'
 
-test('IMPORT_CHOICES：25 项且 id 唯一', () => {
-  assert.equal(IMPORT_CHOICES.length, 25)
+test('IMPORT_CHOICES：26 项且 id 唯一', () => {
+  assert.equal(IMPORT_CHOICES.length, 26)
   const ids = IMPORT_CHOICES.map(([id]) => id)
   assert.equal(new Set(ids).size, ids.length)
 })
@@ -18,4 +18,5 @@ test('标签不带 CLI 后缀，也不带文件路径', () => {
   }
   assert.ok(IMPORT_CHOICES.some(([id]) => id === 'claude'))
   assert.ok(IMPORT_CHOICES.some(([id]) => id === 'crush'))
+  assert.ok(IMPORT_CHOICES.some(([id]) => id === 'vscode'))
 })

@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-skills-mcp-panel",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
   "type": "module",
   "description": "Settings panel that manages Skills and MCP servers for the project and globally.",

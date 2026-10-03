@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.2 — README 重写为面向用户的插件说明（含两张面板截图）+ 三处小修
+
+- **README**：从 556 行的开发日志改成用户向的插件说明（亮点 / 界面预览 / 安装 / 使用 /
+  工作原理 / 开发与自测 / 诊断与恢复 / 已知边界）；产品名定为 **dsh-skills-mcp-manager**
+  （安装进 profile 的包 id 仍是 `@local/dsh-skills-mcp-panel`，改名需要单独迁移 profile 配置）
+- **文档**：原 README 全文搬进 `docs/ENGINEERING.md` 留档（真机验证记录 / 事故复盘 / 踩坑清单）
+- **截图**：新增 `scripts/screenshots.mjs`，用真实构建产物离线渲染 `docs/images/mcp-panel.png`
+  与 `docs/images/skills-panel.png`（示例数据全是编造的，不带作者的服务器地址与路径）
+- 导入卡片文案里漏出的 Markdown 星号（`**用户级**`）改为纯文本
+- 技能列表页全局卡片上重复渲染了两个 `key="view"` 的「预览」按钮（同一个 key 渲染两次，
+  一个按全局读、一个按项目读）；现在按条目自己的 scope 取一次，并按落盘规则推出
+  `SKILL.md` 路径，预览才真的读得到正文
+- 导入来源下拉补上 `vscode`：Host 的来源表里一直有 VS Code，面板之前选不到它
+
 ## 0.2.0
 
 - 全局 MCP 改为 `cordis.patch.yml` 里的独立 Loader 行（面板通过 row op `add`/`update`/`delete`/`toggle` 管理）
