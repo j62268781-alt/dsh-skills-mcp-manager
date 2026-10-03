@@ -18,7 +18,9 @@ export function skillPreviewDialog({ skill, primitives, onClose }) {
       description={[skill.description, skill.path ? `文件：${skill.path}` : ''].filter(Boolean).join(' · ')}
       footer={<Button variant="outline" key="close" onClick={onClose}>关闭</Button>}
     >
-      <pre className="smp-preview" key="body">{skill.body ?? ''}</pre>
+      <div className="smp-previewWrap" key="wrap">
+        <pre className="smp-preview" key="body">{skill.body ?? ''}</pre>
+      </div>
     </Modal>
   )
 }

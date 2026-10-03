@@ -1,11 +1,8 @@
 # Bundle patch for @local/dsh-skills-mcp-panel.
-# One Host row; the Client half rides along through the package's `dsh.client`
-# declaration. `servers` / `skills` are `.volatile()`, so the panel's own page
-# (and the generic settings form) can edit them; edits persist right here in
-# the active profile's patch.
+# Declares the Host row only. It deliberately does NOT pin `config` here: a patch
+# layer overrides the settings document, so pinning servers/skills made the panel
+# blind to everything this Host writes back (discoveredSkills, skillResult, ...).
+# The panel's data lives in the settings document.
 - insert:
     - id: skills-mcp-panel
       name: '@local/dsh-skills-mcp-panel'
-      config:
-        servers: []
-        skills: []

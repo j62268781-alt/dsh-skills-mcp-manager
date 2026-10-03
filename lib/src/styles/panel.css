@@ -80,16 +80,27 @@
 .smp-actionsRow{display:flex;align-items:center;gap:8px;margin-top:10px}
 .smp-error{color:var(--dsw-alias-state-error-primary,var(--dsw-alias-label-primary));font-size:12px;line-height:18px}
 
+/* Skill preview: the official modal sizes to its content, so the wrapper sets a
+   comfortable reading width and the body gets padding + a soft surface. */
+.smp-previewWrap {
+  min-width: min(860px, 76vw);
+  max-width: 920px;
+  padding: 2px 2px 6px;
+}
+
 /* Skill preview body: plain text on purpose (no markdown renderer in the panel). */
 .smp-preview {
   margin: 0;
-  max-height: 52vh;
+  padding: 14px 16px;
+  background: var(--dsh-bg-secondary, rgba(127, 127, 127, 0.07));
+  border-radius: 10px;
+  max-height: 62vh;
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.55;
+  font-size: 13px;
+  line-height: 1.65;
   color: var(--dsh-text-secondary, inherit);
 }
 

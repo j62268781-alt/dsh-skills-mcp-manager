@@ -30,7 +30,10 @@ test('skillPreviewDialog：标题带 agents|dsh tag，描述含描述与文件�
 test('skillPreviewDialog：dsh 来源推导为 dsh；正文放在 children 里', () => {
   const node = skillPreviewDialog({ skill: { ...skill, source: 'user-dsh' }, primitives, onClose() {} })
   assert.equal(node.props.title, 'dart-add-unit-test（dsh）')
-  const pre = node.props.children
+  const wrap = node.props.children
+  assert.equal(wrap.type, 'div')
+  assert.equal(wrap.props.className, 'smp-previewWrap', '正文外面要有容器（官方 Modal 按内容定宽，靠它给足宽度）')
+  const pre = wrap.props.children
   assert.equal(pre.type, 'pre')
   assert.equal(pre.props.className, 'smp-preview')
   assert.match(pre.props.children, /# 正文/)
@@ -38,5 +41,5 @@ test('skillPreviewDialog：dsh 来源推导为 dsh；正文放在 children 里',
 
 test('skillPreviewDialog：正文缺失时不崩，渲染空串', () => {
   const node = skillPreviewDialog({ skill: { name: 'x', source: 'user-agents' }, primitives, onClose() {} })
-  assert.equal(node.props.children.props.children, '')
+  assert.equal(node.props.children.props.children.props.children, '')
 })
