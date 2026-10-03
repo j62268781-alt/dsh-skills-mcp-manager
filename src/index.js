@@ -438,6 +438,8 @@ export function apply(ctx, config) {
   /** Latest disk-skill scan, refreshed on a timer (the scan itself is async). */
   let discoveredSkills = []
   let discoveryInfo = { at: '', roots: [], count: 0, error: '' }
+  /** When the projection last reached the settings document (diagnostics). */
+  let publishedAt = ''
   const refreshDiscovered = async (projectRoots) => {
     const roots = Array.isArray(projectRoots) ? projectRoots.slice(0, 12) : []
     try {
@@ -515,6 +517,7 @@ export function apply(ctx, config) {
         .then(() => {
           published = key
           projection.wrote = true
+          publishedAt = new Date().toISOString()
           projection.error = null
         })
         .catch((writeError) => {
@@ -700,6 +703,14 @@ export function apply(ctx, config) {
         projection,
         rowOps,
         lastReconcile,
+      }
+      // Also carry the diagnostics on the heartbeat file: it is readable straight
+      // from disk, so the truth survives even when a settings write does not land.
+      lastBeat = {
+        ...lastBeat,
+        publishedAt,
+        discovery: discoveryInfo,
+        skillResult: config?.skillResult?.get?.() ?? config?.skillResult ?? null,
       }
       beat(lastBeat)
     }
