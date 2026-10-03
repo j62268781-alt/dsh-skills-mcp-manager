@@ -30,7 +30,7 @@ export function skillDialogView({
         <>
           <Button variant="outline" key="cancel" onClick={onCancel}>取消</Button>
           <Button variant="primary" key="save" disabled={pending} onClick={onSave}>
-            {isEdit ? '保存' : '创建'}
+            {pending ? '保存中…' : (isEdit ? '保存' : '创建')}
           </Button>
         </>
       }
@@ -60,6 +60,9 @@ export function skillDialogView({
                     onChange={(event) => onBody(event.target.value)} />
         ), true)}
       </div>
+      {pending ? (
+        <div className="smp-pendingHint" key="pending">正在写入磁盘并刷新列表…</div>
+      ) : null}
       {error !== '' ? <div className="smp-error" key="err" style={{ marginTop: 8 }}>{error}</div> : null}
       </div>
     </Modal>

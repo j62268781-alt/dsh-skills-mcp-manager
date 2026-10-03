@@ -91,6 +91,13 @@
   text-overflow: ellipsis;
 }
 
+/* Visible progress while a save is in flight (the button also reads 保存中…). */
+.smp-pendingHint {
+  margin-top: 8px;
+  font-size: 12px;
+  opacity: 0.75;
+}
+
 /* The skill dialog body already lands on the description's box (274→1166) once
    the dialog is widened, so it needs no side padding — adding one only squeezed
    the form fields 48px narrower than the header text. */
