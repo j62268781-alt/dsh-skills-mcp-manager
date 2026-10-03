@@ -85,7 +85,7 @@ try {
     plugin: () => ({ dispose: noop }),
     on: () => noop,
     inject: (names, cb) => cb({
-      settings: { update: async (ns, patch) => { Object.assign(live, patch); return true } },
+      settings: { update: async (ns, patch) => { live.__updates = (live.__updates ?? 0) + 1; Object.assign(live, patch); return true } },
       effect: (fn) => { fn(); return noop },
     }),
   }
@@ -161,6 +161,10 @@ try {
   note(discovered.some((skill) => skill.name === 'smoke-discovered'), '磁盘技能发现通道发布了 staged 技能')
   // The list must stay small: bodies are fetched on demand, never published here.
   note(discovered.every((skill) => skill.body === undefined), '列表不夹带正文（体积不会随技能数膨胀）')
+
+  // A write channel that never reaches settings (self-recursion, early return) used
+  // to pass every other assertion, so assert the writes actually happened.
+  note((live.__updates ?? 0) > 0, 'Host 确实调用了 settings.update（写入通道真的在工作）')
 
   // Channel 5: on-demand body read. The preview asks for the file by path and the
   // Host verifies that path came from the latest scan before reading it.
