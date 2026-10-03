@@ -24,6 +24,9 @@
 - 修复：请求 nonce 从 `String(Date.now())` 改为 `时间戳36进制-序号`。同一毫秒内发出的两次
   操作会生成同一个 nonce，于是「上一次的回执」被当成这一次的回执（删除/保存的转圈一闪而过）；
   客户端集成测试在 Node 18 上偶发复现
+- 修复：登录 shell 不再写死 `/bin/zsh`。Linux 上没有 zsh，查 PATH 直接抛错 → stdio MCP 子进程
+  拿不到 PATH（`npm run gate` 的两个 runtime.env 测试在 CI 上就是这么挂的）。现在优先用 `$SHELL`、
+  退回 `/bin/sh`，PATH 查询改成 POSIX 的 `printf %s "$PATH"`，查不到时回退到本进程的 PATH
 - 修复：`npm test` 不再把目录当参数传给 `node --test`（Node 24 会报
   `ERR_UNSUPPORTED_DIR_IMPORT`），改用 test runner 的默认发现，18/20/22/24/26 都一致
 - 设置命名空间仍是 `skills-mcp-panel`：**已有配置不迁移、不丢**（它只与行 id 有关，与包名无关）

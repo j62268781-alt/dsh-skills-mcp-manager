@@ -28,6 +28,18 @@ export function setHomeResolver(resolve) {
 
 const commandCache = new Map()
 /**
+ * The user's login shell, or a portable fallback.
+ *
+ * macOS 桌面端是 zsh，但这里不能写死 `/bin/zsh`：Linux 上它通常不存在，查 PATH 会直接抛错，
+ * 于是 stdio MCP 子进程拿不到 PATH（CI 上就是这样挂的）。优先用 `$SHELL`，退回 POSIX sh。
+ */
+function loginShell() {
+  const shell = String(process.env.SHELL ?? '')
+  if (shell.startsWith('/') && existsSync(shell)) return shell
+  return '/bin/sh'
+}
+
+/**
  * Resolve a bare stdio command through the user's login shell.
  *
  * A desktop-launched Host inherits PATH=/usr/bin:/bin:/usr/sbin:/sbin, so `npx`
@@ -39,7 +51,7 @@ export function resolveCommand(command) {
   if (commandCache.has(raw)) return commandCache.get(raw)
   let resolved = raw
   try {
-    const found = execFileSync('/bin/zsh', ['-lc', `command -v ${JSON.stringify(raw)}`], { encoding: 'utf8', timeout: 5000 }).trim()
+    const found = execFileSync(loginShell(), ['-lc', `command -v ${JSON.stringify(raw)}`], { encoding: 'utf8', timeout: 5000 }).trim()
     if (found !== '') resolved = found.split('\n').pop().trim()
   } catch {
     // keep the raw spelling; the spawn error is the user's signal
@@ -51,14 +63,18 @@ let cachedLoginPath = null
 /** The user's login-shell PATH, resolved once. */
 export function loginPath() {
   if (cachedLoginPath !== null) return cachedLoginPath
+  let found = ''
   try {
-    const out = execFileSync('/bin/zsh', ['-lc', 'print -r -- $PATH'], { encoding: 'utf8', timeout: 5000 }).trim()
-    cachedLoginPath = out === '' ? '' : out.split('\n').pop().trim()
+    // `printf %s "$PATH"` 在 sh/bash/zsh 里都成立；原来的 `print -r -- $PATH` 只有 zsh 认。
+    const out = execFileSync(loginShell(), ['-lc', 'printf %s "$PATH"'], { encoding: 'utf8', timeout: 5000 }).trim()
+    found = out === '' ? '' : out.split('\n').pop().trim()
   } catch (error) {
     // An empty login PATH silently changes how stdio MCP servers resolve npx.
     if (process.env.SMP_DEBUG) console.error('[skills-mcp-panel] login PATH lookup failed', error)
-    cachedLoginPath = ''
   }
+  // 查不到登录 PATH（Linux 上没有 zsh、`-l` 失败等）时退回本进程的 PATH：
+  // 完全不给 PATH 会让 `#!/usr/bin/env node` 的子进程直接死掉，比继承一份不完整的更糟。
+  cachedLoginPath = found !== '' ? found : String(process.env.PATH ?? '')
   return cachedLoginPath
 }
 /**
