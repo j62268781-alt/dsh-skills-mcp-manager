@@ -201,6 +201,14 @@ try {
   note(readResult.nonce === readNonce && readResult.ok === true, 'read 通道回执成功（按需读取正文）')
   note(typeof readResult.body === 'string' && readResult.body.includes('发现'), 'read 通道返回了正文内容')
   note(live.skillRequest?.nonce === '', 'read 处理完清空了请求（防重放）')
+
+  // Regression guard for the reported bug: previewing a skill must not shrink the
+  // discovered list (a `read` used to re-scan with the request's own empty roots).
+  const beforeRead = Array.isArray(live.discoveredSkills) ? live.discoveredSkills.length : -1
+  live.skillRequest = { op: 'read', scope: '', id: '', project: '', path: target?.path ?? '', name: '', prevName: '', description: '', body: '', nonce: String(Date.now()) }
+  await new Promise((resolve) => setTimeout(resolve, 250))
+  const afterRead = Array.isArray(live.discoveredSkills) ? live.discoveredSkills.length : -1
+  note(beforeRead > 0 && afterRead === beforeRead, `预览(read)不会让列表缩水（${beforeRead} → ${afterRead}）`)
   note(typeof live.discoveryInfo?.at === 'string' && live.discoveryInfo.at !== '', 'discoveryInfo 记录了扫描时间（诊断通道可用）')
 } catch (error) {
   note(false, '冒烟脚本自身出错：' + error.message)

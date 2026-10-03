@@ -646,7 +646,18 @@ export function apply(ctx, config) {
                 // Clear the request in the same write so a restart cannot replay it.
                 skillRequest: { op: '', scope: '', id: '', project: '', path: '', name: '', prevName: '', description: '', body: '', nonce: '' },
               }))
-              await refreshDiscovered(roots.map((entry) => projectRootOf(entry.dir)))
+              // A `read` does not touch the disk, and the periodic scan already covers
+              // every project. Re-scanning from the request's own roots shrank the
+              // list to global-only, which made project skills vanish mid-preview.
+              if (op !== 'read') {
+                const projectScopes = [...new Set(discoveredSkills
+                  .map((entry) => entry.scope)
+                  .filter((scope) => typeof scope === 'string' && scope !== '' && scope !== 'global'))]
+                await refreshDiscovered([...new Set([
+                  ...roots.map((entry) => projectRootOf(entry.dir)),
+                  ...projectScopes,
+                ])].filter((root) => typeof root === 'string' && root !== ''))
+              }
               lastOp = {
                 op: String(op ?? ''), name: String(skillReq?.name ?? ''),
                 nonce: String(result?.nonce ?? ''), ok: result?.ok === true,
