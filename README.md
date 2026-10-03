@@ -31,12 +31,12 @@ DSH 插件：把 **Skills** 与 **MCP** 的管理搬进 **设置 → Skills & MC
 > 重新生成：`node scripts/screenshots.mjs`。
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/j62268781-alt/dsh-skills-mcp-manager/HEAD/docs/images/mcp-panel.png" width="1000" alt="MCP 面板：全局配置文件行、项目级条目、导入与搜索">
+  <img src="https://raw.githubusercontent.com/j62268781-alt/dsh-skills-mcp-manager/master/docs/images/mcp-panel.png" width="1000" alt="MCP 面板：全局配置文件行、项目级条目、导入与搜索">
   <br><sub>MCP 面板 · 全局（配置文件行 + 停用/编辑/删除）· 项目级 · 导入 MCP</sub>
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/j62268781-alt/dsh-skills-mcp-manager/HEAD/docs/images/skills-panel.png" width="1000" alt="技能面板：全局技能与项目级技能，预览/编辑/删除">
+  <img src="https://raw.githubusercontent.com/j62268781-alt/dsh-skills-mcp-manager/master/docs/images/skills-panel.png" width="1000" alt="技能面板：全局技能与项目级技能，预览/编辑/删除">
   <br><sub>技能面板 · 全局技能 / 项目级技能 · 预览 / 编辑 / 删除</sub>
 </p>
 
