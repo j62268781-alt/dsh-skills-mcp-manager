@@ -58,15 +58,22 @@ npm run gate
   profile 的 `cordis.patch.yml` 读到扫描的根、数量与错误文本，无需猜测
 - 需要一次 DSH 重启才能加载最新 Host 代码（插件代码不随文件变更热重载，只有 manifest 变更会）
 
-**只在单测 / 冒烟层面确认，真机尚未点过**
-- 编辑技能弹窗的**改名**（移动目录 + 重写 frontmatter + 备份）：`npm run smoke` 已端到端断言
-  （旧目录消失、新目录存在、frontmatter 的 name 同步改写、留下 `.smp-backup-*`、同名拒绝覆盖）
-- 添加弹窗保存路径的 create/update
-- MCP 行的停用/启用、新增、编辑：会改动用户配置，留给用户自己点
+**已在真机完成端到端验收（2026-10-03，界面点击 + 磁盘核对）**
+- 添加技能：弹窗填写 → 创建 → `~/.dsh/skills/<名字>/SKILL.md` 落盘，frontmatter 与正文正确
+- **改名（用户最初的问题）**：编辑弹窗里把 `smp-rename-probe` 改为 `smp-rename-probe2` 后
+  - 旧目录 `smp-rename-probe/` **消失**，新目录 `smp-rename-probe2/` 出现
+  - 新目录里 frontmatter 被同步改写为 `name: smp-rename-probe2`
+  - 留下备份 `.smp-backup-smp-rename-probe-<毫秒>/`，其中 frontmatter 仍是原始 `name: smp-rename-probe`
+- **编辑弹窗的区域是只读的**（实测 `disabled = true`），符合"编辑不允许改区域"
+- 预览弹窗：显示 `SKILL.md` 正文（实读磁盘）；底部不再有重复的关闭按钮，文件路径独立成行
+- 卡片副标题统一最多 2 行（超出省略号）；预览正文改为在框内换行（`overflow-x: hidden` + `pre-wrap`）
 
-**为什么上面这些没验**：真机当前运行的仍是修复前的构建（进程启动 10:15:05 < 修复部署 10:25:16）。
-触发写操作会让它按旧代码抛异常、再次隔离 profile，所以在重启切换到修复版之前，这些写路径我**故意不点**。
-重启后即可补验。
+**仍需用户自己决定的**
+- MCP 行的停用/启用、新增、编辑：会改写用户的 `cordis.patch.yml`，留给用户自己点
+
+**待下一次重启验证的一处改动**
+- 已把包内 bundle 补丁里的 `config` 块移除（补丁层会覆盖设置文档，可能让 Host 写回的数据到不了客户端）。
+  此改动已部署但需重启生效 —— 重启后应确认技能列表与回执功能仍然正常。
 
 ## 事故复盘与恢复手册
 
