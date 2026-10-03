@@ -52,23 +52,61 @@ npm pack --dry-run      # 只看清单：应包含 dist/**、lib/client.js、cor
 
 ## 2. 发到 npm
 
+本仓库带了 GitHub Actions 工作流 `.github/workflows/publish.yml`：**发布一个 Release 就自动发包**。
+它先跑 `npm run build` + `npm run gate`（未定义名字 / 单测 / 冒烟 / 预览基线），再 `npm publish`。
+
+> CI 上 `smoke`（找不到本机 DSH）与预览基线（找不到 `/tmp/preview`）会**自动跳过**，这是预期行为 —— 它们是「跳过」而不是「静默通过」。
+
+### 2.1 首次发布（必须手动一次）
+
+可信发布（Trusted Publishing）只能给**已经存在于 npm 上的包**配置，所以第一个版本要走手动：
+
 ```bash
-# 1) 版本号：改 package.json 的 version（同时更新 CHANGELOG.md）
-npm version patch|minor|major --no-git-tag-version
-
-# 2) 登录（首次）
-npm login
-
-# 3) 发布：prepack 会自动 npm run build，无需手动构建
-npm publish
-
-# 4) 验证
-npm view dsh-skills-mcp-manager version dist.tarball
+npm version minor --no-git-tag-version   # 改版本（同时更新 CHANGELOG.md）
+npm login                                # 浏览器里完成登录
+npm publish                              # prepack 会自动 build
+npm view dsh-skills-mcp-manager version  # 验证
 ```
 
-- `publishConfig.access=public` 已写在 `package.json` 里，不需要 `--access public`。
+发出 0.4.0 之后，去 **npmjs.com → 这个包 → Settings → Trusted Publisher** 配置：
+
+| 字段 | 值 |
+|---|---|
+| Publisher | GitHub Actions |
+| Organization or user | `j62268781-alt` |
+| Repository | `dsh-skills-mcp-manager` |
+| Workflow filename | `publish.yml` |
+| Environment | 留空 |
+
+配好之后**不再需要任何 secret**：workflow 里 OIDC（`id-token: write`）会自动带上
+provenance 签名，npm 页面上会出现「Built and signed on GitHub Actions」。
+
+### 2.2 之后每个版本（自动）
+
+```bash
+npm version minor --no-git-tag-version     # 1) 改 package.json 版本 + CHANGELOG
+git commit -am "release: v0.5.0" && git push
+git tag v0.5.0 && git push origin v0.5.0   # 2) 打 tag
+# 3) 在 GitHub 上按这个 tag 发一个 Release（Publish release）
+```
+
+Release 一发布，workflow 自动：核对 tag 与 `package.json` 版本一致 → build → 门禁 → `npm publish`（带 provenance）。
+
+- **版本必须与 tag 一致**（tag 去掉 `v` 前缀）：不一致时 workflow 直接失败并给出提示，不会发出一个版本号对不上的包。
+- 只想演练不发布：Actions → **publish** → *Run workflow* → 勾上 `dry_run`，它只跑 `npm publish --dry-run`。
+- 想改用 token 而不是可信发布：在仓库 Secrets 里加 `NPM_TOKEN`（npm 的 **Granular Access Token**，勾 Publish 权限），
+  workflow 会自动切到那条路径（`env.NPM_TOKEN != ''` 的分支）。
+
+### 2.3 手动兜底
+
+```bash
+npm login
+npm publish          # 本地也能发；publishConfig.access=public 已写在 package.json 里
+```
+
 - 发完立刻可用的安装方式：`dsh plugin --profile <profile> add dsh-skills-mcp-manager`。
 - 发错了用 `npm unpublish dsh-skills-mcp-manager@<版本>`（72 小时内、且该版本没人依赖时才行）或直接发下一个 patch 版本。
+- 上面的命令需要能连上 registry；走代理的话：`git config` 那套不管用，用 `npm config set proxy` / `https-proxy`，或临时 `HTTPS_PROXY=... npm publish`。
 
 ## 3. GitHub Release（推荐）
 
@@ -160,9 +198,10 @@ npm run deploy     # 先跑 smoke，通过后拷进 $DSH_HOME/profiles/desktop/n
 
 ## 6. 每次发版的清单
 
-- [ ] `npm run gate` 全绿
 - [ ] `package.json` 的 `version` 已提升，`CHANGELOG.md` 已写
-- [ ] `npm pack --dry-run` 清单正确（有 `dist/`、`lib/client.js`，没有 `lib/src/`、`test/`）
-- [ ] `npm publish` 成功，`npm view dsh-skills-mcp-manager version` 是新版本
-- [ ] `git tag v<版本>` + Releases 上传两个 tarball 资产
+- [ ] `npm run gate` 本地全绿；`npm pack --dry-run` 清单正确（有 `dist/`、`lib/client.js`，没有 `lib/src/`、`test/`）
+- [ ] 打 tag（`v<版本>`，与 `package.json` 一致）并推送
+- [ ] 在 GitHub 上按该 tag 发 Release → **Actions 的 publish 工作流自动发包**（首次发布前先手动发一次并配好 Trusted Publisher，见 2.1）
+- [ ] 工作流跑完后核对：`npm view dsh-skills-mcp-manager version` 是新版本、npm 页面上有 provenance 徽章
+- [ ] 在同一个 Release 上传两个 tarball 资产（`-<版本>.tgz` 与无版本号的那个）
 - [ ] 市场已收录时：确认卡片显示新版本（收录前先按第 4 节提 PR）

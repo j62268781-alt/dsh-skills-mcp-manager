@@ -1,0 +1,99 @@
+name: publish
+
+# 发版流程：在 GitHub 上发布一个 Release（tag 形如 v0.4.0）→ 自动跑门禁 → 发包到 npm。
+# 也可以手动触发：Actions → publish → Run workflow（可勾「只演练」，只打包不发布）。
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 只打包不发布（npm publish --dry-run）
+        type: boolean
+        default: false
+
+# npm 可信发布（Trusted Publishing）靠 OIDC，不需要任何 secret —— 但要在 npmjs.com 上
+# 给这个包配置 GitHub Actions 作为 Trusted Publisher（见 docs/PUBLISHING.md）。
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      # 可选回退通道：仓库里配了 NPM_TOKEN（granular access token）就用它。
+      # 首次发布必须走这条路 —— 可信发布只能给「已经存在于 npm 上的包」配置。
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 24 自带 npm 11；可信发布要求 npm ≥ 11.5.1（Node 22 的 npm 10 不支持 OIDC）。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - name: 工具链自检（可信发布要求 npm ≥ 11.5.1）
+        if: env.NPM_TOKEN == ''
+        run: |
+          set -euo pipefail
+          node -v
+          npm -v
+          npm -v | awk -F. '{ if ($1 > 11 || ($1 == 11 && $2 >= 5)) exit 0; exit 1 }' \
+            || { echo "::error::可信发布（OIDC）需要 npm ≥ 11.5.1，当前是 $(npm -v)：把 node-version 提到 24，或改用 NPM_TOKEN 回退通道"; exit 1; }
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: Release tag 必须等于 package.json 的版本
+        if: github.event_name == 'release'
+        env:
+          # 经 env 传参，不把 tag 直接拼进脚本（避免表达式注入）
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          pkg="v$(node -p "require('./package.json').version")"
+          if [ "$pkg" != "$TAG" ]; then
+            echo "::error::Release tag ${TAG} 与 package.json 的版本 ${pkg} 不一致：先把 package.json 改成 ${TAG}（或删掉这个 Release 重发）"
+            exit 1
+          fi
+          echo "版本一致：${pkg}"
+
+      - name: 构建（dist/ + lib/client.js）
+        run: npm run build
+
+      # 与本地一致的四道门禁。其中 smoke 需要本机安装的 DSH（CI 上没有）会自动跳过，
+      # 预览基线需要 /tmp/preview 夹具也自动跳过 —— 两者都是「跳过」而不是「静默通过」。
+      - name: 门禁（未定义名字 / 单测 / 加载冒烟 / 预览基线）
+        run: npm run gate
+
+      - name: 发包（npm 可信发布 / OIDC，无需 secret）
+        if: env.NPM_TOKEN == '' && inputs.dry_run != true
+        run: npm publish
+
+      - name: 发包（NPM_TOKEN 回退）
+        if: env.NPM_TOKEN != '' && inputs.dry_run != true
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: 演练（只打包，不发布）
+        if: inputs.dry_run == true
+        run: npm publish --dry-run
+
+      - name: 结果摘要
+        if: always()
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          {
+            echo "### publish: ${{ job.status }}"
+            echo "- release tag: ${TAG:-（手动触发）}"
+            echo "- package: $(node -p "require('./package.json').name")@$(node -p "require('./package.json').version")"
+          } >> "$GITHUB_STEP_SUMMARY"

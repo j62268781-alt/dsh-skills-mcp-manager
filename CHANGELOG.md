@@ -16,6 +16,9 @@
 - **README 只留用户视角**：自测命令、诊断文件与恢复手册搬到 `docs/DEVELOPMENT.md`（新增），
   README 里只留一条「更多文档」索引；两张预览图改用 raw.githubusercontent 绝对地址，
   这样在 npm 页面与 GitHub 上都能正常显示
+- **CI 发布**：新增 `.github/workflows/publish.yml` —— 发布 GitHub Release（tag `v<版本>`）即自动
+  核对版本 → 构建 → 跑门禁 → 发包到 npm；优先走 npm 可信发布（OIDC，无需 secret），
+  没配 Trusted Publisher 时回退到 `NPM_TOKEN`；支持手动触发与 `dry_run` 演练
 - 设置命名空间仍是 `skills-mcp-panel`：**已有配置不迁移、不丢**（它只与行 id 有关，与包名无关）
 
 ## 0.3.2 — README 重写为面向用户的插件说明（含两张面板截图）+ 三处小修
