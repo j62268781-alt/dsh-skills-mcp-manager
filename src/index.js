@@ -261,7 +261,9 @@ function configuredWorkspaces(ctx) {
       title: String(workspace?.title ?? ''),
       path: String(workspace?.path ?? ''),
     })).filter((workspace) => workspace.path !== '')))
-  } catch {
+  } catch (error) {
+    // Distinguish "no workspaces" from "the registry blew up".
+    if (process.env.SMP_DEBUG) console.error('[skills-mcp-panel] workspace registry unavailable', error)
     return []
   }
 }
@@ -277,6 +279,7 @@ function loaderOf(ctx) {
   try {
     return ctx.loader ?? null
   } catch {
+    // Expected: a bare access throws in cordis before the service is injected.
     return null
   }
 }
@@ -430,7 +433,9 @@ export function apply(ctx, config) {
         dshHome: resolveDshHome(),
         agentsHome: process.env.DSH_AGENTS_HOME ?? join(homedir(), '.agents'),
       })
-    } catch {
+    } catch (error) {
+      // A failed scan must not look like "there are no skills on disk".
+      if (process.env.SMP_DEBUG) console.error('[skills-mcp-panel] skill scan failed', error)
       discoveredSkills = []
     }
   }

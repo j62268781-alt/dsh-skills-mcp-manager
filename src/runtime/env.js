@@ -54,7 +54,9 @@ export function loginPath() {
   try {
     const out = execFileSync('/bin/zsh', ['-lc', 'print -r -- $PATH'], { encoding: 'utf8', timeout: 5000 }).trim()
     cachedLoginPath = out === '' ? '' : out.split('\n').pop().trim()
-  } catch {
+  } catch (error) {
+    // An empty login PATH silently changes how stdio MCP servers resolve npx.
+    if (process.env.SMP_DEBUG) console.error('[skills-mcp-panel] login PATH lookup failed', error)
     cachedLoginPath = ''
   }
   return cachedLoginPath

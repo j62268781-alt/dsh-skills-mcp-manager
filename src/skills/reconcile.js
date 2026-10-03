@@ -35,7 +35,9 @@ export function renderSkill(skill) {
 export async function readState() {
   try {
     return JSON.parse(await readFile(stateFile(), 'utf8'))
-  } catch {
+  } catch (error) {
+    // "State file missing" and "state file unreadable" must not look identical.
+    if (process.env.SMP_DEBUG) console.error('[skills-mcp-panel] skill state unreadable', error)
     return { files: [] }
   }
 }
