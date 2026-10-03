@@ -51,7 +51,7 @@ npm pack --dry-run      # 只看清单：应包含 dist/**、lib/client.js、cor
 `npm pack --dry-run` 是发版前最后一道自检：
 
 - 出现 `lib/src/**` 或 `test/**` → `files` 写错了；
-- 缺少 `dist/index.js` → 忘了 build（`prepack` 也会补，但别指望它兜住所有情况）。
+- 缺少 `dist/index.js` → 忘了 build（`prepare` 也会补，但别指望它兜住所有情况）。
 
 ## 2. 发到 npm
 
@@ -67,7 +67,7 @@ npm pack --dry-run      # 只看清单：应包含 dist/**、lib/client.js、cor
 ```bash
 npm version minor --no-git-tag-version   # 改版本（同时更新 CHANGELOG.md）
 npm login                                # 浏览器里完成登录
-npm publish                              # prepack 会自动 build
+npm publish                              # prepare 会自动 build
 npm view @j62268781-alt/dsh-skills-mcp-manager version  # 验证
 ```
 

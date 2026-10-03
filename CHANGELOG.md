@@ -21,6 +21,11 @@
 - **README 只留用户视角**：自测命令、诊断文件与恢复手册搬到 `docs/DEVELOPMENT.md`（新增），
   README 里只留一条「更多文档」索引；两张预览图改用 raw.githubusercontent 绝对地址，
   这样在 npm 页面与 GitHub 上都能正常显示
+- **打包**：`prepack` 改为 `prepare`。`prepare` 除了在 `npm pack` / `npm publish` 前构建，还会在
+  **git 安装时**由包管理器执行，于是「源码安装」这条路也能用：两个插件市场在 npm 包未发布时
+  都会回退到 `dsh plugin add github:j62268781-alt/dsh-skills-mcp-manager`，而 `dist/` 不进版本库，
+  没有 `prepare` 就装出一个跑不起来的插件（1024 Store 的闸门把这个标签判为
+  `entry_missing_no_prepare`，补上后变为 `prepare_builds_entry`）
 - **CI**：新增 `.github/workflows/ci.yml` —— push 到 `master` 与所有 PR 在 Node 20 / 22 / 24
   三个版本上各跑一遍 `build` + `gate`，并核对 `npm pack --dry-run` 的清单
 - **CI 发布**：新增 `.github/workflows/publish.yml` —— 发布 GitHub Release（tag `v<版本>`）即自动

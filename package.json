@@ -57,7 +57,7 @@
     "gate": "npm run check:names && npm run build:client && npm test && npm run smoke && node scripts/preview-check.mjs",
     "preview": "node scripts/preview-check.mjs",
     "predeploy": "npm run build",
-    "prepack": "npm run build",
+    "prepare": "npm run build",
     "smoke": "node scripts/host-smoke.mjs",
     "check:names": "node scripts/undefined-check.mjs"
   },
