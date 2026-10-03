@@ -30,10 +30,10 @@ jobs:
       # 首次发布必须走这条路 —— 可信发布只能给「已经存在于 npm 上的包」配置。
       NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Node 24 自带 npm 11；可信发布要求 npm ≥ 11.5.1（Node 22 的 npm 10 不支持 OIDC）。
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
