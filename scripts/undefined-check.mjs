@@ -9,7 +9,8 @@
  * (setInterval, process, node: builtins), so those are allow-listed.
  */
 import { execFileSync } from 'node:child_process'
-import { dirname, resolve } from 'node:path'
+import { readdirSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 /** Names that are real globals/modules but have no typings in this project. */
@@ -37,6 +38,17 @@ export function undefinedNames(output) {
 }
 
 const here = dirname(fileURLToPath(import.meta.url))
+/** Recursively collect files with the given extensions, sorted. */
+const collect = (dir, extensions) => {
+  const out = []
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name)
+    if (entry.isDirectory()) out.push(...collect(full, extensions))
+    else if (extensions.some((ext) => entry.name.endsWith(ext))) out.push(full)
+  }
+  return out.sort()
+}
+
 const runTsc = (root, args) => {
   try {
     return execFileSync('npx', ['tsc', ...args], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
@@ -48,15 +60,23 @@ const runTsc = (root, args) => {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const root = resolve(here, '..')
   const hostOutput = runTsc(root, ['-p', 'tsconfig.json', '--noEmit', '--checkJs'])
-  // The client half is JSX; the TDZ class (used before declaration) is what once
-  // rendered a blank panel, so both roots are checked.
+  // The client half is JSX and the TDZ class (used before declaration) is what
+  // once rendered a blank panel, so every client module is checked, not just the
+  // entry. The dev scripts are checked too: a broken checker misleads by silence.
+  const clientFiles = collect(join(root, 'lib', 'src'), ['.js', '.jsx'])
+  const scriptFiles = collect(join(root, 'scripts'), ['.mjs'])
   const clientOutput = runTsc(root, [
     '--noEmit', '--allowJs', '--checkJs', '--target', 'es2022', '--module', 'esnext',
     '--moduleResolution', 'bundler', '--jsx', 'preserve', '--skipLibCheck',
-    '--lib', 'es2022,dom', 'lib/src/client.js',
+    '--lib', 'es2022,dom', ...clientFiles.map((file) => file.slice(root.length + 1)),
   ])
-  const found = undefinedNames(hostOutput + '\n' + clientOutput)
-  console.log(`  · 已检查 src/（Host）与 lib/src/client.js（Client）`)
+  const scriptOutput = runTsc(root, [
+    '--noEmit', '--allowJs', '--checkJs', '--target', 'es2022', '--module', 'esnext',
+    '--moduleResolution', 'bundler', '--skipLibCheck', '--lib', 'es2022,dom',
+    ...scriptFiles.map((file) => file.slice(root.length + 1)),
+  ])
+  const found = undefinedNames([hostOutput, clientOutput, scriptOutput].join('\n'))
+  console.log(`  · 已检查 src/（Host）· lib/src（Client ${clientFiles.length} 个文件）· scripts（${scriptFiles.length} 个文件）`)
   if (found.length > 0) {
     console.log('  ✗ 源码里存在未定义的名字（这类错误在真机上会让插件抛异常、整个 profile 被隔离）：')
     for (const item of found.slice(0, 10)) console.log('    ' + item.line)
