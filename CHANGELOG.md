@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1 — 重新发布（0.4.0 的版本号被 npm 永久保留，不可重用）
+
+- **内容与 0.4.0 完全一致**，没有任何功能改动。0.4.0 从 npm 删除后，registry 永久保留该版本号
+  （`npm error 400 Cannot publish over previously published version "0.4.0"`），只能换一个版本号重新发布
+- 本次发布由 GitHub Actions 通过 npm **可信发布（Trusted Publisher / OIDC）** 完成，无需任何 token，
+  并带 provenance 签名（可在 npm 页面与 sigstore 透明日志核对）
+
 ## 0.4.0 — 首个可发布版本：去掉 @local，按 npm / 插件市场的要求打包
 
 - **包名（scoped）**：`dsh-skills-mcp-manager` → **`@j62268781-alt/dsh-skills-mcp-manager`**。
