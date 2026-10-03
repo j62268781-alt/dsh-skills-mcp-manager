@@ -90,3 +90,7 @@ Node 默认把符号链接解析到真实路径，Host 半的 `@deepseek-ai/*` �
   删除断言，并把固定等待改为轮询（原先在有计时扰动时会假失败）
 - `verify-served.mjs` 解码 esbuild 的 `\uXXXX` 转义后再匹配中文（此前「添加服务器」在
   正确的 bundle 上也必然假失败）
+- 删除排查用的临时计时探针（`probeLines`/`probeState`/`probeRef` 与 `.smp-probe` 样式）：
+  刷新延迟已定位并修复，面板上不再显示那段「① 发送 / ② 回执 / ③ 列表」的自检卡片
+- `.gitignore` 忽略 `.agents/skills/`：本仓库作为工作区时，面板落在这里的项目级技能与
+  删除备份属于运行时数据（早先误提交过一个冒烟技能）
