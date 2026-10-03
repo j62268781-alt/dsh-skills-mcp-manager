@@ -1,0 +1,13 @@
+# 提交给 DSH 插件市场的条目 —— 原样复制到 PR：
+#   awesome-dsh-plugin/awesome-dsh-plugin → data/plugins/j62268781-alt__dsh-skills-mcp-manager.yml
+#
+# 文件名规则 <owner>__<repo>.yml；校验器只认 url / name / category / description / tarball，
+# 多写键会被拒；npm 与仓库的对应关系由 CI 从 npm 的 repository 字段自动探测，所以这里没有 npm 字段。
+# category 取自既定分类集合；这里用 ui（与同类插件 dsh-mcp-manager-plus 一致），
+# 想强调「技能包」也可以改成一个词：skill。
+url: https://github.com/j62268781-alt/dsh-skills-mcp-manager
+name: j62268781-alt/dsh-skills-mcp-manager
+category: ui
+description:
+  en: 'Manage skills and MCP servers from one DSH settings panel: browse, search and preview skills on disk (create, edit, rename, delete, with automatic backups), keep global MCP servers as real cordis.patch.yml loader rows and per-project servers that mount only for that project, and import existing configs from 25 other MCP clients.'
+  zh: '在 DSH 设置面板里一站式管理技能与 MCP 服务器：技能以磁盘为准，可浏览、搜索、预览与增删改（删除自动留备份）；全局 MCP 就是 cordis.patch.yml 里的真实 Loader 行，项目级条目只挂到对应项目的会话；另可从 25 个 MCP 客户端一键导入既有配置。'

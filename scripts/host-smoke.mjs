@@ -37,7 +37,7 @@ execFileSync('npx', ['tsc', '-p', 'tsconfig.json'], { cwd: root, stdio: 'inherit
 
 // Stage inside the workspace's node_modules so the plugin's own third-party deps
 // (yaml) resolve naturally; only @deepseek-ai/* has to come from the app.
-const stage = join(root, 'node_modules', '@local', 'dsh-smoke-stage')
+const stage = join(root, 'node_modules', 'dsh-smoke-stage')
 const scopeLink = join(root, 'node_modules', '@deepseek-ai')
 const createdScopeLink = !existsSync(scopeLink)
 await rm(stage, { recursive: true, force: true })

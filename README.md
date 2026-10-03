@@ -24,7 +24,7 @@ DSH 插件：把 **Skills** 与 **MCP** 的管理搬进 **设置 → Skills & MC
 - 🧯 **不炸宿主**：插件里绝不把异常抛出去（否则 DSH 会隔离整个 profile 配置），并有加载冒烟与部署闸门把关
 - 📦 **零运行时依赖**：`react` / `yaml` 都用宿主已有的那份，插件本体不带第三方运行时依赖
 
-**目录**：[界面预览](#界面预览) · [安装](#安装) · [使用](#使用) · [工作原理](#工作原理) · [开发与自测](#开发与自测) · [诊断与恢复](#诊断与恢复) · [已知边界](#已知边界) · [命名说明](#命名说明) · [License](#license)
+**目录**：[界面预览](#界面预览) · [安装](#安装) · [使用](#使用) · [工作原理](#工作原理) · [开发与自测](#开发与自测) · [诊断与恢复](#诊断与恢复) · [已知边界](#已知边界) · [发布](#发布) · [License](#license)
 
 ## 界面预览
 
@@ -44,7 +44,34 @@ DSH 插件：把 **Skills** 与 **MCP** 的管理搬进 **设置 → Skills & MC
 
 ## 安装
 
-本插件装进 DSH 的某个 profile（桌面端默认 `desktop`），Host 半在 harness 进程里跑。
+本插件装进 DSH 的某个 profile（`$DSH_HOME/profiles/<name>`），Host 半在 harness 进程里跑。
+
+### 设置 → 插件市场（推荐）
+
+打开 **设置 → 插件市场**，搜 `dsh-skills-mcp-manager`，点安装，刷新页面即可。
+
+> 桌面端请走市场或内置插件安装器：`desktop` profile 由桌面应用独占，宿主 CLI 的
+> `dsh plugin --profile desktop` 会被直接拒绝。
+
+### 命令行
+
+```bash
+# npm 包（预构建，安装时不需要编译）
+dsh plugin --profile web add dsh-skills-mcp-manager
+
+# 或 GitHub Release 上的预构建 tarball（链接恒定指向最新版）
+dsh plugin --profile web add https://github.com/j62268781-alt/dsh-skills-mcp-manager/releases/latest/download/dsh-skills-mcp-manager.tgz
+```
+
+**重启 DSH**，再刷新页面：**设置 → Skills & MCP**。
+
+卸载：
+
+```bash
+dsh plugin --profile web remove dsh-skills-mcp-manager
+```
+
+### 从源码（开发）
 
 ```bash
 git clone https://github.com/j62268781-alt/dsh-skills-mcp-manager.git
@@ -54,28 +81,17 @@ npm run build      # dist/（Host，tsc）+ lib/client.js（Client，esbuild 单
 npm run deploy     # 拷贝进 profile；部署前先跑加载冒烟，失败则 profile 一字不动
 ```
 
-`npm run deploy` 的目标目录是 `$DSH_HOME/profiles/desktop/node_modules/@local/dsh-skills-mcp-panel`，
-旧版本会备份成同级的 `.backup-<时间戳>`（回滚只需改名回来）。仓库**不提交构建产物**，所以克隆后必须先 build。
+`npm run deploy` 的目标是 `$DSH_HOME/profiles/desktop/node_modules/dsh-skills-mcp-manager`，
+旧版本备份成同级的 `.backup-<时间戳>`（回滚只需改名回来）。仓库**不提交构建产物**，所以克隆后必须先 build。
 
-然后把包挂进 profile 的 bundles：
+之后把包名挂进 profile 的 bundles 并重启：
 
 ```jsonc
 // $DSH_HOME/profiles/desktop/package.json
-{
-  "dsh": {
-    "profile": {
-      "bundles": [
-        // …
-        "@local/dsh-skills-mcp-panel"
-      ]
-    }
-  }
-}
+{ "dsh": { "profile": { "bundles": [ /* … */ "dsh-skills-mcp-manager" ] } } }
 ```
 
-**重启 DSH**（Host 半在启动时加载；之后插件更新只要重跑 `npm run deploy` 并刷新页面，Host 半的改动仍需重启）。
-
-卸载：从上面的 `bundles` 里删掉这一行，删掉该目录，重启。
+发布者请看 [`docs/PUBLISHING.md`](docs/PUBLISHING.md)（npm 发包 + 上架插件市场）。
 
 ## 使用
 
@@ -174,12 +190,14 @@ node scripts/screenshots.mjs   # 重新生成 README 的两张截图
 - 改 Host 半的代码必须**重启 DSH**（模块被缓存）；Client 半改完刷新页面即可
 - 第三方 bundle 用的是官方 settings 通道，不是自定义 remote 命名空间
 
-## 命名说明
+## 发布
 
-仓库与产品名是 **dsh-skills-mcp-manager**；安装进 profile 的包 id 目前仍是
-`@local/dsh-skills-mcp-panel`（本地私有 id，不出现在任何 registry）。
-改它需要同步 profile 的 `dsh.profile.bundles` 与 `cordis.patch.yml` 里的行名，
-属于一次单独的迁移，所以没有跟这次改名一起做。
+维护者流程见 [`docs/PUBLISHING.md`](docs/PUBLISHING.md)。要点：
+
+- npm 包名 **`dsh-skills-mcp-manager`**（`dsh-skills-mcp-panel` 已被他人占用，所以不用它）
+- `prepack` 会自动 build，`npm publish` 不需要先手动构建；发完记得发 GitHub Release（上传带版本号 + 无版本号两个 tarball）
+- 市场收录入口是 [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)：
+  提一个**只加一条**的 PR，内容就是本仓库的 [`docs/market-entry.yml`](docs/market-entry.yml)
 
 ## 更新日志
 

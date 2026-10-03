@@ -22,7 +22,7 @@ const cookie = `${cookieName}=v1.${body}.${b64url(createHmac('sha256', secret).u
 
 const html = await (await fetch(`http://${authority}/`, { headers: { cookie } })).text()
 const urls = [...html.matchAll(/["'(](plugins\/\?\?[^"')]+)/g)].map((match) => match[1].replace(/&amp;/g, '&'))
-const combo = urls.find((url) => url.includes('@local/dsh-skills-mcp-panel'))
+const combo = urls.find((url) => url.includes('dsh-skills-mcp-manager/client.js'))
 if (!combo) {
   console.error('✗ boot 数据里没有本插件：app 尚未 composer 该 bundle')
   process.exit(1)

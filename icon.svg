@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" width="96" height="96" role="img" aria-label="dsh-skills-mcp-manager">
+  <title>dsh-skills-mcp-manager</title>
+  <rect width="96" height="96" rx="22" fill="#4C6EF5"/>
+  <!-- 技能：一页带折角的 SKILL.md -->
+  <path d="M20 22h20l10 10v40a4 4 0 0 1-4 4H20a4 4 0 0 1-4-4V26a4 4 0 0 1 4-4z" fill="#fff"/>
+  <path d="M40 22l10 10H44a4 4 0 0 1-4-4z" fill="#C7D2FE"/>
+  <rect x="24" y="44" width="22" height="4" rx="2" fill="#4C6EF5" opacity=".45"/>
+  <rect x="24" y="54" width="16" height="4" rx="2" fill="#4C6EF5" opacity=".3"/>
+  <!-- MCP：一条链上的三个节点 -->
+  <path d="M70 36v24" stroke="#fff" stroke-width="3" stroke-linecap="round" opacity=".75"/>
+  <circle cx="70" cy="30" r="7" fill="#fff"/>
+  <circle cx="70" cy="48" r="5" fill="#fff" opacity=".9"/>
+  <circle cx="70" cy="66" r="7" fill="#fff"/>
+</svg>

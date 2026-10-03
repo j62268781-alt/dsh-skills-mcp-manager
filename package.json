@@ -1,9 +1,31 @@
 {
-  "name": "@local/dsh-skills-mcp-panel",
-  "version": "0.3.2",
-  "private": true,
+  "name": "dsh-skills-mcp-manager",
+  "version": "0.4.0",
   "type": "module",
-  "description": "Settings panel that manages Skills and MCP servers for the project and globally.",
+  "description": "DSH 设置面板：一个页面里管理技能（SKILL.md）与 MCP 服务器，全局 / 项目级分层，改完即生效。Manage skills and MCP servers from the DSH settings panel — global and per-project tiers, effective immediately.",
+  "license": "MIT",
+  "author": "j62268781-alt",
+  "icon": "icon.svg",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "deepseek",
+    "skills",
+    "skill",
+    "mcp",
+    "mcp-servers",
+    "settings-panel"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/j62268781-alt/dsh-skills-mcp-manager.git"
+  },
+  "homepage": "https://github.com/j62268781-alt/dsh-skills-mcp-manager#readme",
+  "bugs": {
+    "url": "https://github.com/j62268781-alt/dsh-skills-mcp-manager/issues"
+  },
+  "main": "dist/index.js",
   "exports": {
     ".": "./dist/index.js",
     "./client": "./lib/client.js",
@@ -35,6 +57,7 @@
     "gate": "npm run check:names && npm run build:client && npm test && npm run smoke && node scripts/preview-check.mjs",
     "preview": "node scripts/preview-check.mjs",
     "predeploy": "npm run build",
+    "prepack": "npm run build",
     "smoke": "node scripts/host-smoke.mjs",
     "check:names": "node scripts/undefined-check.mjs"
   },
@@ -59,16 +82,21 @@
     }
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20",
+    "dsh": ">=0.2.0-0"
   },
   "files": [
     "dist",
-    "lib",
+    "lib/client.js",
     "cordis.patch.yml",
+    "icon.svg",
     "README.md",
-    "LICENSE",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "LICENSE"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "devDependencies": {
     "@types/react": "^18.3.31",
     "esbuild": "^0.24.2",

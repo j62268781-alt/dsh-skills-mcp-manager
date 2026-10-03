@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.0 — 首个可发布版本：去掉 @local，按 npm / 插件市场的要求打包
+
+- **包名**：`@local/dsh-skills-mcp-panel` → **`dsh-skills-mcp-manager`**（npm / 仓库 / 面板 id 同名）。
+  同步改了 `cordis.patch.yml` 的行名、客户端 bundle 的 `__ModuleLoader__.load({ id })`、
+  部署目标目录与 `verify-served.mjs` 的匹配串
+  > `dsh-skills-mcp-panel` 这个名字在 npm 上已被他人占用（KyattoCat 的同类插件），故不用它
+- **可发布字段**：`license` / `repository` / `homepage` / `bugs` / `author` / `keywords` /
+  `main` / `engines.dsh` / `publishConfig.access=public` / `icon.svg`，并加了 `prepack`（发布前自动 build）
+- **发布清单**：`files` 白名单收紧成 `dist` + `lib/client.js`（不再把 `lib/src/**` 源码打进包里）
+- **市场收录**：新增根目录 `screenshots.json`（两张面板截图）与
+  `docs/market-entry.yml`（awesome-dsh-plugin 条目，直接复制进 PR）
+- **文档**：新增 `docs/PUBLISHING.md`（npm 发包、GitHub Release、上架插件市场、每次发版清单）；
+  README 的「安装」改成用户视角（插件市场 → 命令行 → 从源码），并指向发布文档
+- 设置命名空间仍是 `skills-mcp-panel`：**已有配置不迁移、不丢**（它只与行 id 有关，与包名无关）
+
 ## 0.3.2 — README 重写为面向用户的插件说明（含两张面板截图）+ 三处小修
 
 - **README**：从 556 行的开发日志改成用户向的插件说明（亮点 / 界面预览 / 安装 / 使用 /

@@ -1,8 +1,8 @@
-# Bundle patch for @local/dsh-skills-mcp-panel.
+# Bundle patch for dsh-skills-mcp-manager.
 # Declares the Host row only. It deliberately does NOT pin `config` here: a patch
 # layer overrides the settings document, so pinning servers/skills made the panel
 # blind to everything this Host writes back (discoveredSkills, skillResult, ...).
 # The panel's data lives in the settings document.
 - insert:
     - id: skills-mcp-panel
-      name: '@local/dsh-skills-mcp-panel'
+      name: 'dsh-skills-mcp-manager'

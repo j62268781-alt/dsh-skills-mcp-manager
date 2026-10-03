@@ -14,7 +14,7 @@
  * mounted in-process through the shipped client package, so tool naming,
  * discovery, reconnection and image handling stay identical to a configured row.
  *
- * @module @local/dsh-skills-mcp-panel
+ * @module dsh-skills-mcp-manager
  */
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
