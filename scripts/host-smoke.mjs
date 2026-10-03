@@ -177,10 +177,19 @@ try {
   const projFile = join(stage, '.agents', 'skills', 'smoke-project-skill', 'SKILL.md')
   note(live.skillResult?.nonce === projNonce && live.skillResult?.ok === true, '项目级创建回执成功且 nonce 原样返回')
   note(existsSync(projFile), '项目级技能落盘到 <project>/.agents/skills/<name>/SKILL.md')
-  // Latency guard: the op must publish at once. Waiting for the 5s publish timer
-  // is what made a save take ~4.6s to appear.
-  note(Array.isArray(live.discoveredSkills) && live.discoveredSkills.some((s) => s.name === 'smoke-project-skill'),
-    '操作后立即发布（列表数据无需等 5 秒周期，已在 400ms 内出现）')
+  // Latency guard AND metric: the op must publish at once. Waiting for the 5s
+  // publish timer is what made a save take ~4.6s to appear in the panel.
+  const publishStart = Date.now()
+  let publishMs = -1
+  while (Date.now() - publishStart < 2000) {
+    if (Array.isArray(live.discoveredSkills) && live.discoveredSkills.some((s) => s.name === 'smoke-project-skill')) {
+      publishMs = Date.now() - publishStart
+      break
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  note(publishMs >= 0 && publishMs < 400,
+    `操作后立即发布（列表数据 ${publishMs}ms 内可见，无需等 5 秒周期）`)
 
   // Channel 5: on-demand body read. The preview asks for the file by path and the
   // Host verifies that path came from the latest scan before reading it.

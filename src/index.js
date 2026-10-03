@@ -153,6 +153,8 @@ export const Config = z.object({
     name: z.string().default(''),
     /** Body text, only for the on-demand `read` op (never stored in the list). */
     body: z.string().default(''),
+    /** When the Host produced this receipt; lets the client match by freshness. */
+    at: z.string().default(''),
     nonce: z.string().default(''),
   }).default({}).volatile(),
   importResult: z.object({
@@ -607,23 +609,23 @@ export function apply(ctx, config) {
               const wanted = String(skillReq?.path ?? '')
               const known = Array.isArray(discoveredSkills) && discoveredSkills.some((entry) => entry.path === wanted)
               if (!known) {
-                result = { ok: false, reason: '该技能不在当前扫描结果里', name: '', body: '', nonce: skillNonce }
+                result = { ok: false, reason: '该技能不在当前扫描结果里', name: '', body: '', nonce: skillNonce , at: new Date().toISOString() }
               } else {
                 try {
                   const text = await readFile(wanted, 'utf8')
-                  result = { ok: true, reason: '', name: '', body: bodyOf(text), nonce: skillNonce }
+                  result = { ok: true, reason: '', name: '', body: bodyOf(text), nonce: skillNonce , at: new Date().toISOString() }
                 } catch (error) {
-                  result = { ok: false, reason: String(error?.message ?? error), name: '', body: '', nonce: skillNonce }
+                  result = { ok: false, reason: String(error?.message ?? error), name: '', body: '', nonce: skillNonce , at: new Date().toISOString() }
                 }
               }
             }
             else if (String(skillReq?.scope ?? '') === 'project' && String(skillReq?.project ?? '') === '') {
               // Never guess: an empty project used to fall back to the cwd and wrote
               // the skill into the wrong workspace.
-              result = { ok: false, reason: '未选择项目，无法写入项目级技能', name: '', body: '', nonce: skillNonce }
+              result = { ok: false, reason: '未选择项目，无法写入项目级技能', name: '', body: '', nonce: skillNonce , at: new Date().toISOString() }
             }
             else if (target === undefined) {
-              result = { ok: false, reason: '未知的写入区域', name: '', body: '', nonce: skillNonce }
+              result = { ok: false, reason: '未知的写入区域', name: '', body: '', nonce: skillNonce , at: new Date().toISOString() }
             } else {
               const payload = {
                 dir: target.dir, name: String(skillReq?.name ?? ''),
@@ -633,7 +635,7 @@ export function apply(ctx, config) {
                 : op === 'rename' ? await renameSkill({ ...payload, from: String(skillReq?.prevName ?? ''), to: String(skillReq?.name ?? '') })
                   : op === 'delete' ? await deleteSkill(payload)
                     : await updateSkill(payload)
-              result = { ok: done.ok === true, reason: String(done.reason ?? ''), name: String(done.name ?? ''), body: '', nonce: skillNonce }
+              result = { ok: done.ok === true, reason: String(done.reason ?? ''), name: String(done.name ?? ''), body: '', nonce: skillNonce , at: new Date().toISOString() }
             }
             // A skill op must never throw out of here: an exception used to escape
             // the plugin load and DSH exited with "fatal load failure", taking the
