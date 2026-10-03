@@ -449,10 +449,14 @@ export function apply(ctx, config) {
         agentsHome: process.env.DSH_AGENTS_HOME ?? join(homedir(), '.agents'),
       })
       discoveryInfo = { at: new Date().toISOString(), roots, count: discoveredSkills.length, error: '' }
+      // The periodic heartbeat only fires on change, and the first one happens
+      // before this async scan finishes — so publish the diagnostics explicitly.
+      beat({ ...lastBeat, at: new Date().toISOString(), publishedAt, discovery: discoveryInfo })
     } catch (error) {
       // A failed scan must not look like "there are no skills on disk", and the
       // reason must survive into the published diagnostics.
       discoveryInfo = { at: new Date().toISOString(), roots, count: 0, error: String(error?.message ?? error) }
+      beat({ ...lastBeat, at: new Date().toISOString(), publishedAt, discovery: discoveryInfo })
       if (process.env.SMP_DEBUG) console.error('[skills-mcp-panel] skill scan failed', error)
       discoveredSkills = []
     }
