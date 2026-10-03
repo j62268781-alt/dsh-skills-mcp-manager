@@ -66,7 +66,9 @@ try {
   const live = {
     skillRequest: { op: 'create', scope: 'global', id: 'dsh', project: '', name: 'smoke-skill', prevName: '', description: '冒烟', body: '# 冒烟正文', nonce: 'smoke-nonce' },
     skillResult: { ok: false, reason: '', name: '', nonce: '' },
-    servers: [], skills: [], rowOps: [],
+    servers: [], skills: [], rowOps: [], rowOpsReady: false,
+    importRequest: { source: '', scope: '', project: '', nonce: '' },
+    importResult: { nonce: '', files: [], servers: [], error: '' },
   }
   const noop = () => {}
   const mod = await import(pathToFileURL(join(pkgDir, 'dist', 'index.js')).href)
@@ -86,7 +88,7 @@ try {
     servers: { get: () => live.servers }, skills: { get: () => live.skills }, rowOps: { get: () => live.rowOps },
     skillRequest: { get: () => live.skillRequest }, skillResult: { get: () => live.skillResult },
     profileServers: { get: () => [] }, workspaces: { get: () => [] }, currentWorkspace: { get: () => '' },
-    importRequest: { get: () => ({}) }, importResult: { get: () => ({}) },
+    importRequest: { get: () => live.importRequest }, importResult: { get: () => live.importResult },
   }
 
   try {
@@ -101,6 +103,18 @@ try {
   note(live.skillRequest.nonce === '', '处理完清空了 skillRequest（防止重启重放）')
   const file = join(home, 'skills', 'smoke-skill', 'SKILL.md')
   note(existsSync(file), '技能文件确实写到磁盘')
+
+  // Channel 2: importRequest -> importResult (a bogus source must come back as a
+  // result, never as a thrown error).
+  live.importRequest = { source: 'not-a-real-source', scope: 'global', project: '', nonce: 'import-probe' }
+  await new Promise((resolveWait) => setTimeout(resolveWait, 1500))
+  note(live.importResult?.nonce === 'import-probe', 'importRequest 通道有回执（nonce 原样返回）')
+
+  // Channel 3: rowOps drain. applyRowOp cannot work here (no profileContext), so
+  // this asserts the drain *contains* the failure instead of letting it escape.
+  live.rowOps = [{ op: 'toggle', entryId: 'mcp-does-not-exist', enabled: false }]
+  await new Promise((resolveWait) => setTimeout(resolveWait, 1500))
+  note(Array.isArray(live.rowOps) && live.rowOps.length === 0, 'rowOps 被排空（失败被记录而非逃逸）')
 } catch (error) {
   note(false, '冒烟脚本自身出错：' + error.message)
 } finally {
@@ -114,5 +128,5 @@ if (problems.length > 0) {
   console.log('  ✗ Host 冒烟失败：' + problems.join(' | '))
   process.exit(1)
 }
-console.log('  ✓ Host 冒烟通过：加载 / apply / skillRequest 通道 / 清空请求 / 落盘 全部正常')
+console.log('  ✓ Host 冒烟通过：加载 / apply / skillRequest / importRequest / rowOps 排空 全部正常')
 process.exit(0)
