@@ -1,0 +1,58 @@
+name: ci
+
+# 平时改代码就在这几道门禁上把关：push 到 master、以及所有 PR。
+# 发版走的是 publish.yml（release published 触发），两者互不替代：
+# publish 自己也会再跑一次 gate，避免「CI 绿了但发的是另一个 commit」。
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      # 三个版本都跑完再下结论：package.json 声明的是 engines.node >= 20
+      fail-fast: false
+      matrix:
+        node: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 语法/构建（Host tsc + Client esbuild）
+        run: |
+          node -v
+          npm -v
+          npm run build
+
+      # 与本地同一条命令：未定义名字 → 单测 → 加载冒烟 → 预览基线。
+      # 其中 smoke 需要本机安装的 DSH、预览基线需要 /tmp/preview 夹具，
+      # CI 上两者都找不到，会自动「跳过」而不是静默通过。
+      - name: 门禁
+        run: npm run gate
+
+      # 打包清单也顺手看一眼：漏了 dist/ 或混进 lib/src 时会在这里响。
+      - name: 打包清单自检
+        run: |
+          set -euo pipefail
+          npm pack --dry-run 2>&1 | tee /tmp/pack.txt
+          grep -q "dist/index.js" /tmp/pack.txt || { echo "::error::打包清单里没有 dist/index.js（files 或构建有问题）"; exit 1; }
+          if grep -q "lib/src/" /tmp/pack.txt; then echo "::error::打包清单里混进了 lib/src（files 白名单写错了）"; exit 1; fi
+          echo "✓ 打包清单正常"

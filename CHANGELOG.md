@@ -16,6 +16,8 @@
 - **README 只留用户视角**：自测命令、诊断文件与恢复手册搬到 `docs/DEVELOPMENT.md`（新增），
   README 里只留一条「更多文档」索引；两张预览图改用 raw.githubusercontent 绝对地址，
   这样在 npm 页面与 GitHub 上都能正常显示
+- **CI**：新增 `.github/workflows/ci.yml` —— push 到 `master` 与所有 PR 在 Node 20 / 22 / 24
+  三个版本上各跑一遍 `build` + `gate`，并核对 `npm pack --dry-run` 的清单
 - **CI 发布**：新增 `.github/workflows/publish.yml` —— 发布 GitHub Release（tag `v<版本>`）即自动
   核对版本 → 构建 → 跑门禁 → 发包到 npm；优先走 npm 可信发布（OIDC，无需 secret），
   没配 Trusted Publisher 时回退到 `NPM_TOKEN`；支持手动触发与 `dry_run` 演练
