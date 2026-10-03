@@ -482,3 +482,49 @@ Client 半已全部改为 JSX：`lib/src/**` 的渲染模块都是 `.jsx`，`lib
    测试里对应写 `globalThis.__dshReact = React`（见 `esbuild.config.mjs` 与 `scripts/jsx-hooks.mjs`，两者必须一致）。
 2. **测试断言不要用 `React.Children.toArray` 做引用相等**：它会克隆元素并加 key 前缀；
    要比较引用就遍历原始 `props.children`。
+
+## 插件安全边界（2026-10-03，事故后补写）
+
+**规则：绝不允许任何异常逃出这个插件。** 这不是代码风格问题，而是用户配置的安全边界。
+
+原因（DSH 源码 `@deepseek-ai/dsh-app-boot` 里的 `sanitizeProfile`）：
+
+```js
+function sanitizeProfile(binName, profileDir, bundles) {
+  // "Back up the profile patch and retain only the caller's recovery bundles."
+  const backupBase = `${patchPath}.bak-${Date.now()}`
+  renameSync(patchPath, backupPath)                    // 整个 cordis.patch.yml 被改名隔离
+  writeProfileBundles(profileDir, manifest, bundles)   // 其余插件全部禁用
+}
+```
+
+也就是说：**插件在加载期或通道处理里抛出一个未捕获异常 → DSH 判定 profile 加载失败 →
+把用户整份 `cordis.patch.yml` 改名隔离为 `.bak-<毫秒>`，并禁用所有非恢复插件**
+（连带模型提供者一起消失，界面上看起来就是"模型不见了、插件全被禁用"）。
+
+### 事故复盘（已经发生并被修复）
+
+- 症状：应用整体崩溃、退出码 1，日志 `dsh: fatal load failure: ReferenceError: invalidate is not defined`
+- 根因：`skillRequest` 处理器里调用了一个**从未定义**的函数 `invalidate()`
+- 连带：DSH 的恢复流程隔离了 patch，`llm-pi-ai` 的完整模型列表与 `llm-deepseek` /
+  `dsh-context` / `better-sidebar` 等条目从活动文件里消失（**数据一直在 `.bak-<毫秒>` 里**）
+- 修复：删掉该调用；处理体包双层 `try/catch`；处理完在同一次写入里清空请求（防止重启重放）
+
+### 为此新增的两道门禁
+
+| 门禁 | 拦住的错误类型 |
+|---|---|
+| `npm run smoke`（`scripts/host-smoke.mjs`）| 加载/通道期的未捕获异常。按 DSH 的形状真实加载插件，然后依次灌入 `skillRequest`、`importRequest`、一条无法应用的 `rowOps`，断言：无异常逃逸、结果回执、请求被清空、文件真的落盘 |
+| `test/patch.apply.lossless.test.mjs` | 改配置行时丢条目/丢注释/丢 `!!js`。危险夹具 + 可选的 `SMP_REAL_PATCH=<真实 cordis.patch.yml>` 在真实文件副本上跑无损检查 |
+
+`npm run gate` = `build:client` + `npm test` + `npm run smoke` + 预览基线，四道全绿才提交。
+
+### 恢复手册（如果又被隔离）
+
+1. 别慌：数据没丢。找 `~/.dsh/profiles/<profile>/cordis.patch.yml.bak-<毫秒>`（DSH 隔离时留下的原始文件）
+2. 先把**当前**文件另存一份（`cp cordis.patch.yml cordis.patch.yml.after-crash-<时间>`），不要覆盖任何东西
+3. 用备份恢复：`cp cordis.patch.yml.bak-<毫秒> cordis.patch.yml`
+4. 检查是否残留会重放的一次性请求：`grep -n "nonce" cordis.patch.yml`，把 `skills-mcp-panel` 段落里的
+   `skillRequest` 的 `nonce` 清成 `""`（否则重启会重放同一条请求）
+5. 本插件自己的写前备份在 `~/.dsh/skills-mcp-panel.backups/cordis.patch.yml.<ISO 时间戳>.bak`
+
