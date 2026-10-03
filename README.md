@@ -16,7 +16,7 @@
 DSH 插件：把 **Skills** 与 **MCP** 的管理搬进 **设置 → Skills & MCP**。页面是「两个 tab × 两个层级」——MCP 与技能各自分「全局」和「项目级」；卡片、按钮、间距都对齐宿主内置的「内置插件」页，不 import 任何 Harness Client 包。
 
 - 🗂️ **技能**：列表 / 搜索 / 预览全文 / 新建 / 重命名 / 删除，落盘就是 `<技能根>/<名字>/SKILL.md`；删除先备份再删，可手动恢复
-- 🔌 **MCP**：全局条目就是 profile `cordis.patch.yml` 里的**真实 Loader 行**（和内置的 context7 那几行完全同构），增删改停写回配置文件；项目级条目只挂到该项目里运行的 agent
+- 🔌 **MCP**：全局条目就是 profile `cordis.patch.yml` 里的**真实 Loader 行**，增删改停写回配置文件；项目级条目只挂到该项目里运行的 agent
 - 📥 **MCP 导入**：一键扫描 Claude Code / Cursor / VS Code / Gemini / Codex 等 **26 个来源**的用户级或项目级配置，预览后导入
 - ↩️ **两级分明**：同一个页面里切换「全局」和「项目」，项目选择器带工作区补全
 - 🧯 **不动坏你的配置**：插件里绝不把异常抛出去（DSH 会因此隔离整个 profile 配置），写 `cordis.patch.yml` 前自动备份、写前重新校验
