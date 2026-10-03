@@ -26,7 +26,9 @@ export function undefinedNames(output) {
   for (const line of String(output).split('\n')) {
     const missing = /error TS2304: Cannot find name '([^']+)'/.exec(line)
     const typo = /error TS2552: Cannot find name '([^']+)'/.exec(line)
-    const name = missing?.[1] ?? typo?.[1]
+    const early = /error TS2448: Block-scoped variable '([^']+)' used before its declaration/.exec(line)
+    const unassigned = /error TS2454: Variable '([^']+)' is used before being assigned/.exec(line)
+    const name = missing?.[1] ?? typo?.[1] ?? early?.[1] ?? unassigned?.[1]
     if (name === undefined) continue
     if (ENVIRONMENT_NAMES.has(name)) continue
     found.push({ name, line: line.trim() })
@@ -35,15 +37,26 @@ export function undefinedNames(output) {
 }
 
 const here = dirname(fileURLToPath(import.meta.url))
+const runTsc = (root, args) => {
+  try {
+    return execFileSync('npx', ['tsc', ...args], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  } catch (error) {
+    return String(error.stdout ?? '') + String(error.stderr ?? '')
+  }
+}
+
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const root = resolve(here, '..')
-  let output = ''
-  try {
-    output = execFileSync('npx', ['tsc', '-p', 'tsconfig.json', '--noEmit', '--checkJs'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
-  } catch (error) {
-    output = String(error.stdout ?? '') + String(error.stderr ?? '')
-  }
-  const found = undefinedNames(output)
+  const hostOutput = runTsc(root, ['-p', 'tsconfig.json', '--noEmit', '--checkJs'])
+  // The client half is JSX; the TDZ class (used before declaration) is what once
+  // rendered a blank panel, so both roots are checked.
+  const clientOutput = runTsc(root, [
+    '--noEmit', '--allowJs', '--checkJs', '--target', 'es2022', '--module', 'esnext',
+    '--moduleResolution', 'bundler', '--jsx', 'preserve', '--skipLibCheck',
+    '--lib', 'es2022,dom', 'lib/src/client.js',
+  ])
+  const found = undefinedNames(hostOutput + '\n' + clientOutput)
+  console.log(`  · 已检查 src/（Host）与 lib/src/client.js（Client）`)
   if (found.length > 0) {
     console.log('  ✗ 源码里存在未定义的名字（这类错误在真机上会让插件抛异常、整个 profile 被隔离）：')
     for (const item of found.slice(0, 10)) console.log('    ' + item.line)

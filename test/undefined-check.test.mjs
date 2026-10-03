@@ -26,6 +26,15 @@ test('拼错的名字（TS2552）同样被拦下', () => {
   assert.equal(found[0].name, 'hander')
 })
 
+test('TDZ 类（声明前使用 / 赋值前使用）同样被拦下 —— 客户端整页空白的成因', () => {
+  const early = undefinedNames("lib/src/client.js(94,7): error TS2448: Block-scoped variable 'form' used before its declaration.")
+  assert.equal(early.length, 1)
+  assert.equal(early[0].name, 'form')
+  const unassigned = undefinedNames("lib/src/client.js(95,7): error TS2454: Variable 'value' is used before being assigned.")
+  assert.equal(unassigned.length, 1)
+  assert.equal(unassigned[0].name, 'value')
+})
+
 test('其它类型的错误不参与判定（交给各自的闸门）', () => {
   const output = [
     "src/c.js(1,1): error TS2307: Cannot find module 'node:fs/promises' or its corresponding type declarations.",
