@@ -581,7 +581,7 @@ export function apply(ctx, config) {
                 description: String(skillReq?.description ?? ''), body: String(skillReq?.body ?? ''),
               }
               const done = op === 'create' ? await createSkill(payload)
-                : op === 'rename' ? await renameSkill({ ...payload, from: String(skillReq?.prevName ?? '') })
+                : op === 'rename' ? await renameSkill({ ...payload, from: String(skillReq?.prevName ?? ''), to: String(skillReq?.name ?? '') })
                   : op === 'delete' ? await deleteSkill(payload)
                     : await updateSkill(payload)
               result = { ok: done.ok === true, reason: String(done.reason ?? ''), name: String(done.name ?? ''), nonce: skillNonce }

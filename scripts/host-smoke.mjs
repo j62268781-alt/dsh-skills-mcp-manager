@@ -11,7 +11,7 @@
  * we stage a package dir whose node_modules/@deepseek-ai points at the app's.
  */
 import { cp, mkdir, mkdtemp, rm, symlink } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -103,6 +103,40 @@ try {
   note(live.skillRequest.nonce === '', '处理完清空了 skillRequest（防止重启重放）')
   const file = join(home, 'skills', 'smoke-skill', 'SKILL.md')
   note(existsSync(file), '技能文件确实写到磁盘')
+
+  // Send one op and wait for its own receipt (the Host clears the request).
+  const sendSkill = async (request, waitMs = 1800) => {
+    live.skillResult = { ok: false, reason: '', name: '', nonce: '' }
+    live.skillRequest = {
+      op: '', scope: 'global', id: 'dsh', project: '', name: '', prevName: '',
+      description: '', body: '', ...request,
+      nonce: `probe-${Date.now()}-${Math.round(Math.random() * 1e6)}`,
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, waitMs))
+    return live.skillResult
+  }
+
+  // update: same name, new content — the panel edits in place.
+  const updated = await sendSkill({ op: 'update', name: 'smoke-skill', description: '冒烟', body: '# 改后正文' })
+  note(updated.ok === true && readFileSync(file, 'utf8').includes('# 改后正文'), 'update 通道就地改写正文')
+
+  // rename: the user's actual question — does the folder move too? It must,
+  // because DSH takes the name from the frontmatter but treats the directory as
+  // the skill's resource base.
+  const renamed = await sendSkill({ op: 'rename', name: 'smoke-renamed', prevName: 'smoke-skill', description: '冒烟', body: '# 改后正文' })
+  const oldDir = join(home, 'skills', 'smoke-skill')
+  const newDir = join(home, 'skills', 'smoke-renamed')
+  const newFile = join(newDir, 'SKILL.md')
+  note(renamed.ok === true && !existsSync(oldDir) && existsSync(newFile), 'rename 把目录一起改名（旧目录消失、新目录存在）')
+  if (existsSync(newFile)) {
+    const text = readFileSync(newFile, 'utf8')
+    note(/name:\s*smoke-renamed/.test(text), 'rename 同步改写了 frontmatter 的 name')
+  } else {
+    note(false, 'rename 后读不到新目录的 SKILL.md')
+  }
+  const backups = existsSync(join(home, 'skills')) ? readdirSync(join(home, 'skills')).filter((name) => name.startsWith('.smp-backup-')) : []
+  note(backups.length > 0, `rename 之前留了备份（${backups.length} 个 .smp-backup-*）`)
+  note((await sendSkill({ op: 'create', name: 'smoke-renamed', body: 'x' })).ok === false, '同名再创建被拒绝（不覆盖既有技能）')
 
   // Channel 2: importRequest -> importResult (a bogus source must come back as a
   // result, never as a thrown error).
