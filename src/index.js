@@ -608,10 +608,26 @@ export function apply(ctx, config) {
            try {
             let result
             if (op === 'read') {
-              // Only ever read a file the latest scan actually found.
+              // Only ever read a file the scan actually found — but the in-memory list
+              // can lag a just-created skill, so rescan once before refusing (using the
+              // same root sources as the periodic scan).
               const wanted = String(skillReq?.path ?? '')
-              const known = Array.isArray(discoveredSkills) && discoveredSkills.some((entry) => entry.path === wanted)
+              const isKnown = () => Array.isArray(discoveredSkills) && discoveredSkills.some((entry) => entry.path === wanted)
+              const known = isKnown()
               if (!known) {
+                try {
+                  const extra = []
+                  for (const agent of agents.values()) extra.push(projectRootOf(agent.cwd))
+                  for (const workspace of configuredWorkspaces(ctx)) extra.push(projectRootOf(String(workspace?.path ?? workspace?.dir ?? '')))
+                  const scopes = discoveredSkills.map((entry) => entry.scope).filter((scope) => typeof scope === 'string' && scope !== '' && scope !== 'global')
+                  const nextRoots = [...new Set([...roots.map((entry) => projectRootOf(entry.dir)), ...scopes, ...extra])]
+                    .filter((root) => typeof root === 'string' && root !== '')
+                  await refreshDiscovered(nextRoots)
+                } catch (error) {
+                  if (process.env.SMP_DEBUG) console.error('[skills-mcp-panel] read rescan failed', error)
+                }
+              }
+              if (!isKnown()) {
                 result = { ok: false, reason: '该技能不在当前扫描结果里', name: '', body: '', nonce: skillNonce , at: new Date().toISOString() }
               } else {
                 try {
