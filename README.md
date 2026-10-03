@@ -4,6 +4,8 @@ Settings 里的一个面板：**两个 tab（MCP / Skills）× 两个范围（�
 样式与排布照着内置的 **Plugins** 页做（`--dsw-*` token + 卡片/行/操作区），不 import 任何
 Harness Client 包，也没有第三方依赖。
 
+> 交付清单、门禁说明与"验证到什么程度（含未验证项）"见 [`DELIVERY.md`](./DELIVERY.md)。
+
 ## 它怎么工作
 
 | | 状态存哪 | 谁去落地 |
