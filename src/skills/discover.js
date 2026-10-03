@@ -43,8 +43,14 @@ export function parseFrontmatter(markdown) {
   }
 }
 
-/** Bytes of SKILL.md body returned on demand for the preview dialog. */
-const BODY_LIMIT = 20000
+/**
+ * Bytes of SKILL.md body returned on demand for the preview dialog.
+ *
+ * Keep this small: the body travels through the settings document, which is a
+ * single file DSH rewrites in full — one long preview used to inflate it to 40KB+
+ * and every later write got slower. 4KB covers essentially all real skills.
+ */
+const BODY_LIMIT = 4000
 
 /** The markdown body without the frontmatter block, capped for the projection. */
 export function bodyOf(markdown) {
