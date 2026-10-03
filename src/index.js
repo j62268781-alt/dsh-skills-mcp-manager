@@ -525,6 +525,9 @@ export function apply(ctx, config) {
       }
       Promise.resolve(inner.settings.update('skills-mcp-panel', {
           profileServers: plain, workspaces: spaces, currentWorkspace, discoveredSkills, skillDirs, discoveryInfo,
+          // Re-assert every publish: this marker has been lost by a later rewrite
+          // before, and losing it hides the row actions in the panel.
+          rowOpsReady: true,
         }))
         .then(() => {
           published = key
