@@ -147,7 +147,11 @@ div[role='dialog']:has(.smp-skillDialogBody),
   padding: 14px 16px;
   background: var(--dsh-bg-secondary, rgba(127, 127, 127, 0.07));
   border-radius: 10px;
-  max-height: 62vh;
+  /* Taller reading area: a minimum so short bodies do not leave a tiny box, and
+     a higher cap so long bodies scroll later. Measured before: 435 rendered /
+     566 cap at a 913px viewport. */
+  min-height: 50vh;
+  max-height: 78vh;
   width: auto;
   max-width: 100%;
   box-sizing: border-box;
