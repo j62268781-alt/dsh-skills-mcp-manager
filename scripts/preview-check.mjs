@@ -22,10 +22,26 @@ if (!existsSync(previewDir)) {
 }
 
 execFileSync('python3', ['build.py'], { cwd: previewDir })
-const dom = execFileSync(CHROME, [
-  '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
-  '--virtual-time-budget=3000', '--dump-dom', 'file:///tmp/preview/p-mcp.html?state=mcp',
-], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 90_000 })
+let dom = ''
+let chromeLog = ''
+try {
+  dom = execFileSync(CHROME, [
+    '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
+    '--virtual-time-budget=3000', '--dump-dom', 'file:///tmp/preview/p-mcp.html?state=mcp',
+  ], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 90_000 })
+} catch (error) {
+  // A crashed page still tells us something: keep whatever was dumped.
+  dom = String(error.stdout ?? '')
+  chromeLog = String(error.stderr ?? '')
+}
+
+// Page-level JS errors are reported on stderr by Chrome. Without this, a render
+// crash just looked like "everything is missing" with no reason.
+const jsErrors = chromeLog
+  .split('\n')
+  .filter((line) => /Uncaught|ReferenceError|TypeError|SyntaxError|is not a function|Cannot read/.test(line))
+  .map((line) => line.replace(/^.*?:\s*/, '').slice(0, 200))
+  .slice(0, 3)
 
 const count = (needle) => dom.split(needle).length - 1
 const actual = {
@@ -42,7 +58,9 @@ const actual = {
 }
 
 const problems = []
+if (jsErrors.length > 0) problems.push(`页面 JS 异常：${jsErrors.join(' | ')}`)
 if (actual.error) problems.push('页面出现渲染错误 (smp-error-msg)')
+if (actual.entries === 0) problems.push(`本次 dump 大小 ${dom.length} 字节，开头：${dom.slice(0, 200).replace(/\s+/g, ' ')}`)
 if (actual.entries !== EXPECTED.entries) {
   problems.push(`条目 ${actual.entries} ≠ ${EXPECTED.entries}`)
   problems.push(`  实际条目：${JSON.stringify(actual.identityTexts)}`)
