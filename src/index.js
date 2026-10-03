@@ -566,6 +566,7 @@ export function apply(ctx, config) {
           })
           const target = roots.find((entry) => entry.scope === skillReq?.scope && entry.id === skillReq?.id)
           void (async () => {
+           try {
             let result
             if (target === undefined) {
               result = { ok: false, reason: '未知的写入区域', name: '', nonce: skillNonce }
@@ -580,10 +581,22 @@ export function apply(ctx, config) {
                     : await updateSkill(payload)
               result = { ok: done.ok === true, reason: String(done.reason ?? ''), name: String(done.name ?? ''), nonce: skillNonce }
             }
-            await Promise.resolve(inner.settings.update('skills-mcp-panel', { skillResult: result }))
-            // Announce the change to every running client and rescan the disk now.
-            invalidate()
-            await refreshDiscovered(roots.map((entry) => projectRootOf(entry.dir)))
+            // A skill op must never throw out of here: an exception used to escape
+            // the plugin load and DSH exited with "fatal load failure", taking the
+            // whole app (and every other plugin) down with it.
+            try {
+              await Promise.resolve(inner.settings.update('skills-mcp-panel', {
+                skillResult: result,
+                // Clear the request in the same write so a restart cannot replay it.
+                skillRequest: { op: '', scope: '', id: '', project: '', name: '', prevName: '', description: '', body: '', nonce: '' },
+              }))
+              await refreshDiscovered(roots.map((entry) => projectRootOf(entry.dir)))
+            } catch (error) {
+              console.error('[skills-mcp-panel] skill op failed:', error)
+            }
+           } catch (error) {
+            console.error('[skills-mcp-panel] skill request failed:', error)
+           }
           })()
         }
       }
