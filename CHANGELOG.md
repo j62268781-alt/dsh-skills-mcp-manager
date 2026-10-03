@@ -2,6 +2,11 @@
 
 ## 0.4.0 — 首个可发布版本：去掉 @local，按 npm / 插件市场的要求打包
 
+- **包名（scoped）**：`dsh-skills-mcp-manager` → **`@j62268781-alt/dsh-skills-mcp-manager`**。
+  不带 scope 的名字虽然 npm 上是空的，但插件市场目录里已有一个**同名同功能**的条目
+  （`zebbkira/dsh-skills-mcp-manager`），所以用 scope 把 npm 名固定在自己账号下。
+  同步改了 `cordis.patch.yml` 行名、客户端 bundle id、部署路径与文档里的每条命令；
+  GitHub 仓库名与市场条目名保持不变（仍是 `dsh-skills-mcp-manager`）
 - **包名**：`@local/dsh-skills-mcp-panel` → **`dsh-skills-mcp-manager`**（npm / 仓库 / 面板 id 同名）。
   同步改了 `cordis.patch.yml` 的行名、客户端 bundle 的 `__ModuleLoader__.load({ id })`、
   部署目标目录与 `verify-served.mjs` 的匹配串

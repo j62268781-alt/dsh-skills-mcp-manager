@@ -3,9 +3,12 @@
 从零到「别人能在 DSH 插件市场里搜到并一键装上」的完整流程。
 面向的是**维护者**；普通用户只需要看 [README 的安装一节](../README.md#安装)。
 
-- 包名：`dsh-skills-mcp-manager`（npm / 仓库 / 面板 id 同名）
-  > `dsh-skills-mcp-panel` 这个名字在 npm 上**已被他人占用**（KyattoCat 的同类插件），所以本包不用它。
-- 仓库：<https://github.com/j62268781-alt/dsh-skills-mcp-manager>
+- npm 包名：`@j62268781-alt/dsh-skills-mcp-manager`（**scoped**，归你自己的 npm 账号独占）
+  > 不带 scope 的 `dsh-skills-mcp-manager` 虽然 npm 上是空的，但市场目录里已经有一个**同名同功能**的
+  > 插件（`zebbkira/dsh-skills-mcp-manager`），所以用 scope 把 npm 名固定在自己账号下。
+  > 发布前提：**scope 必须等于你的 npm 用户名**（或你拥有的组织），否则 `npm publish` 报 E403。
+  > 顺便一提：`dsh-skills-mcp-panel` 这个名字在 npm 上也被占了（KyattoCat 的同类插件）。
+- GitHub 仓库：<https://github.com/j62268781-alt/dsh-skills-mcp-manager>（仓库名不带 scope）
 - 市场目录：<https://github.com/awesome-dsh-plugin/awesome-dsh-plugin>（DSH 里「设置 → 插件市场」的数据源）
 
 ---
@@ -17,14 +20,14 @@
 | 仓库公开 | 市场 CI 会直接拉 `raw.githubusercontent.com` 上的 `package.json`，私有仓库一律过不了 |
 | 仓库 ≥ 1 天 | CI 有仓库年龄检查，新建的仓库当天提 PR 会被拒 |
 | GitHub topic `dsh-plugin` | 仓库 About 里加上，收录的硬要求 |
-| npm 账号 | `npm login`（发布用）；包名 `dsh-skills-mcp-manager` 目前未被占用 |
+| npm 账号 | `npm login`；账号名必须与 scope `@j62268781-alt` 一致（或你拥有同名组织），否则 `npm publish` 报 E403 |
 | `dsh.bundle` 清单 | 仓库根 `package.json` 里的 `dsh.bundle.patch` + 根目录 `cordis.patch.yml`——**只声明 `dsh.client` 是市场最常见的拒收原因** |
 
 `package.json` 里与上架相关的字段（本仓库已就位）：
 
 ```jsonc
 {
-  "name": "dsh-skills-mcp-manager",
+  "name": "@j62268781-alt/dsh-skills-mcp-manager",
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/j62268781-alt/dsh-skills-mcp-manager.git" }, // 必须指回被收录的仓库
   "dsh": { "bundle": { "patch": "./cordis.patch.yml" }, "client": { "platform": "web", "immediately": true, "inject": ["…"] } },
@@ -65,7 +68,7 @@ npm pack --dry-run      # 只看清单：应包含 dist/**、lib/client.js、cor
 npm version minor --no-git-tag-version   # 改版本（同时更新 CHANGELOG.md）
 npm login                                # 浏览器里完成登录
 npm publish                              # prepack 会自动 build
-npm view dsh-skills-mcp-manager version  # 验证
+npm view @j62268781-alt/dsh-skills-mcp-manager version  # 验证
 ```
 
 发出 0.4.0 之后，去 **npmjs.com → 这个包 → Settings → Trusted Publisher** 配置：
@@ -104,8 +107,8 @@ npm login
 npm publish          # 本地也能发；publishConfig.access=public 已写在 package.json 里
 ```
 
-- 发完立刻可用的安装方式：`dsh plugin --profile <profile> add dsh-skills-mcp-manager`。
-- 发错了用 `npm unpublish dsh-skills-mcp-manager@<版本>`（72 小时内、且该版本没人依赖时才行）或直接发下一个 patch 版本。
+- 发完立刻可用的安装方式：`dsh plugin --profile <profile> add @j62268781-alt/dsh-skills-mcp-manager`。
+- 发错了用 `npm unpublish @j62268781-alt/dsh-skills-mcp-manager@<版本>`（72 小时内、且该版本没人依赖时才行）或直接发下一个 patch 版本。
 - 上面的命令需要能连上 registry；走代理的话：`git config` 那套不管用，用 `npm config set proxy` / `https-proxy`，或临时 `HTTPS_PROXY=... npm publish`。
 
 ## 3. GitHub Release（推荐）
@@ -113,7 +116,7 @@ npm publish          # 本地也能发；publishConfig.access=public 已写在 p
 给访问不了 npm 的用户一条预构建安装路径，也让市场安装更快（市场优先用 npm，其次才是 Release tarball）：
 
 ```bash
-npm pack                                  # 生成 dsh-skills-mcp-manager-<版本>.tgz
+npm pack                                  # 生成 j62268781-alt-dsh-skills-mcp-manager-<版本>.tgz
 git tag v<版本> && git push --tags
 ```
 
@@ -121,11 +124,11 @@ git tag v<版本> && git push --tags
 
 | 资产 | 用途 |
 |---|---|
-| `dsh-skills-mcp-manager-<版本>.tgz` | 锁定版本的安装链接 |
-| `dsh-skills-mcp-manager.tgz` | 恒定指向最新版（别名），安装命令不用随版本改 |
+| `j62268781-alt-dsh-skills-mcp-manager-<版本>.tgz` | 锁定版本的安装链接 |
+| `j62268781-alt-dsh-skills-mcp-manager.tgz` | 恒定指向最新版（别名），安装命令不用随版本改 |
 
 ```bash
-dsh plugin --profile <profile> add https://github.com/j62268781-alt/dsh-skills-mcp-manager/releases/latest/download/dsh-skills-mcp-manager.tgz
+dsh plugin --profile <profile> add https://github.com/j62268781-alt/dsh-skills-mcp-manager/releases/latest/download/j62268781-alt-dsh-skills-mcp-manager.tgz
 ```
 
 > 用 `latest/download/` 时必须保留**无版本号**的那个资产名：只传带版本号的文件名，下一个版本发布后旧链接会 404。
@@ -184,17 +187,17 @@ description:
 ## 5. 本机（开发）安装
 
 ```bash
-npm run deploy     # 先跑 smoke，通过后拷进 $DSH_HOME/profiles/desktop/node_modules/dsh-skills-mcp-manager
+npm run deploy     # 先跑 smoke，通过后拷进 $DSH_HOME/profiles/desktop/node_modules/@j62268781-alt/dsh-skills-mcp-manager
 ```
 
 再把包名挂进 profile 的 bundles（`$DSH_HOME/profiles/desktop/package.json` → `dsh.profile.bundles`）：
 
 ```jsonc
-"dsh-skills-mcp-manager"
+"@j62268781-alt/dsh-skills-mcp-manager"
 ```
 
 **重启 DSH** 让 Host 半生效；之后只改客户端的话，`npm run deploy` + 刷新页面即可。
-回滚：profile 的 `node_modules/dsh-skills-mcp-manager.backup-<时间戳>` 改回原名。
+回滚：profile 的 `node_modules/@j62268781-alt/dsh-skills-mcp-manager.backup-<时间戳>` 改回原名。
 
 ## 6. 每次发版的清单
 
@@ -202,6 +205,6 @@ npm run deploy     # 先跑 smoke，通过后拷进 $DSH_HOME/profiles/desktop/n
 - [ ] `npm run gate` 本地全绿；`npm pack --dry-run` 清单正确（有 `dist/`、`lib/client.js`，没有 `lib/src/`、`test/`）
 - [ ] 打 tag（`v<版本>`，与 `package.json` 一致）并推送
 - [ ] 在 GitHub 上按该 tag 发 Release → **Actions 的 publish 工作流自动发包**（首次发布前先手动发一次并配好 Trusted Publisher，见 2.1）
-- [ ] 工作流跑完后核对：`npm view dsh-skills-mcp-manager version` 是新版本、npm 页面上有 provenance 徽章
+- [ ] 工作流跑完后核对：`npm view @j62268781-alt/dsh-skills-mcp-manager version` 是新版本、npm 页面上有 provenance 徽章
 - [ ] 在同一个 Release 上传两个 tarball 资产（`-<版本>.tgz` 与无版本号的那个）
 - [ ] 市场已收录时：确认卡片显示新版本（收录前先按第 4 节提 PR）

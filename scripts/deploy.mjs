@@ -13,10 +13,10 @@ import { dirname, join, resolve } from 'node:path'
 
 const source = resolve(import.meta.dirname, '..')
 const profile = process.env.DSH_PROFILE_DIR ?? join(homedir(), '.dsh', 'profiles', 'desktop')
-const target = join(profile, 'node_modules', 'dsh-skills-mcp-manager')
+const target = join(profile, 'node_modules', '@j62268781-alt', 'dsh-skills-mcp-manager')
 
 // Safety: only ever touch this exact package inside the profile.
-if (!target.endsWith(join('node_modules', 'dsh-skills-mcp-manager'))) {
+if (!target.endsWith(join('node_modules', '@j62268781-alt', 'dsh-skills-mcp-manager'))) {
   throw new Error(`refusing to deploy to unexpected path: ${target}`)
 }
 if (!existsSync(profile)) throw new Error(`profile not found: ${profile}`)

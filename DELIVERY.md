@@ -1,7 +1,7 @@
 # 交付说明（2026-10-03）
 
 一个 Self-contained 的 DSH 面板插件：在设置里管理 **Skills 与 MCP**，覆盖**全局**与**项目级**两个作用域。
-包名 `dsh-skills-mcp-manager`，安装到 `<profile>/node_modules/dsh-skills-mcp-manager`；
+包名 `dsh-skills-mcp-manager`，安装到 `<profile>/node_modules/@j62268781-alt/dsh-skills-mcp-manager`；
 发包与上架流程见 [`docs/PUBLISHING.md`](./docs/PUBLISHING.md)。
 
 ## 功能

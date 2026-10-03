@@ -55,10 +55,10 @@ DSH 插件：把 **Skills** 与 **MCP** 的管理搬进 **设置 → Skills & MC
 
 ```bash
 # npm 包（预构建，安装时不需要编译）
-dsh plugin --profile web add dsh-skills-mcp-manager
+dsh plugin --profile web add @j62268781-alt/dsh-skills-mcp-manager
 
 # 或 GitHub Release 上的预构建 tarball（链接恒定指向最新版）
-dsh plugin --profile web add https://github.com/j62268781-alt/dsh-skills-mcp-manager/releases/latest/download/dsh-skills-mcp-manager.tgz
+dsh plugin --profile web add https://github.com/j62268781-alt/dsh-skills-mcp-manager/releases/latest/download/j62268781-alt-dsh-skills-mcp-manager.tgz
 ```
 
 **重启 DSH**，再刷新页面：**设置 → Skills & MCP**。
@@ -66,7 +66,7 @@ dsh plugin --profile web add https://github.com/j62268781-alt/dsh-skills-mcp-man
 卸载：
 
 ```bash
-dsh plugin --profile web remove dsh-skills-mcp-manager
+dsh plugin --profile web remove @j62268781-alt/dsh-skills-mcp-manager
 ```
 
 ### 从源码（开发）
@@ -79,14 +79,14 @@ npm run build      # dist/（Host，tsc）+ lib/client.js（Client，esbuild 单
 npm run deploy     # 拷贝进 profile；部署前先跑加载冒烟，失败则 profile 一字不动
 ```
 
-`npm run deploy` 的目标是 `$DSH_HOME/profiles/desktop/node_modules/dsh-skills-mcp-manager`，
+`npm run deploy` 的目标是 `$DSH_HOME/profiles/desktop/node_modules/@j62268781-alt/dsh-skills-mcp-manager`，
 旧版本备份成同级的 `.backup-<时间戳>`（回滚只需改名回来）。仓库**不提交构建产物**，所以克隆后必须先 build。
 
 之后把包名挂进 profile 的 bundles 并重启：
 
 ```jsonc
 // $DSH_HOME/profiles/desktop/package.json
-{ "dsh": { "profile": { "bundles": [ /* … */ "dsh-skills-mcp-manager" ] } } }
+{ "dsh": { "profile": { "bundles": [ /* … */ "@j62268781-alt/dsh-skills-mcp-manager" ] } } }
 ```
 
 ## 使用
