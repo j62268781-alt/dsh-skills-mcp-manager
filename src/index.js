@@ -614,7 +614,13 @@ export function apply(ctx, config) {
                   result = { ok: false, reason: String(error?.message ?? error), name: '', body: '', nonce: skillNonce }
                 }
               }
-            } else if (target === undefined) {
+            }
+            else if (String(skillReq?.scope ?? '') === 'project' && String(skillReq?.project ?? '') === '') {
+              // Never guess: an empty project used to fall back to the cwd and wrote
+              // the skill into the wrong workspace.
+              result = { ok: false, reason: '未选择项目，无法写入项目级技能', name: '', body: '', nonce: skillNonce }
+            }
+            else if (target === undefined) {
               result = { ok: false, reason: '未知的写入区域', name: '', body: '', nonce: skillNonce }
             } else {
               const payload = {
