@@ -7,6 +7,7 @@
  * backup so a bad build can be rolled back by renaming it back.
  */
 import { cpSync, existsSync, mkdirSync, renameSync, rmSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 
@@ -19,6 +20,18 @@ if (!target.endsWith(join('node_modules', '@local', 'dsh-skills-mcp-panel'))) {
   throw new Error(`refusing to deploy to unexpected path: ${target}`)
 }
 if (!existsSync(profile)) throw new Error(`profile not found: ${profile}`)
+
+// Gate: never touch the profile with a build that cannot even load. The smoke
+// test loads the freshly built dist the way DSH does and pushes a real request
+// through every channel — an uncaught error there is exactly what makes DSH
+// quarantine the user's whole cordis.patch.yml, so it must fail *before* the copy.
+console.log('  · 部署前先做加载冒烟（npm run smoke）…')
+try {
+  execFileSync(process.execPath, ['scripts/host-smoke.mjs'], { cwd: source, stdio: 'inherit' })
+} catch {
+  console.error('  ✗ 加载冒烟失败：已中止部署，profile 未被改动')
+  process.exit(1)
+}
 
 if (existsSync(target)) {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-')
