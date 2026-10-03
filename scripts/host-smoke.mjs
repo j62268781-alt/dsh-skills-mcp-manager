@@ -10,7 +10,7 @@
  * The plugin imports @deepseek-ai/* packages that only exist next to the app, so
  * we stage a package dir whose node_modules/@deepseek-ai points at the app's.
  */
-import { cp, mkdir, mkdtemp, rm, symlink } from 'node:fs/promises'
+import { cp, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
@@ -62,6 +62,11 @@ try {
   await mkdir(home, { recursive: true })
   process.env.DSH_HOME = home
   process.env.DSH_AGENTS_HOME = join(stage, 'agents')
+  // A skill on disk up front, so the discovery channel has something to publish.
+  await mkdir(join(home, 'skills', 'smoke-discovered'), { recursive: true })
+  await writeFile(join(home, 'skills', 'smoke-discovered', 'SKILL.md'),
+    '---\nname: smoke-discovered\ndescription: 发现通道冒烟\n---\n\n# 发现\n')
+  await mkdir(join(home, 'stagingMarker'), { recursive: true })
 
   const live = {
     skillRequest: { op: 'create', scope: 'global', id: 'dsh', project: '', name: 'smoke-skill', prevName: '', description: '冒烟', body: '# 冒烟正文', nonce: 'smoke-nonce' },
@@ -149,6 +154,12 @@ try {
   live.rowOps = [{ op: 'toggle', entryId: 'mcp-does-not-exist', enabled: false }]
   await new Promise((resolveWait) => setTimeout(resolveWait, 1500))
   note(Array.isArray(live.rowOps) && live.rowOps.length === 0, 'rowOps 被排空（失败被记录而非逃逸）')
+
+  // Channel 4: disk-skill discovery. This is where the real app silently published
+  // an empty list, so the smoke must prove the channel actually publishes.
+  const discovered = Array.isArray(live.discoveredSkills) ? live.discoveredSkills : []
+  note(discovered.some((skill) => skill.name === 'smoke-discovered'), '磁盘技能发现通道发布了 staged 技能')
+  note(typeof live.discoveryInfo?.at === 'string' && live.discoveryInfo.at !== '', 'discoveryInfo 记录了扫描时间（诊断通道可用）')
 } catch (error) {
   note(false, '冒烟脚本自身出错：' + error.message)
 } finally {
@@ -162,5 +173,5 @@ if (problems.length > 0) {
   console.log('  ✗ Host 冒烟失败：' + problems.join(' | '))
   process.exit(1)
 }
-console.log('  ✓ Host 冒烟通过：加载 / apply / skillRequest / importRequest / rowOps 排空 全部正常')
+console.log('  ✓ Host 冒烟通过：加载 / skillRequest / importRequest / rowOps 排空 / 磁盘技能发现 全部正常')
 process.exit(0)
