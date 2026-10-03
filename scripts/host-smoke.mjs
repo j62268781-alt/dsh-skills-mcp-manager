@@ -166,6 +166,18 @@ try {
   // to pass every other assertion, so assert the writes actually happened.
   note((live.__updates ?? 0) > 0, 'Host 确实调用了 settings.update（写入通道真的在工作）')
 
+  // `projectRootOf` walks up to the nearest ancestor holding `.git`, so the staged
+  // project needs that marker or the skill lands in some unrelated ancestor.
+  await mkdir(join(stage, '.git'), { recursive: true })
+
+  // Project-level create must land on disk under <project>/.agents/skills.
+  const projNonce = String(Date.now())
+  live.skillRequest = { op: 'create', scope: 'project', id: 'agents', project: stage, path: '', name: 'smoke-project-skill', prevName: '', description: '项目级冒烟', body: '# 项目级\n', nonce: projNonce }
+  await new Promise((resolve) => setTimeout(resolve, 400))
+  const projFile = join(stage, '.agents', 'skills', 'smoke-project-skill', 'SKILL.md')
+  note(live.skillResult?.nonce === projNonce && live.skillResult?.ok === true, '项目级创建回执成功且 nonce 原样返回')
+  note(existsSync(projFile), '项目级技能落盘到 <project>/.agents/skills/<name>/SKILL.md')
+
   // Channel 5: on-demand body read. The preview asks for the file by path and the
   // Host verifies that path came from the latest scan before reading it.
   const target = discovered.find((skill) => skill.name === 'smoke-discovered')

@@ -441,6 +441,8 @@ export function apply(ctx, config) {
   const rowOps = { pending: 0, applied: 0, error: null }
   /** Latest disk-skill scan, refreshed on a timer (the scan itself is async). */
   let discoveredSkills = []
+  /** Last skill/import op, surfaced on the heartbeat for outside diagnosis. */
+  let lastOp = null
   let discoveryInfo = { at: '', roots: [], count: 0, error: '' }
   /** When the projection last reached the settings document (diagnostics). */
   let publishedAt = ''
@@ -643,6 +645,14 @@ export function apply(ctx, config) {
                 skillRequest: { op: '', scope: '', id: '', project: '', path: '', name: '', prevName: '', description: '', body: '', nonce: '' },
               }))
               await refreshDiscovered(roots.map((entry) => projectRootOf(entry.dir)))
+              lastOp = {
+                op: String(op ?? ''), name: String(skillReq?.name ?? ''),
+                nonce: String(result?.nonce ?? ''), ok: result?.ok === true,
+                at: new Date().toISOString(),
+              }
+              // Publish immediately: waiting for the 5s publish interval was the
+              // entire reason a save took ~4.6s to show up in the panel.
+              try { publish() } catch (error) { console.error('[skills-mcp-panel] immediate publish failed:', error) }
             } catch (error) {
               console.error('[skills-mcp-panel] skill op failed:', error)
             }
@@ -738,6 +748,7 @@ export function apply(ctx, config) {
         ...lastBeat,
         publishedAt,
         discovery: discoveryInfo,
+        lastOp,
         skillResult: config?.skillResult?.get?.() ?? config?.skillResult ?? null,
       }
       beat(lastBeat)
