@@ -8,3 +8,5 @@ lib/client.js
 # 运行时数据：本仓库作为工作区时，面板/冒烟在这里落项目级技能，删除会留下
 # .smp-backup-* 备份。它们不是源码，不该进版本库（曾经误提交过一个冒烟技能）。
 .agents/skills/
+# 发版产物：npm pack 生成的 *.tgz 只用来传 GitHub Release，不进版本库
+*.tgz

@@ -73,12 +73,28 @@ jobs:
       - name: 门禁（未定义名字 / 单测 / 加载冒烟 / 预览基线）
         run: npm run gate
 
+      # 幂等：第一个版本必须先手动发（可信发布只能给已存在的包配置）。之后你再建 Release 时，
+      # 这一步会认出「已经在 npm 上了」，跳过发布而不是报一个 409 的红灯。
+      - name: 这个版本是否已经在 npm 上
+        id: published
+        run: |
+          set -euo pipefail
+          name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          if npm view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::${name}@${version} 已经在 npm 上，跳过发布（Release 的 tarball 资产照常保留）"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "${name}@${version} 还没发布，准备发包"
+          fi
+
       - name: 发包（npm 可信发布 / OIDC，无需 secret）
-        if: env.NPM_TOKEN == '' && inputs.dry_run != true
+        if: env.NPM_TOKEN == '' && inputs.dry_run != true && steps.published.outputs.exists == 'false'
         run: npm publish
 
       - name: 发包（NPM_TOKEN 回退）
-        if: env.NPM_TOKEN != '' && inputs.dry_run != true
+        if: env.NPM_TOKEN != '' && inputs.dry_run != true && steps.published.outputs.exists == 'false'
         run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
