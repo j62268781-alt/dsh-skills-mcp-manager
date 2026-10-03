@@ -201,6 +201,17 @@ export const Config = z.object({
     userDsh: z.string().default(''),
     userAgents: z.string().default(''),
   }).default({ userDsh: '', userAgents: '' }).volatile(),
+  /**
+   * Diagnostics for the disk-skill scan, published so the truth is readable from
+   * the profile patch itself: which roots were scanned, how many skills came back,
+   * and the error text when the scan failed (it used to fail silently).
+   */
+  discoveryInfo: z.object({
+    at: z.string().default(''),
+    roots: z.array(z.string()).default([]),
+    count: z.number().default(0),
+    error: z.string().default(''),
+  }).default({}).volatile(),
   /** Read-only: skills already on disk in DSH's roots (not managed by this panel). */
   discoveredSkills: z.array(z.object({
     name: z.string().default(''),
@@ -426,15 +437,20 @@ export function apply(ctx, config) {
   const rowOps = { pending: 0, applied: 0, error: null }
   /** Latest disk-skill scan, refreshed on a timer (the scan itself is async). */
   let discoveredSkills = []
+  let discoveryInfo = { at: '', roots: [], count: 0, error: '' }
   const refreshDiscovered = async (projectRoots) => {
+    const roots = Array.isArray(projectRoots) ? projectRoots.slice(0, 12) : []
     try {
       discoveredSkills = await discoverSkills({
-        projectRoots: projectRoots.slice(0, 12),
+        projectRoots: roots,
         dshHome: resolveDshHome(),
         agentsHome: process.env.DSH_AGENTS_HOME ?? join(homedir(), '.agents'),
       })
+      discoveryInfo = { at: new Date().toISOString(), roots, count: discoveredSkills.length, error: '' }
     } catch (error) {
-      // A failed scan must not look like "there are no skills on disk".
+      // A failed scan must not look like "there are no skills on disk", and the
+      // reason must survive into the published diagnostics.
+      discoveryInfo = { at: new Date().toISOString(), roots, count: 0, error: String(error?.message ?? error) }
       if (process.env.SMP_DEBUG) console.error('[skills-mcp-panel] skill scan failed', error)
       discoveredSkills = []
     }
@@ -486,7 +502,7 @@ export function apply(ctx, config) {
         userDsh: join(resolveDshHome(), 'skills'),
         userAgents: join(process.env.DSH_AGENTS_HOME ?? join(homedir(), '.agents'), 'skills'),
       }
-      const key = JSON.stringify([plain, spaces, currentWorkspace, discoveredSkills, skillDirs])
+      const key = JSON.stringify([plain, spaces, currentWorkspace, discoveredSkills, skillDirs, discoveryInfo])
       if (key === published) return
       // Never erase a good projection because the Loader read came back empty.
       if (plain.length === 0 && !loaderFound) {
@@ -494,7 +510,7 @@ export function apply(ctx, config) {
         return
       }
       Promise.resolve(inner.settings.update('skills-mcp-panel', {
-          profileServers: plain, workspaces: spaces, currentWorkspace, discoveredSkills, skillDirs,
+          profileServers: plain, workspaces: spaces, currentWorkspace, discoveredSkills, skillDirs, discoveryInfo,
         }))
         .then(() => {
           published = key
