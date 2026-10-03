@@ -104,10 +104,16 @@ div[role='dialog']:has(.smp-previewWrap),
 }
 
 .smp-previewWrap {
-  width: 100%;
+  /* Measured geometry inside the official modal (dialog 250→1190):
+       description slot  274 → 1166  (892 wide, padded 24 on both sides)
+       children slot     274 → 1214  (940 wide, no right gutter)
+     The preview lives in the children slot, so it only needs the difference
+     trimmed on the right: 940 − 892 = 48px. No left padding. */
+  width: auto;
   max-width: 100%;
   min-width: 0;
-  padding: 2px 2px 6px;
+  padding: 6px 48px 10px 0;
+  box-sizing: border-box;
 }
 
 /* Description + file path: the path is long, so it gets its own wrapped line. */
@@ -127,7 +133,7 @@ div[role='dialog']:has(.smp-previewWrap),
   background: var(--dsh-bg-secondary, rgba(127, 127, 127, 0.07));
   border-radius: 10px;
   max-height: 62vh;
-  width: 100%;
+  width: auto;
   max-width: 100%;
   box-sizing: border-box;
   /* Wrap at the padding edge; vertical scroll only, never silently clipped. */
