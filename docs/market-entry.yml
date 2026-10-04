@@ -9,5 +9,5 @@ url: https://github.com/j62268781-alt/dsh-skills-mcp-manager
 name: j62268781-alt/dsh-skills-mcp-manager
 category: ui
 description:
-  en: 'Manage skills and MCP servers from one DSH settings panel: browse, search and preview skills on disk (create, edit, rename, delete, with automatic backups), keep global MCP servers as real cordis.patch.yml loader rows and per-project servers that mount only for that project, and import existing configs from 25 other MCP clients.'
-  zh: '在 DSH 设置面板里一站式管理技能与 MCP 服务器：技能以磁盘为准，可浏览、搜索、预览与增删改（删除自动留备份）；全局 MCP 就是 cordis.patch.yml 里的真实 Loader 行，项目级条目只挂到对应项目的会话；另可从 25 个 MCP 客户端一键导入既有配置。'
+  en: 'Manage skills and MCP servers from one DSH settings panel: browse, search and preview skills on disk (create, edit, rename, delete, with automatic backups), keep global MCP servers as real cordis.patch.yml loader rows and per-project servers that mount only for that project, and import existing configs from 26 other MCP clients.'
+  zh: '在 DSH 设置面板里一站式管理技能与 MCP 服务器：技能以磁盘为准，可浏览、搜索、预览与增删改（删除自动留备份）；全局 MCP 就是 cordis.patch.yml 里的真实 Loader 行，项目级条目只挂到对应项目的会话；另可从 26 个 MCP 客户端一键导入既有配置。'
