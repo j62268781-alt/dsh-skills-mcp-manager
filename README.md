@@ -8,6 +8,7 @@
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![tests](https://img.shields.io/badge/npm%20test-140%20passed-2ea043)](#)
 [![runtime deps](https://img.shields.io/badge/运行时依赖-0-8a8f99)](#工作原理)
+[![Listed on dsh-plugin.org](https://dsh-plugin.org/badges/listed.svg)](https://dsh-plugin.org/plugins/j62268781-alt/dsh-skills-mcp-manager)
 
 </div>
 
