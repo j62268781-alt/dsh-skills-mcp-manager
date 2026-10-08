@@ -111,3 +111,44 @@ test('MCP 表单：编辑配置行时回填连接参数，且 command 不被 tar
     panel.restore()
   }
 })
+
+test('项目级编辑：回填连接字段 + 原地替换（不挪到列表最后）', { skip: skipWithoutBundle() }, async () => {
+  const gitnexus = { scope: '/p/tcl', id: 'gitnexus', serverName: 'gitnexus', transport: 'streamable-http',
+    url: 'http://x/mcp/coding', command: '', args: [], env: '', runtime: 'auto', source: '',
+    headers: '', failOnStartupError: true, reconnectInitialDelayMs: '1000', reconnectMaxDelayMs: '60000',
+    reconnectMaxAttempts: '60', enabled: true }
+  const figma = { scope: '/p/tcl', id: 'framelink-figma', serverName: 'framelink-figma', transport: 'streamable-http',
+    url: 'http://x/mcp/design', command: '', args: [], env: '', runtime: 'auto', source: '',
+    headers: '', failOnStartupError: false, reconnectInitialDelayMs: '', reconnectMaxDelayMs: '',
+    reconnectMaxAttempts: '', enabled: true }
+  const panel = await bootPanel(emptyDoc({
+    servers: [gitnexus, figma], currentWorkspace: '/p/tcl', rowOpsReady: true,
+  }))
+  const { doc, findAll, find, byText, change, restore } = panel
+  try {
+    // 打开列表里的第一条（gitnexus）编辑
+    const editButtons = findAll((node) => String(node.props.className ?? '').includes('smp-button') && textOf(node).trim() === '编辑')
+    assert.ok(editButtons.length >= 2, `项目级条目没渲染出编辑按钮：${editButtons.length}`)
+    panel.click(editButtons[0])
+
+    // 回填：必须显示已配置的 1000 / 60000 / 60，而不是空（空会显示成 placeholder 500）
+    const numbers = findAll((node) => node.type === 'input' && node.props.type === 'number').map((n) => n.props.value)
+    assert.deepEqual(numbers, ['1000', '60000', '60'], `连接字段没回填：${JSON.stringify(numbers)}`)
+
+    // 改成 2000，保存
+    change(find((node) => node.type === 'input' && node.props.placeholder === '500（默认）'), '2000')
+    panel.click(byText('保存'))
+
+    // 顺序：gitnexus 必须还在第一位（原来是追加到末尾）
+    assert.equal(doc.servers[0].serverName, 'gitnexus', '编辑后条目被挪到了列表最后')
+    assert.equal(doc.servers[1].serverName, 'framelink-figma')
+    assert.equal(doc.servers.length, 2, '编辑不该增删条目')
+    // 值：写进去的是新值，且没把别的条目串味
+    assert.equal(doc.servers[0].reconnectInitialDelayMs, '2000')
+    assert.equal(doc.servers[0].reconnectMaxAttempts, '60', '没碰的字段被清空了')
+    assert.equal(doc.servers[0].failOnStartupError, true, '没碰的勾选框被清空了')
+    assert.equal(doc.servers[1].reconnectInitialDelayMs, '', '编辑 gitnexus 影响到了 figma')
+  } finally {
+    restore()
+  }
+})
