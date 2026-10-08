@@ -181,3 +181,24 @@ div[role='dialog']:has(.smp-skillDialogBody),
 .smp-cardIdentity .smp-tag {
   margin-left: 6px;
 }
+
+/* Checkbox inside a form field: keep it on the same 32px baseline as the inputs
+   next to it, so the connection-policy row lines up with the number fields. */
+.smp-inlineCheck {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+}
+
+.smp-inlineCheck input {
+  flex: none;
+  margin: 0;
+  width: 14px;
+  height: 14px;
+  accent-color: var(--dsw-alias-state-business-primary);
+}

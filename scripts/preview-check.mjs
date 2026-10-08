@@ -15,9 +15,13 @@ import { existsSync } from 'node:fs'
 const EXPECTED = { entries: 6, stops: 4, deletes: 5, tabs: 'MCP（5）|Skills（1）' }
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 const previewDir = process.env.SMP_PREVIEW_DIR ?? '/tmp/preview'
+const previewEntry = `${previewDir}/build.py`
 
-if (!existsSync(previewDir)) {
-  console.log(`  · 跳过预览门禁（没有 ${previewDir}）`)
+// 按入口脚本判断而不是只看目录：系统清理临时目录时 /tmp/preview 会留下（夹具是
+// 目录树），build.py 却没了 —— 那样 execFileSync 会抛一个看不懂的 ENOENT，
+// 看起来像代码坏了，其实只是夹具不在。
+if (!existsSync(previewEntry)) {
+  console.log(`  · 跳过预览门禁（没有 ${previewEntry}）`)
   process.exit(0)
 }
 

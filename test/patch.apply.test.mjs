@@ -57,6 +57,61 @@ test('update：改地址与名称', async () => {
   assert.match(out, /https:\/\/new\.example\/mcp/)
 })
 
+test('add：连接策略写进 config（failOnStartupError + reconnect）', async () => {
+  const { ctx, text } = await fresh()
+  await applyRowOp(ctx, {
+    op: 'add', entryId: 'mcp-github', serverName: 'github', transport: 'stdio',
+    command: 'npx', args: '-y @modelcontextprotocol/server-github', env: '', url: '', headers: '',
+    failOnStartupError: true,
+    reconnectInitialDelayMs: '1000', reconnectMaxDelayMs: '60000', reconnectMaxAttempts: '60',
+  })
+  const out = await text()
+  assert.match(out, /failOnStartupError: true/)
+  assert.match(out, /reconnect:/)
+  assert.match(out, /initialDelayMs: 1000/)
+  assert.match(out, /maxDelayMs: 60000/)
+  assert.match(out, /maxAttempts: 60/)
+})
+
+test('add：连接策略没填就不写键，交给客户端默认', async () => {
+  const { ctx, text } = await fresh()
+  await applyRowOp(ctx, {
+    op: 'add', entryId: 'mcp-plain', serverName: 'plain', transport: 'streamable-http',
+    command: '', args: '', env: '', url: 'https://plain/mcp', headers: '',
+  })
+  const out = await text()
+  assert.doesNotMatch(out, /failOnStartupError/)
+  assert.doesNotMatch(out, /reconnect/)
+})
+
+test('update：连接策略可写入，留空则删键回到默认', async () => {
+  const { ctx, text } = await fresh()
+  const base = { op: 'update', entryId: 'mcp-context7', serverName: 'context7', transport: 'streamable-http', url: 'https://mcp.context7.com/mcp' }
+  await applyRowOp(ctx, { ...base, failOnStartupError: true, reconnectMaxAttempts: '60', reconnectInitialDelayMs: '1000' })
+  let out = await text()
+  assert.match(out, /failOnStartupError: true/)
+  assert.match(out, /maxAttempts: 60/)
+
+  // 再保存一次但全部清空：键应当被删除，而不是写回默认值
+  await applyRowOp(ctx, { ...base })
+  out = await text()
+  assert.doesNotMatch(out, /failOnStartupError/)
+  assert.doesNotMatch(out, /reconnect/)
+})
+
+test('update：越界的重连参数抛错且不写文件', async () => {
+  const { ctx, text } = await fresh()
+  const before = await text()
+  await assert.rejects(
+    () => applyRowOp(ctx, {
+      op: 'update', entryId: 'mcp-context7', serverName: 'context7', transport: 'streamable-http',
+      url: 'https://mcp.context7.com/mcp', reconnectMaxAttempts: '0',
+    }),
+    /reconnect\.maxAttempts 必须在 1–/,
+  )
+  assert.equal(await text(), before)
+})
+
 test('toggle：停用写 disabled，启用移除', async () => {
   const { ctx, text } = await fresh()
   await applyRowOp(ctx, { op: 'toggle', entryId: 'mcp-context7', enabled: false })

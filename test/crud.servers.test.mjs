@@ -33,13 +33,48 @@ test('toggleServerOp / deleteServerOp：只带必要字段', () => {
   assert.deepEqual(deleteServerOp('mcp-x'), { op: 'delete', entryId: 'mcp-x' })
 })
 
-test('draftFromRow：编辑表单用 target 回填地址', () => {
-  const draft = draftFromRow({ serverName: 'x', transport: 'stdio', target: 'npx', args: '-y p', env: 'T=1' })
-  assert.equal(draft.command, '')
-  assert.equal(draft.url, 'npx')
+test('draftFromRow：stdio 行用原始 command 回填，不用拼好的 target', () => {
+  // target 是「命令 + 参数」拼出来的：塞回 command 会把 `npx -y pkg` 当成可执行文件
+  const draft = draftFromRow({ serverName: 'x', transport: 'stdio', target: 'npx -y p', command: 'npx', args: '-y p', env: 'T=1' })
+  assert.equal(draft.command, 'npx')
+  assert.equal(draft.url, '')
   assert.equal(draft.args, '-y p')
   assert.equal(draft.env, 'T=1')
   assert.equal(draft.runtime, 'auto')
+})
+
+test('draftFromRow：http 行用 url 回填地址', () => {
+  const draft = draftFromRow({ serverName: 'y', transport: 'streamable-http', target: 'https://y/mcp', url: 'https://y/mcp' })
+  assert.equal(draft.url, 'https://y/mcp')
+  assert.equal(draft.command, '')
+})
+
+test('draftFromRow：回填连接策略，缺省为空', () => {
+  const tuned = draftFromRow({
+    serverName: 'x', transport: 'stdio', command: 'npx', args: '',
+    failOnStartupError: true, reconnectInitialDelayMs: '1000', reconnectMaxAttempts: '60',
+  })
+  assert.equal(tuned.failOnStartupError, true)
+  assert.equal(tuned.reconnectInitialDelayMs, '1000')
+  assert.equal(tuned.reconnectMaxAttempts, '60')
+  assert.equal(tuned.reconnectMaxDelayMs, '')
+})
+
+test('addServerOp / updateServerOp：带上连接策略字段', () => {
+  const draft = {
+    serverName: 'x', transport: 'stdio', command: 'npx',
+    failOnStartupError: true, reconnectInitialDelayMs: '1000', reconnectMaxDelayMs: '60000', reconnectMaxAttempts: '60',
+  }
+  for (const op of [addServerOp(draft), updateServerOp('mcp-x', draft)]) {
+    assert.equal(op.failOnStartupError, true)
+    assert.equal(op.reconnectInitialDelayMs, '1000')
+    assert.equal(op.reconnectMaxDelayMs, '60000')
+    assert.equal(op.reconnectMaxAttempts, '60')
+  }
+  // 没填时是空值，Host 会跳过这些键（用客户端默认）
+  const plain = addServerOp({ serverName: 'x' })
+  assert.equal(plain.failOnStartupError, false)
+  assert.equal(plain.reconnectMaxAttempts, '')
 })
 
 test('replaceProjectEntry / removeProjectEntry：按身份替换与删除', () => {

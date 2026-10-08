@@ -7,6 +7,7 @@
  */
 import { join } from 'node:path'
 import { bundledRuntime, commandEnv, loginPath, parseEnv, resolveCommand } from '../runtime/env.js'
+import { connectionFields } from '../mcp/connection.js'
 
 /** The host MCP client (name + scope mount entry points). */
 let client = { name: '@deepseek-ai/dsh-mcp-client' }
@@ -67,7 +68,16 @@ export function serverMountConfig(server) {
         headers: parseEnv(server.headers),
       }
   const missing = mountConfig.transport === 'stdio' ? !mountConfig.command : !mountConfig.url
-  return missing ? null : mountConfig
+  if (missing) return null
+  try {
+    // failOnStartupError + reconnect.* ride along, so a mounted server reconnects
+    // exactly like a configured row.
+    return { ...mountConfig, ...connectionFields(server) }
+  } catch {
+    // A malformed number must never take the mount (or the reconcile loop) down:
+    // the client's own defaults apply and the panel reports the field itself.
+    return mountConfig
+  }
 }
 /** The agent's working directory, tolerating the Session shapes in play. */
 export function workingDirectoryOf(agent) {

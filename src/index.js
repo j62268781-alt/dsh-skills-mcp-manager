@@ -34,6 +34,7 @@ import { projectRootOf, reconcileSkills, scopeRoot } from './skills/reconcile.js
 import { bodyOf, discoverSkills } from './skills/discover.js'
 import { createSkill, deleteSkill, renameSkill, updateSkill, writableRoots } from './skills/write.js'
 import { mountedKeyOf, projectServersFor, serverMountConfig, setMountClient, workingDirectoryOf } from './project/mount.js'
+import { connectionDraftOf } from './mcp/connection.js'
 
 setMountClient(mcpClient)
 
@@ -64,6 +65,12 @@ const Server = z.object({
   source: z.string().default(''),
   /** HTTP headers, one `KEY=VALUE` per line. */
   headers: z.string().default(''),
+  /** Reject activation when the first connection or tool sync fails. */
+  failOnStartupError: z.boolean().default(false),
+  /** Reconnect numbers, kept as the panel's text inputs ('' = client default). */
+  reconnectInitialDelayMs: z.string().default(''),
+  reconnectMaxDelayMs: z.string().default(''),
+  reconnectMaxAttempts: z.string().default(''),
   enabled: z.boolean().default(true),
 })
 
@@ -81,9 +88,17 @@ const ProfileRow = z.object({
   entryId: z.string().default(''),
   serverName: z.string().default(''),
   transport: z.string().default('streamable-http'),
+  /** url (http) or `command + args` (stdio) — what the card shows. */
   target: z.string().default(''),
+  /** Raw stdio executable: `target` merges it with `args`, so editing needs both. */
+  command: z.string().default(''),
   args: z.string().default(''),
   env: z.string().default(''),
+  /** Connection policy read back from the row, so the edit form can prefill it. */
+  failOnStartupError: z.boolean().default(false),
+  reconnectInitialDelayMs: z.string().default(''),
+  reconnectMaxDelayMs: z.string().default(''),
+  reconnectMaxAttempts: z.string().default(''),
   enabled: z.boolean().default(true),
   phase: z.string().default(''),
 })
@@ -103,6 +118,11 @@ const RowOp = z.object({
   env: z.string().default(''),
   /** HTTP headers, one KEY=VALUE per line. */
   headers: z.string().default(''),
+  /** Connection policy written into the row's config (see src/mcp/connection.js). */
+  failOnStartupError: z.boolean().default(false),
+  reconnectInitialDelayMs: z.string().default(''),
+  reconnectMaxDelayMs: z.string().default(''),
+  reconnectMaxAttempts: z.string().default(''),
   /** toggle: the desired enabled state of the row. */
   enabled: z.boolean().default(true),
 })
@@ -318,8 +338,11 @@ function configuredMcpRows(ctx) {
           target: typeof row.url === 'string' && row.url !== ''
             ? row.url
             : [typeof row.command === 'string' ? row.command : '', ...args].filter((part) => part !== '').join(' '),
+          command: typeof row.command === 'string' ? row.command : '',
           args: args.join(' '),
           env: Object.entries(envMap).map(([key, value]) => `${key}=${String(value)}`).join('\n'),
+          // Connection policy travels with the row so 编辑 can show what is set.
+          ...connectionDraftOf(row),
           enabled: !entry.disabled,
           phase: String(entry.fiberPhase ?? ''),
         }

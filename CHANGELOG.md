@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.5.0 — MCP 连接与重连可配（failOnStartupError / reconnect.*）
+
+- **新增：MCP 的「连接与重连」配置**。添加/编辑 MCP 时多一组输入，直接对应
+  `@deepseek-ai/dsh-mcp-client` 自己的字段，全局（配置文件行）与项目级（面板条目）都支持：
+
+  | 表单 | config | 默认 |
+  |---|---|---|
+  | 连不上时拒绝激活 | `failOnStartupError` | `false` |
+  | 重连首次延迟（ms） | `reconnect.initialDelayMs` | `500` |
+  | 重连最大延迟（ms） | `reconnect.maxDelayMs` | `30000` |
+  | 重连最大次数 | `reconnect.maxAttempts` | `10` |
+
+  **留空即用 DSH 默认值**（不写多余配置）；编辑时清空输入框会把对应键删掉，回到默认。
+  边界值取自客户端自己的 zod schema（延迟 `1–2147483647`、次数 `≥1` 的整数）：越界或非整数
+  会被拒绝并给出原因 —— 直接写进配置会让整行加载失败。项目级挂载遇到非法值则退回默认值，
+  不让一个填错的数字把整次挂载（以及重编排循环）带下去。
+- **修复：编辑 profile 里的 stdio 行会把命令行写坏**。行投影里的 `target` 是「命令 + 参数」
+  拼出来的（`npx -y pkg`），原先把 `target` 回填进表单的 `command`，保存后该行的 `command`
+  就变成了 `npx -y pkg` 这个并不存在的可执行文件。现在投影额外提供原始 `command`，
+  编辑改用 `draftFromRow()` 回填，命令与参数各归各位。
+- 内部：连接策略字段的解析收进 `src/mcp/connection.js` 一处，两条写路径（写 YAML / 挂载）
+  共用同一套边界与回填逻辑
+
 ## 0.4.1 — 重新发布（0.4.0 的版本号被 npm 永久保留，不可重用）
 
 - **内容与 0.4.0 完全一致**，没有任何功能改动。0.4.0 从 npm 删除后，registry 永久保留该版本号

@@ -1,6 +1,6 @@
 {
   "name": "@j62268781-alt/dsh-skills-mcp-manager",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "type": "module",
   "description": "DSH 设置面板：一个页面里管理技能（SKILL.md）与 MCP 服务器，全局 / 项目级分层，改完即生效。Manage skills and MCP servers from the DSH settings panel — global and per-project tiers, effective immediately.",
   "license": "MIT",

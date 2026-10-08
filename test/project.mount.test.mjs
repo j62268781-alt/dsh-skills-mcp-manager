@@ -46,3 +46,28 @@ test('serverMountConfig：stdio 与 http 各自产出正确的挂载配置形状
   assert.equal(http.transport, 'streamable-http')
   assert.equal(http.url, 'https://y/mcp')
 })
+
+test('serverMountConfig：连接策略跟着挂载配置走，留空则不写', () => {
+  const base = { serverName: 'z', transport: 'streamable-http', url: 'https://z/mcp' }
+  const plain = serverMountConfig(base)
+  assert.equal('failOnStartupError' in plain, false)
+  assert.equal('reconnect' in plain, false)
+
+  const tuned = serverMountConfig({
+    ...base,
+    failOnStartupError: true,
+    reconnectInitialDelayMs: '1000',
+    reconnectMaxDelayMs: '60000',
+    reconnectMaxAttempts: '60',
+  })
+  assert.equal(tuned.failOnStartupError, true)
+  assert.deepEqual(tuned.reconnect, { initialDelayMs: 1000, maxDelayMs: 60000, maxAttempts: 60 })
+})
+
+test('serverMountConfig：数字非法时退回客户端默认，不让挂载整体失败', () => {
+  const mounted = serverMountConfig({
+    serverName: 'z', transport: 'streamable-http', url: 'https://z/mcp', reconnectMaxAttempts: '0',
+  })
+  assert.equal(mounted.url, 'https://z/mcp')
+  assert.equal('reconnect' in mounted, false)
+})
