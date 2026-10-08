@@ -123,6 +123,14 @@ const RowOp = z.object({
   reconnectInitialDelayMs: z.string().default(''),
   reconnectMaxDelayMs: z.string().default(''),
   reconnectMaxAttempts: z.string().default(''),
+  /**
+   * update: whether the user actually edited the connection fields.
+   *
+   * Defaults to false on purpose: a form whose fields were not prefilled (an older
+   * Host does not project them) must not wipe a configured value on an unrelated
+   * edit, and a missing flag is the recoverable direction.
+   */
+  connectionChanged: z.boolean().default(false),
   /** toggle: the desired enabled state of the row. */
   enabled: z.boolean().default(true),
 })

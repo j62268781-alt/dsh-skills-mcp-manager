@@ -86,7 +86,7 @@ test('add：连接策略没填就不写键，交给客户端默认', async () =>
 
 test('update：连接策略可写入，留空则删键回到默认', async () => {
   const { ctx, text } = await fresh()
-  const base = { op: 'update', entryId: 'mcp-context7', serverName: 'context7', transport: 'streamable-http', url: 'https://mcp.context7.com/mcp' }
+  const base = { op: 'update', entryId: 'mcp-context7', serverName: 'context7', transport: 'streamable-http', url: 'https://mcp.context7.com/mcp', connectionChanged: true }
   await applyRowOp(ctx, { ...base, failOnStartupError: true, reconnectMaxAttempts: '60', reconnectInitialDelayMs: '1000' })
   let out = await text()
   assert.match(out, /failOnStartupError: true/)
@@ -99,13 +99,44 @@ test('update：连接策略可写入，留空则删键回到默认', async () =>
   assert.doesNotMatch(out, /reconnect/)
 })
 
+test('update：没动过连接字段时，不碰已有的 reconnect（只改 URL 不能误删）', async () => {
+  const { ctx, text } = await fresh()
+  const base = { op: 'update', entryId: 'mcp-context7', serverName: 'context7', transport: 'streamable-http' }
+  // 先写入一整套连接策略
+  await applyRowOp(ctx, { ...base, url: 'https://mcp.context7.com/mcp', connectionChanged: true,
+    failOnStartupError: true, reconnectMaxAttempts: '60', reconnectInitialDelayMs: '1000' })
+  let out = await text()
+  assert.match(out, /reconnect/)
+  assert.match(out, /failOnStartupError: true/)
+
+  // 再只改 URL：面板没标记 connectionChanged，已有值必须原样保留
+  await applyRowOp(ctx, { ...base, url: 'https://changed.example/mcp', connectionChanged: false })
+  out = await text()
+  assert.match(out, /https:\/\/changed\.example\/mcp/)
+  assert.match(out, /maxAttempts: 60/, '只改 URL 却把 reconnect 删掉了')
+  assert.match(out, /failOnStartupError: true/, '只改 URL 却把 failOnStartupError 删掉了')
+})
+
+test('update：标记了 connectionChanged 才按表单清空（回到默认）', async () => {
+  const { ctx, text } = await fresh()
+  const base = { op: 'update', entryId: 'mcp-context7', serverName: 'context7', transport: 'streamable-http' }
+  await applyRowOp(ctx, { ...base, url: 'https://mcp.context7.com/mcp', connectionChanged: true, reconnectMaxAttempts: '60' })
+  assert.match(await text(), /maxAttempts: 60/)
+
+  // 用户确实清空了输入框 → 整块删掉
+  await applyRowOp(ctx, { ...base, url: 'https://mcp.context7.com/mcp', connectionChanged: true })
+  const out = await text()
+  assert.doesNotMatch(out, /reconnect/)
+  assert.doesNotMatch(out, /failOnStartupError/)
+})
+
 test('update：越界的重连参数抛错且不写文件', async () => {
   const { ctx, text } = await fresh()
   const before = await text()
   await assert.rejects(
     () => applyRowOp(ctx, {
       op: 'update', entryId: 'mcp-context7', serverName: 'context7', transport: 'streamable-http',
-      url: 'https://mcp.context7.com/mcp', reconnectMaxAttempts: '0',
+      url: 'https://mcp.context7.com/mcp', reconnectMaxAttempts: '0', connectionChanged: true,
     }),
     /reconnect\.maxAttempts 必须在 1–/,
   )

@@ -2,7 +2,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  addServerOp, deleteServerOp, draftFromRow, inflightKeyForRow, removeProjectEntry,
+  addServerOp, connectionChanged, connectionDraft, deleteServerOp, draftFromRow, inflightKeyForRow, removeProjectEntry,
   replaceProjectEntry, rowEntryId, toggleServerOp, updateServerOp,
 } from '../lib/src/crud/servers.js'
 
@@ -58,6 +58,29 @@ test('draftFromRow：回填连接策略，缺省为空', () => {
   assert.equal(tuned.reconnectInitialDelayMs, '1000')
   assert.equal(tuned.reconnectMaxAttempts, '60')
   assert.equal(tuned.reconnectMaxDelayMs, '')
+})
+
+test('connectionChanged：只有真改过才算改动（防止误删已有配置）', () => {
+  const row = { failOnStartupError: true, reconnectInitialDelayMs: '1000', reconnectMaxAttempts: '60' }
+  // 表单已正确回填，用户没动过 → 不算改动
+  assert.equal(connectionChanged(connectionDraft(row), row), false)
+  // 表单没有回填（旧 Host 不投影这些字段）→ 也不能算改动
+  assert.equal(connectionChanged({ serverName: 'x', transport: 'streamable-http' }, undefined), false)
+  assert.equal(connectionChanged(connectionDraft(row), undefined), false, '没有 original 时必须是 no-op')
+  // 真改了一个数字 / 清空了一个数字 / 切换勾选框 → 算改动
+  assert.equal(connectionChanged({ ...connectionDraft(row), reconnectMaxAttempts: '30' }, row), true)
+  assert.equal(connectionChanged({ ...connectionDraft(row), reconnectInitialDelayMs: '' }, row), true)
+  assert.equal(connectionChanged({ ...connectionDraft(row), failOnStartupError: false }, row), true)
+  // 反过来：原来没配、现在填了 → 也算改动
+  assert.equal(connectionChanged({ ...connectionDraft(row) }, {}), true)
+})
+
+test('updateServerOp：把「是否改过连接字段」带进 op', () => {
+  const row = { failOnStartupError: true, reconnectMaxAttempts: '60' }
+  const draft = connectionDraft(row)
+  assert.equal(updateServerOp('mcp-x', draft, row).connectionChanged, false)
+  assert.equal(updateServerOp('mcp-x', { ...draft, reconnectMaxAttempts: '30' }, row).connectionChanged, true)
+  assert.equal(updateServerOp('mcp-x', draft).connectionChanged, false, '缺少 original 时必须保守地判为未改动')
 })
 
 test('addServerOp / updateServerOp：带上连接策略字段', () => {

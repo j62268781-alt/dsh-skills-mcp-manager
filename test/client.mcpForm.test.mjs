@@ -79,16 +79,33 @@ test('MCP 表单：编辑配置行时回填连接参数，且 command 不被 tar
     const commandInput = find((node) => node.type === 'input' && node.props.value === 'npx')
     assert.ok(commandInput !== null, 'command 没有回填成原始命令（可能被 target 污染）')
 
+    // 没动过连接输入框 → op 里必须标记 connectionChanged: false（Host 会跳过它们）
     panel.click(byText('保存到配置行'))
-    const op = (doc.rowOps ?? [])[0]
+    let op = (doc.rowOps ?? [])[0]
     assert.ok(op, '没有排入 rowOps')
     assert.equal(op.op, 'update')
+    assert.equal(op.connectionChanged, false, '没改过连接字段却标记成改动，会误删已有配置')
+    doc.rowOps = []
+
     assert.equal(op.command, 'npx', '保存时 command 被写成了拼好的 target')
     assert.equal(op.args, '-y pkg')
     assert.equal(op.failOnStartupError, true)
     assert.equal(op.reconnectInitialDelayMs, '1000')
     assert.equal(op.reconnectMaxAttempts, '60')
     assert.equal(op.reconnectMaxDelayMs, '')
+
+    // 真改了其中一个数字 → 标记成改动，Host 才会写。
+    // 保存后该行进入 in-flight（操作按钮被转圈替代），先让回执到达把它落定。
+    doc.rowOps = []
+    const settled = find((node) => String(node.props.className ?? '').includes('smp-card') && textOf(node).includes('existing'))
+    assert.ok(settled !== null, '保存后找不到该行')
+    runtime.render()
+    panel.click(find((node) => String(node.props.className ?? '').includes('smp-button') && textOf(node).trim() === '编辑'))
+    panel.change(panel.byPlaceholder('10（默认）'), '30')
+    panel.click(byText('保存到配置行'))
+    op = (doc.rowOps ?? [])[0]
+    assert.equal(op.connectionChanged, true, '改了连接字段却没标记，值不会生效')
+    assert.equal(op.reconnectMaxAttempts, '30')
     runtime.render()
   } finally {
     panel.restore()

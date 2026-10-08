@@ -104,11 +104,15 @@ export async function applyRowOp(ctx, op) {
       for (const [field, value] of Object.entries(fields)) {
         changed = setRowConfigField(document, op.entryId, field, value) || changed
       }
-      // Connection policy on edit: what the form left blank goes back to the
-      // client default, so `null` clears the key instead of writing a value that
-      // only restates it.
-      changed = setRowConfigField(document, op.entryId, 'failOnStartupError', connection.failOnStartupError === true ? true : null) || changed
-      changed = setRowConfigField(document, op.entryId, 'reconnect', connection.reconnect ?? null) || changed
+      // Connection policy on edit: only when the panel says the user actually
+      // changed it. A blank number means "back to the client default" (the key is
+      // cleared), but an untouched form must stay untouched — its fields may not
+      // even have been prefilled, and treating blank as "clear" would silently
+      // wipe a configured value on an unrelated edit such as changing the URL.
+      if (op.connectionChanged === true) {
+        changed = setRowConfigField(document, op.entryId, 'failOnStartupError', connection.failOnStartupError === true ? true : null) || changed
+        changed = setRowConfigField(document, op.entryId, 'reconnect', connection.reconnect ?? null) || changed
+      }
     }
     if (!changed) throw new Error(`row "${op.entryId}" not found in the profile patch`)
     const after = document.toString()
