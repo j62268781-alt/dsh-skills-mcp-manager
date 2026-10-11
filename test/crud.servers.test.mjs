@@ -2,8 +2,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  addServerOp, connectionChanged, connectionDraft, deleteServerOp, draftFromRow, inflightKeyForRow, removeProjectEntry,
-  replaceProjectEntry, rowEntryId, toggleServerOp, updateServerOp,
+  addServerOp, connectionChanged, connectionDraft, deleteServerOp, draftFromRow, envChanged, headersChanged,
+  inflightKeyForRow, removeProjectEntry, replaceProjectEntry, rowEntryId, toggleServerOp, updateServerOp,
 } from '../lib/src/crud/servers.js'
 
 test('rowEntryId / inflightKeyForRow：id 与投影 entryId 的对应', () => {
@@ -106,4 +106,41 @@ test('replaceProjectEntry / removeProjectEntry：按身份替换与删除', () =
   const servers = [a, b]
   assert.deepEqual(replaceProjectEntry(servers, a, { serverName: 'a2' })[0], { serverName: 'a2' })
   assert.deepEqual(removeProjectEntry(servers, a), [b])
+})
+
+test('draftFromRow：http 行回填请求头，否则一次「只改 URL」会删掉鉴权头', () => {
+  const draft = draftFromRow({
+    serverName: 'x', transport: 'streamable-http', url: 'https://x/mcp',
+    headersText: 'Authorization=Bearer sk-abc',
+  })
+  assert.equal(draft.headers, 'Authorization=Bearer sk-abc')
+  // 配置对象形态（项目级条目）也要能回填
+  const fromObject = draftFromRow({ transport: 'streamable-http', url: 'https://y/mcp', headers: { 'X-Api-Key': 'k' } })
+  assert.equal(fromObject.headers, 'X-Api-Key=k')
+  // stdio 行不带请求头
+  assert.equal(draftFromRow({ transport: 'stdio', command: 'npx', headers: { A: '1' } }).headers, '')
+})
+
+test('headersChanged / envChanged：仅真改动才写，缺 original 时保守为 false', () => {
+  const row = { transport: 'streamable-http', headersText: 'A=1' }
+  // 未动
+  assert.equal(headersChanged({ headers: 'A=1' }, row), false)
+  // 改了值
+  assert.equal(headersChanged({ headers: 'A=2' }, row), true)
+  // 清空 = 要删键，必须算改动
+  assert.equal(headersChanged({ headers: '' }, row), true)
+  // 没有 original（旧版 Host 不投影该字段）→ 不能当成「用户清空了」
+  assert.equal(headersChanged({ headers: '' }, undefined), false)
+  assert.equal(headersChanged({ headers: '' }, null), false)
+
+  const envRow = { env: 'T=1' }
+  assert.equal(envChanged({ env: 'T=1' }, envRow), false)
+  assert.equal(envChanged({ env: '' }, envRow), true)
+  assert.equal(envChanged({ env: '' }, undefined), false)
+})
+
+test('updateServerOp：带上环境变量与请求头的改动标记', () => {
+  const op = updateServerOp('include:mcp-x', { serverName: 'x', headers: 'A=2' }, { transport: 'streamable-http', headersText: 'A=1' })
+  assert.equal(op.headersChanged, true)
+  assert.equal(op.envChanged, false)
 })

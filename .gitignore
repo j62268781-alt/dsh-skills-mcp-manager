@@ -10,3 +10,6 @@ lib/client.js
 .agents/skills/
 # 发版产物：npm pack 生成的 *.tgz 只用来传 GitHub Release，不进版本库
 *.tgz
+# 生成 README 截图用的离线预览依赖（React UMD / 主题 token），由环境变量指向，
+# 换台机器要重新准备，不该进版本库
+.preview/

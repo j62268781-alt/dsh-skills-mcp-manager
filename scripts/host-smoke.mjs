@@ -33,7 +33,12 @@ if (appNodeModules === undefined) {
   process.exit(0)
 }
 
-execFileSync('npx', ['tsc', '-p', 'tsconfig.json'], { cwd: root, stdio: 'inherit' })
+// Build the Host half. Run the local TypeScript entry directly instead of through
+// `npx`: a machine can have Node without npm (`execFileSync` also refuses to launch
+// a `.cmd` shim on Windows), and a gate that silently cannot run is not a gate.
+const tscEntry = join(root, 'node_modules', 'typescript', 'bin', 'tsc')
+if (!existsSync(tscEntry)) throw new Error(`typescript is not installed at ${tscEntry} — run the package manager install first`)
+execFileSync(process.execPath, [tscEntry, '-p', 'tsconfig.json'], { cwd: root, stdio: 'inherit' })
 
 // Stage inside the workspace's node_modules so the plugin's own third-party deps
 // (yaml) resolve naturally; only @deepseek-ai/* has to come from the app.
@@ -42,7 +47,40 @@ const scopeLink = join(root, 'node_modules', '@deepseek-ai')
 const createdScopeLink = !existsSync(scopeLink)
 await rm(stage, { recursive: true, force: true })
 await mkdir(stage, { recursive: true })
-if (createdScopeLink) await symlink(join(appNodeModules, '@deepseek-ai'), scopeLink, 'dir')
+if (createdScopeLink) {
+  // A directory junction instead of a symlink: creating a symlink on Windows needs
+  // Developer Mode or elevation, and this gate must run for every contributor.
+  if (process.platform === 'win32') {
+    execFileSync('cmd', ['/c', 'mklink', '/J', scopeLink, join(appNodeModules, '@deepseek-ai')], { stdio: 'ignore' })
+  } else {
+    await symlink(join(appNodeModules, '@deepseek-ai'), scopeLink, 'dir')
+  }
+}
+
+/**
+ * Make sibling `@deepseek-ai` packages resolvable from inside the scope.
+ *
+ * The app bundle keeps them flat (`<nm>/@deepseek-ai/<pkg>`), which its own asar
+ * loader resolves but plain Node does not: `schemastery` asks for
+ * `@deepseek-ai/cosmokit`, and Node only ever walks *up* from the importing file —
+ * `<nm>/@deepseek-ai/schemastery/node_modules` → `<nm>/@deepseek-ai/node_modules` →
+ * `<nm>/node_modules` — never sideways into its own scope directory, where the
+ * package actually sits.
+ *
+ * Pointing `-AppNodeModules` at a real `node_modules` therefore only needs one extra
+ * hop: a `node_modules` inside the scope dir, holding the scope itself.
+ */
+const scopeDir = join(appNodeModules, '@deepseek-ai')
+const innerScope = join(scopeDir, 'node_modules')
+if (!existsSync(join(innerScope, '@deepseek-ai'))) {
+  await mkdir(innerScope, { recursive: true })
+  const link = join(innerScope, '@deepseek-ai')
+  if (process.platform === 'win32') {
+    execFileSync('cmd', ['/c', 'mklink', '/J', link, scopeDir], { stdio: 'ignore' })
+  } else {
+    await symlink(scopeDir, link, 'dir')
+  }
+}
 const problems = []
 const note = (ok, label) => {
   console.log((ok ? '    ✓ ' : '    ✗ ') + label)
@@ -77,10 +115,44 @@ try {
   }
   const noop = () => {}
   const mod = await import(pathToFileURL(join(pkgDir, 'dist', 'index.js')).href)
+  // The harness tool registry, with a real `register` so the tool filter's shadow
+  // has something to install onto and its effect can be observed.
+  /** Tools the registry actually accepted (i.e. what the model would be offered). */
+  const registered = []
+  const toolsService = {
+    register(definition) {
+      registered.push(definition.name)
+      return () => {
+        const at = registered.indexOf(definition.name)
+        if (at >= 0) registered.splice(at, 1)
+      }
+    },
+    schemas: () => [
+      { name: 'mcp__smoke-server__echo', description: 'Echo back' },
+      { name: 'mcp__smoke-server__ping', description: '' },
+      { name: 'read_file', description: 'built-in, not from MCP' },
+    ],
+  }
   const ctx = {
     logger: { info: noop, warn: noop, error: (...args) => problems.push('host logger.error: ' + args.map(String).join(' ')) },
-    get: (name) => (name === 'workspaceRegistry' ? { list: () => [] } : undefined),
-    loader: { entries: () => [] },
+    get: (name) => {
+      if (name === 'workspaceRegistry') return { list: () => [] }
+      if (name === 'tools') return toolsService
+      return undefined
+    },
+    loader: {
+      // One configured mcp-client row, exactly as the Loader reports it. This drives
+      // the profile-row projection AND the tool-inventory channel built on top of it.
+      entries: () => [{
+        id: 'mcp-smoke-server',
+        disabled: false,
+        options: {
+          name: '@deepseek-ai/dsh-mcp-client',
+          config: { serverName: 'smoke-server', transport: 'streamable-http', url: 'https://smoke.invalid/mcp' },
+        },
+        fiberPhase: 'active',
+      }],
+    },
     effect: (fn) => { fn(); return noop },
     plugin: () => ({ dispose: noop }),
     on: () => noop,
@@ -92,8 +164,13 @@ try {
   const config = {
     servers: { get: () => live.servers }, skills: { get: () => live.skills }, rowOps: { get: () => live.rowOps },
     skillRequest: { get: () => live.skillRequest }, skillResult: { get: () => live.skillResult },
+    // One configured MCP row (from the loader mock above), so the tool-inventory
+    // channel has something to report.
     profileServers: { get: () => [] }, workspaces: { get: () => [] }, currentWorkspace: { get: () => '' },
     importRequest: { get: () => live.importRequest }, importResult: { get: () => live.importResult },
+    // Read live on every registration, so this mock is also what proves a panel edit
+    // takes effect without a restart.
+    toolFilters: { get: () => live.toolFilters },
   }
 
   try {
@@ -159,6 +236,73 @@ try {
   // an empty list, so the smoke must prove the channel actually publishes.
   const discovered = Array.isArray(live.discoveredSkills) ? live.discoveredSkills : []
   note(discovered.some((skill) => skill.name === 'smoke-discovered'), '磁盘技能发现通道发布了 staged 技能')
+
+  // Channel 5: the tool inventory. The panel's expanded card shows what each server
+  // actually registered, so this must publish per-server tools from the harness
+  // registry — filtered by the `mcp__<serverName>__` prefix, with built-ins excluded.
+  const rows = Array.isArray(live.profileServers) ? live.profileServers : []
+  note(rows.some((row) => row.serverName === 'smoke-server'), '配置文件行投影发布了 loader 里的 MCP 行')
+  const inventory = Array.isArray(live.serverTools) ? live.serverTools : []
+  const entry = inventory.find((item) => item.serverName === 'smoke-server')
+  note(entry !== undefined, '工具清单为已配置的服务器发布了条目')
+  if (entry !== undefined) {
+    const names = entry.tools.map((tool) => tool.name)
+    note(names.length === 2, `只收该服务器的工具（收到 ${names.length} 个，期望 2）`)
+    note(names.includes('mcp__smoke-server__echo'), '保留了完整工具名（模型调用时要用它）')
+    note(!names.includes('read_file'), '内置工具没被算进 MCP 服务器')
+    const echo = entry.tools.find((tool) => tool.name === 'mcp__smoke-server__echo')
+    note(echo?.description === 'Echo back', '工具描述一并发布')
+  }
+  // The error field must be present-and-empty when the read succeeded. If the Host
+  // silently omitted it, the panel would report "restart DSH" for a healthy
+  // registry — so publishing the *absence* of an error is itself the contract.
+  note(live.serverToolsError !== undefined, '读了错误字段本身（缺失会让面板误判为旧 Host）')
+  note(live.serverToolsError?.reason === '', '读取正常时原因字段为空串（不是缺字段）')
+
+  // Channel 6: the tool filter. This is the one that changes what the MODEL is
+  // offered, so the smoke drives a real registration through the shadow and checks
+  // both directions: a dropped tool never reaches the registry, and everything else
+  // is admitted untouched.
+  note(live.filterState?.installed === true, `过滤器的 shadow 装上去了（${live.filterState?.reason || 'ok'}）`)
+  registered.length = 0
+  live.toolFilters = { 'smoke-server': { mode: 'allow', tools: ['echo'] } }
+  await new Promise((resolveWait) => setTimeout(resolveWait, 200))
+  // The rules are read per registration, so no restart is needed for this to apply.
+  toolsService.register({ name: 'mcp__smoke-server__echo' })
+  toolsService.register({ name: 'mcp__smoke-server__ping' })
+  toolsService.register({ name: 'read_file' })
+  note(registered.includes('mcp__smoke-server__echo'), 'allow 名单里的工具照常注册')
+  note(!registered.includes('mcp__smoke-server__ping'), '不在名单里的工具被挡在注册表之外')
+  note(registered.includes('read_file'), '非 MCP 的内置工具完全不受影响')
+
+  // Switching to deny must flip the outcome for the same two names.
+  live.toolFilters = { 'smoke-server': { mode: 'deny', tools: ['ping'] } }
+  await new Promise((resolveWait) => setTimeout(resolveWait, 200))
+  registered.length = 0
+  toolsService.register({ name: 'mcp__smoke-server__echo' })
+  toolsService.register({ name: 'mcp__smoke-server__ping' })
+  note(registered.includes('mcp__smoke-server__echo'), 'deny 模式下不在名单里的照常注册')
+  note(!registered.includes('mcp__smoke-server__ping'), 'deny 模式挡住名单里的工具')
+
+  // Back to off: the server must pass through untouched.
+  live.toolFilters = {}
+  await new Promise((resolveWait) => setTimeout(resolveWait, 200))
+  registered.length = 0
+  toolsService.register({ name: 'mcp__smoke-server__ping' })
+  note(registered.includes('mcp__smoke-server__ping'), 'off 模式（默认）完全不干预注册')
+
+  // The dropped names reach the panel through the publish tick, not synchronously,
+  // so this waits for the projection rather than asserting straight after the drop.
+  const dropStart = Date.now()
+  let droppedPublished = false
+  while (Date.now() - dropStart < 6000) {
+    if (Array.isArray(live.filterState?.dropped) && live.filterState.dropped.length > 0) {
+      droppedPublished = true
+      break
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+  note(droppedPublished, '被挡下的工具名发布给了面板（供它展示真实生效情况）')
   // The list must stay small: bodies are fetched on demand, never published here.
   note(discovered.every((skill) => skill.body === undefined), '列表不夹带正文（体积不会随技能数膨胀）')
 

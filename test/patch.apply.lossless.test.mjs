@@ -9,7 +9,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parse } from 'yaml'
@@ -68,10 +68,14 @@ const makeProfile = (content) => {
 const ctxFor = (dir) => ({ get: (name) => (name === 'profileContext' ? { dir } : undefined), logger: { info() {} } })
 
 // applyRowOp writes through injected IO; point it at plain file writes and a
-// scratch backup dir so the test never touches ~/.dsh.
+// scratch backup dir so the test never touches ~/.dsh. The backup dir MUST be
+// injected: `backupPatch` does not go through `writeFileAtomic`, so without this
+// the suite drops a backup into the real `$DSH_HOME` on every run (it used to).
+const scratchBackup = mkdtempSync(join(tmpdir(), 'smp-lossless-bak-'))
 const usePlainIO = () => setPatchIO({
   withFileLock: (_key, run) => run(),
   writeFileAtomic: async (path, text) => { writeFileSync(path, text, 'utf8') },
+  backupDir: () => scratchBackup,
 })
 
 /** Find a row by id anywhere: panel rows may live inside an `insert:` list. */
@@ -109,6 +113,33 @@ const assertOnlyTargetChanged = (before, after, entryId) => {
   const strip = (entries) => JSON.parse(JSON.stringify(entries.filter((entry) => entry?.id !== entryId)))
   assert.deepEqual(strip(after), strip(before), '其它条目必须原样保留')
 }
+
+test('备份目录可被注入：测试不得把备份写进真实的 $DSH_HOME', async () => {
+  // 这条防的是一个真实发生过的事故：backupPatch 不走 writeFileAtomic，
+  // 此前没有注入点，于是每跑一次测试就往真实的 $DSH_HOME 丢一个备份
+  // （一天下来堆了 135 个，其中 130 个是完全相同的内容）。
+  const beforeReal = process.env.DSH_HOME
+  const fakeReal = mkdtempSync(join(tmpdir(), 'smp-fake-real-home-'))
+  process.env.DSH_HOME = fakeReal
+  try {
+    const scratch = mkdtempSync(join(tmpdir(), 'smp-scratch-bak-'))
+    setPatchIO({
+      withFileLock: (_key, run) => run(),
+      writeFileAtomic: async (path, text) => { writeFileSync(path, text, 'utf8') },
+      backupDir: () => scratch,
+    })
+    const dir = makeProfile(HAZARDOUS)
+    await applyRowOp(ctxFor(dir), { op: 'toggle', entryId: 'mcp-context7', enabled: false })
+
+    // 备份落在注入的 scratch 目录里
+    assert.deepEqual(readdirSync(scratch), ['cordis.patch.yml.bak'])
+    // 而真实 home（这里用替身代表）一个字节都不该被写
+    assert.deepEqual(readdirSync(fakeReal), [], '真实 $DSH_HOME 不该出现任何备份目录')
+  } finally {
+    if (beforeReal === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = beforeReal
+  }
+})
 
 test('真实危险夹具：toggle 一行只改那一行，注释与 !!js 标签都保留', async () => {
   usePlainIO()

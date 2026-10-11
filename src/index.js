@@ -35,6 +35,8 @@ import { bodyOf, discoverSkills } from './skills/discover.js'
 import { createSkill, deleteSkill, renameSkill, updateSkill, writableRoots } from './skills/write.js'
 import { mountedKeyOf, projectServersFor, serverMountConfig, setMountClient, workingDirectoryOf } from './project/mount.js'
 import { connectionDraftOf } from './mcp/connection.js'
+import { toolsByServer } from './mcp/tools.js'
+import { installShadow, isMcpName, judge, liveToolNames } from './mcp/filter.js'
 
 setMountClient(mcpClient)
 
@@ -228,6 +230,56 @@ export const Config = z.object({
    */
   profileServers: z.array(ProfileRow).default([]).volatile(),
   /**
+   * 每个已配置 MCP 服务器当前注册到 harness 的工具清单。
+   *
+   * 数据源是 harness 自己的工具注册表（`ctx.tools.schemas()`）：MCP 客户端把工具
+   * 以 `mcp__<serverName>__<tool>` 的名字注册进去，所以这里按前缀归到各自的服务器。
+   * 面板只读展示，不参与任何写回。
+   */
+  serverTools: z.array(z.object({
+    serverName: z.string().default(''),
+    tools: z.array(z.object({
+      name: z.string().default(''),
+      description: z.string().default(''),
+    })).default([]),
+  })).default([]).volatile(),
+  /**
+   * 工具清单读不到时的原因（空串 = 读取正常）。
+   *
+   * 单独一个字段是必要的：「注册表读不到」与「该服务器没有工具」在界面上长得一样，
+   * 但前者可操作（重启 / 排查冲突），后者只是一个事实。只有列表的话两者无法区分。
+   */
+  serverToolsError: z.object({
+    reason: z.string().default(''),
+    detail: z.string().default(''),
+  }).default({ reason: '', detail: '' }).volatile(),
+  /**
+   * 每个服务器的工具过滤规则：`{ [serverName]: { mode, tools } }`。
+   *
+   * `mode`：`off`（不过滤，默认）/ `allow`（只保留 tools 里的）/ `deny`（只挡 tools 里的）。
+   * 面板写入，Host 在注册那一刻据此决定要不要放行。见 `src/mcp/filter.js` 的取舍说明：
+   * mcp-client 自身没有白名单字段，`ctx.tools.restrict()` 又要求 scoped 上下文，
+   * 所以唯一的接缝是劫持工具服务实例的 `register`。
+   */
+  toolFilters: z.dict(z.object({
+    mode: z.string().default('off'),
+    tools: z.array(z.string()).default([]),
+  })).default({}).volatile(),
+  /**
+   * 过滤器的实际状态，供面板如实展示。
+   *
+   * `installed` 为 false 时是「没装上」而不是「没生效的必要」——这两者在界面上必须
+   * 区分，否则用户以为过滤在工作而实际没有，正是这类插件最坏的失败方式。
+   */
+  filterState: z.object({
+    installed: z.boolean().default(false),
+    reason: z.string().default(''),
+    /** 被挡下的工具名（去重、按服务器归组在面板侧做）。 */
+    dropped: z.array(z.string()).default([]),
+    /** shadow 装上时已经注册的 MCP 工具：它们永远过滤不到。 */
+    preExisting: z.array(z.string()).default([]),
+  }).default({ installed: false, reason: '', dropped: [], preExisting: [] }).volatile(),
+  /**
    * Resolved skill directories, so the UI can show real OS-correct paths instead
    * of "$DSH_HOME"/"~" (Windows uses backslashes and %USERPROFILE%).
    */
@@ -339,6 +391,9 @@ function configuredMcpRows(ctx) {
         const row = entry.options.config ?? {}
         const args = Array.isArray(row.args) ? row.args.map((arg) => String(arg)) : []
         const envMap = row.env !== null && typeof row.env === 'object' && !Array.isArray(row.env) ? row.env : {}
+        // http 行的鉴权头：面板要能回填，否则一次「只改 URL」的保存会把已配好的
+        // Authorization 静默删掉（与 env 同理）。按 KEY=VALUE 交给表单。
+        const headersMap = row.headers !== null && typeof row.headers === 'object' && !Array.isArray(row.headers) ? row.headers : {}
         return {
           entryId: String(entry.id),
           serverName: typeof row.serverName === 'string' ? row.serverName : '',
@@ -349,6 +404,7 @@ function configuredMcpRows(ctx) {
           command: typeof row.command === 'string' ? row.command : '',
           args: args.join(' '),
           env: Object.entries(envMap).map(([key, value]) => `${key}=${String(value)}`).join('\n'),
+          headersText: Object.entries(headersMap).map(([key, value]) => `${key}=${String(value)}`).join('\n'),
           // Connection policy travels with the row so 编辑 can show what is set.
           ...connectionDraftOf(row),
           enabled: !entry.disabled,
@@ -359,6 +415,27 @@ function configuredMcpRows(ctx) {
   } catch (error) {
     return { loaderFound: true, rows: [], error: String(error?.message ?? error) }
   }
+}
+
+/**
+ * Every MCP server name this panel can speak for.
+ *
+ * A filter may only judge names whose server the panel can actually see configured;
+ * anything else is left alone, because the panel has no standing to drop a tool
+ * belonging to a server it does not manage. The union covers both tiers: the
+ * profile's own rows (Loader entries) and the panel's in-memory entries (global and
+ * per-project).
+ */
+function configuredServerNames(ctx, memoryServers = []) {
+  const names = new Set()
+  const { rows } = configuredMcpRows(ctx)
+  for (const row of rows) {
+    if (typeof row.serverName === 'string' && row.serverName !== '') names.add(row.serverName)
+  }
+  for (const server of Array.isArray(memoryServers) ? memoryServers : []) {
+    if (typeof server?.serverName === 'string' && server.serverName !== '') names.add(server.serverName)
+  }
+  return [...names]
 }
 
 /**
@@ -376,6 +453,61 @@ function configuredMcpRows(ctx) {
 export function apply(ctx, config) {
   const readServers = () => config?.servers?.get?.() ?? config?.servers ?? []
   const readSkills = () => config?.skills?.get?.() ?? config?.skills ?? []
+  const readFilters = () => config?.toolFilters?.get?.() ?? config?.toolFilters ?? {}
+
+  /**
+   * The tool filter, installed before anything else in this plugin runs.
+   *
+   * Ordering is the whole ballgame: `dsh-mcp-client` registers a server's first
+   * tool generation while it starts, and a plugin cannot unregister another
+   * plugin's tools. This panel is a **bundle-layer** plugin while the MCP rows live
+   * in the profile's own patch, and the profile composes bundle patches first — so
+   * installing here, synchronously during `apply`, is what makes the shadow land
+   * ahead of every MCP client.
+   *
+   * The rules are read through a getter on every registration rather than captured
+   * once, so a panel edit takes effect without a restart (the settings document
+   * writes these volatile fields straight into the live config).
+   */
+  const filterState = { installed: false, reason: '', dropped: [], preExisting: [] }
+  const droppedNames = []
+  /**
+   * Server names the filter may speak for, cached.
+   *
+   * The judge runs once per tool registration, and reading the Loader's entries on
+   * every one of them would walk the whole entry list for each tool of every
+   * server. The set changes only when a row is added or removed, so it is refreshed
+   * on the same slow tick that publishes the projection instead.
+   */
+  let filterServerNames = []
+  const refreshFilterServers = (memoryServers) => {
+    filterServerNames = configuredServerNames(ctx, memoryServers)
+  }
+  refreshFilterServers(readServers())
+  const shadow = installShadow(
+    ctx,
+    (name) => {
+      const verdict = judge(name, readFilters(), filterServerNames)
+      if (!verdict.admit && typeof name === 'string' && droppedNames.length < 512 && !droppedNames.includes(name)) {
+        droppedNames.push(name)
+        filterState.dropped = [...droppedNames]
+      }
+      return verdict
+    },
+    { warn: (message) => ctx.logger.warn(message) },
+  )
+  filterState.installed = shadow.installed
+  filterState.reason = shadow.reason
+  if (shadow.installed) {
+    filterState.preExisting = liveToolNames(ctx).filter(isMcpName)
+    ctx.logger.info('skills-mcp-panel: MCP tool filter installed (%d pre-existing MCP tool(s))', filterState.preExisting.length)
+  } else {
+    // Reported, never swallowed: "filtering is off" and "filtering could not be
+    // installed" look identical in the UI otherwise, and only one of them is the
+    // user's configuration.
+    ctx.logger.warn('skills-mcp-panel: MCP tool filter not installed — %s', shadow.reason)
+  }
+  ctx.effect(() => () => shadow.restore(), 'skills-mcp-panel.tool-filter')
 
   /**
    * Import scan state. The panel asks for one source at a time through the
@@ -470,7 +602,7 @@ export function apply(ctx, config) {
    */
   /** Published on every transition; the heartbeat file surfaces it for debugging. */
   let lastBeat = { at: '', observed: { servers: [], skills: [] }, changed: {}, mounted: 0, agents: [] }
-  const projection = { loaderFound: null, rows: null, wrote: false, error: null }
+  const projection = { loaderFound: null, rows: null, wrote: false, error: null, toolsError: null }
   const rowOps = { pending: 0, applied: 0, error: null }
   /** Latest disk-skill scan, refreshed on a timer (the scan itself is async). */
   let discoveredSkills = []
@@ -547,7 +679,30 @@ export function apply(ctx, config) {
         userDsh: join(resolveDshHome(), 'skills'),
         userAgents: join(process.env.DSH_AGENTS_HOME ?? join(homedir(), '.agents'), 'skills'),
       }
-      const key = JSON.stringify([plain, spaces, currentWorkspace, discoveredSkills, skillDirs, discoveryInfo])
+      // Live tool inventory, keyed by serverName. A failure carries its reason so
+      // the panel can say *why* it is unknown instead of showing a bare "unreadable"
+      // — "the registry is missing" is actionable, "this server has no tools" is not
+      // a failure at all, and the two must never look the same.
+      const inventory = toolsByServer(ctx, plain.map((row) => row.serverName))
+      const serverTools = inventory.ok ? inventory.servers : []
+      const serverToolsError = inventory.ok
+        ? { reason: '', detail: '' }
+        : { reason: String(inventory.reason ?? ''), detail: String(inventory.detail ?? '') }
+      if (!inventory.ok) {
+        projection.toolsError = `${serverToolsError.reason}${serverToolsError.detail === '' ? '' : `: ${serverToolsError.detail}`}`
+      } else {
+        projection.toolsError = null
+      }
+      // The filter may only judge servers the panel can see, so its cached name set
+      // is refreshed on the same slow tick that publishes everything else.
+      refreshFilterServers(readServers())
+      const filterStateOut = {
+        installed: filterState.installed,
+        reason: filterState.reason,
+        dropped: [...filterState.dropped],
+        preExisting: [...filterState.preExisting],
+      }
+      const key = JSON.stringify([plain, serverTools, serverToolsError, filterStateOut, spaces, currentWorkspace, discoveredSkills, skillDirs, discoveryInfo])
       if (key === published) return
       // Never erase a good projection because the Loader read came back empty.
       if (plain.length === 0 && !loaderFound) {
@@ -555,7 +710,7 @@ export function apply(ctx, config) {
         return
       }
       Promise.resolve(inner.settings.update('skills-mcp-panel', {
-          profileServers: plain, workspaces: spaces, currentWorkspace, discoveredSkills, skillDirs, discoveryInfo,
+          profileServers: plain, serverTools, serverToolsError, filterState: filterStateOut, workspaces: spaces, currentWorkspace, discoveredSkills, skillDirs, discoveryInfo,
           // Re-assert every publish: this marker has been lost by a later rewrite
           // before, and losing it hides the row actions in the panel.
           rowOpsReady: true,

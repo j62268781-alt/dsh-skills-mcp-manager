@@ -53,8 +53,42 @@
 .smp-detailsValue{color:var(--dsw-alias-label-secondary);word-break:break-all}
 .smp-tag{display:inline-flex;align-items:center;border-radius:999px;padding:1px 8px;font-size:11px;line-height:17px;font-weight:500;white-space:nowrap}
 .smp-tag[data-tone=neutral]{background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary)}
+/* 展开区里的工具清单：数据来自 harness 工具注册表，只读展示。
+   分隔线与间距挂在标题上而不是包裹层：空清单与「不可读」两种状态只渲染标题，
+   挂在包裹层会让它们紧贴字段表，看起来像表格的一部分。 */
+.smp-tools{margin:0}
+.smp-toolHead{display:flex;align-items:center;gap:6px;font-size:12px;line-height:18px;
+  margin-top:10px;border-top:.5px solid var(--dsw-alias-border-l3);padding-top:8px}
+.smp-toolTitle{color:var(--dsw-alias-label-tertiary)}
+.smp-toolCount{color:var(--dsw-alias-label-secondary)}
+.smp-toolCount[data-tone=muted]{color:var(--dsw-alias-label-caption)}
+/* 工具过滤：标题行的模式选择器，与每行的勾选框。 */
+.smp-toolModes{margin-left:auto;display:inline-flex;gap:2px}
+.smp-toolMode{appearance:none;background:none;border:.5px solid transparent;border-radius:var(--dsw-radius-sm);padding:1px 7px;font:inherit;font-size:11px;line-height:17px;color:var(--dsw-alias-label-tertiary);cursor:pointer}
+.smp-toolMode:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.smp-toolMode[data-active=true]{background:var(--dsw-alias-bg-module-platform);border-color:var(--dsw-alias-border-l3);color:var(--dsw-alias-label-primary)}
+.smp-toolPick{display:flex;align-items:center;gap:6px;min-width:0;cursor:pointer}
+.smp-toolPick input{margin:0;flex:none;accent-color:var(--dsw-alias-state-business-primary,#4176e6)}
+/* 开启过滤后，不会被注册的行淡化——一眼看出「这个工具模型看不到」。
+   判据是「是否保留」而非「是否勾选」：deny 模式下两者恰好相反。 */
+.smp-tool[data-kept=false] .smp-toolName{color:var(--dsw-alias-label-tertiary);font-weight:400}
+.smp-tool[data-kept=false] .smp-toolDesc{opacity:.7}
+.smp-toolList{list-style:none;margin:4px 0 0;padding:0;display:flex;flex-direction:column;gap:2px}
+.smp-tool{display:flex;flex-direction:column;gap:1px;padding:3px 0;min-width:0}
+/* 工具名是这一行的「标题」，描述是「副标题」，所以两者要有层级差：
+   名字 13px + 500 字重 + 主色，描述 11px + 三级色。
+   行高走面板已有的阶梯（13px→20px，与 .smp-empty 一致；11px→16px）。 */
+.smp-toolName{font-family:var(--dsw-font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:13px;line-height:20px;font-weight:500;color:var(--dsw-alias-label-primary);word-break:break-all}
+/* 描述完整展示，只在极端长的少数情况下折行封顶。
+   实测 35 个真实 MCP 工具：中位 74 字符、p75 151、p90 318、最长 2006——
+   绝大多数只占一两行，所以不按字符数截断（那会白白砍掉大多数），
+   只给长尾一个上限，完整文本仍通过 title 属性可查。 */
+.smp-toolDesc{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary);overflow-wrap:anywhere;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:4;line-clamp:4;overflow:hidden}
 .smp-empty{color:var(--dsw-alias-label-tertiary);margin:0;font-size:13px;line-height:20px;list-style:none}
 .smp-note{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;margin:0;list-style:none}
+/* 环境变量字段：文本框 + 自动注入说明。说明里的 code 用等宽字体点出关键名。 */
+.smp-envField{display:flex;flex-direction:column;gap:6px;min-width:0}
+.smp-envField code{font-family:var(--dsw-font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:11px;background:var(--dsw-alias-bg-module-platform);border-radius:var(--dsw-radius-xs,4px);padding:0 4px}
 .smp-formGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:10px}
 .smp-field{display:flex;flex-direction:column;gap:4px;min-width:0}
 .smp-field[data-wide=true]{grid-column:1 / -1}

@@ -46,6 +46,10 @@ if (missing.length > 0) {
 // 全是编造的公开数据：真实截图会把用户自己的服务器地址与路径带进 README。
 const PROJECT = '/Users/me/projects/acme-web'
 
+/** 一个服务器的工具清单（面板展示的是完整公开名 `mcp__<server>__<tool>`）。 */
+const toolsOf = (server, pairs) =>
+  pairs.map(([name, description]) => ({ name: `mcp__${server}__${name}`, description }))
+
 const SAMPLE = {
   rowOps: [], rowOpsReady: true,
   currentWorkspace: PROJECT,
@@ -71,6 +75,33 @@ const SAMPLE = {
     { name: 'db-migrate', description: '生成并校验数据库迁移脚本', path: `${PROJECT}/.agents/skills/db-migrate/SKILL.md`, source: 'project-agents', scope: PROJECT },
     { name: 'api-mock', description: '为前端起一个本地 mock 服务', path: `${PROJECT}/.agents/skills/api-mock/SKILL.md`, source: 'project-agents', scope: PROJECT },
   ],
+  // 展开卡片里的工具清单 + 过滤状态（缺了它截图会显示「需要重启 DSH」的旧 Host 提示）
+  serverTools: [
+    { serverName: 'context7', tools: toolsOf('context7', [
+      ['resolve-library-id', 'Resolves a package name to a Context7-compatible library ID'],
+      ['query-docs', 'Retrieves and queries up-to-date documentation and code examples'],
+    ]) },
+    { serverName: 'deepwiki', tools: toolsOf('deepwiki', [
+      ['read_wiki_structure', 'Get a list of documentation topics for a repository'],
+      ['read_wiki_contents', 'View documentation about a GitHub repository'],
+      ['ask_wiki_question', 'Ask any question about a repository and get an AI-powered answer'],
+    ]) },
+    { serverName: 'github', tools: toolsOf('github', [
+      ['get_issue', 'Get details of a specific issue in a GitHub repository'],
+      ['list_issues', 'List issues in a GitHub repository with optional filters'],
+      ['search_issues', 'Search for issues across GitHub repositories'],
+      ['create_issue', 'Create a new issue in a GitHub repository'],
+      ['get_file_contents', 'Get the contents of a file or directory from a repository'],
+      ['create_pull_request', 'Create a new pull request in a GitHub repository'],
+      ['merge_pull_request', 'Merge a pull request in a GitHub repository'],
+      ['delete_file', 'Delete a file from a GitHub repository'],
+    ]) },
+    { serverName: 'filesystem', tools: [] },
+  ],
+  serverToolsError: { reason: '', detail: '' },
+  // 「只保留勾选」：github 只留 3 个，其余 5 个不会进入工具注册表
+  toolFilters: { github: { mode: 'allow', tools: ['get_issue', 'list_issues', 'search_issues'] } },
+  filterState: { installed: true, reason: '', dropped: [], preExisting: [] },
   skillRequest: { op: '', scope: '', id: '', project: '', path: '', name: '', prevName: '', description: '', body: '', nonce: '' },
   skillResult: { ok: false, reason: '', name: '', body: '', at: '', nonce: '' },
   importRequest: { source: '', scope: '', project: '', nonce: '' },
@@ -127,6 +158,11 @@ ${client}
       var tabs = document.querySelectorAll('.smp-tab');
       for (var i = 0; i < tabs.length; i++) if (tabs[i].textContent.indexOf('Skills') === 0) tabs[i].click();
     }
+    // 工具过滤在展开卡片里，所以这一态要先把 github 那张卡展开（第 3 个全局行）。
+    if ('${state}' === 'tools') {
+      var toggles = document.querySelectorAll('.smp-cardToggle');
+      if (toggles[2]) toggles[2].click();
+    }
   }, 60);
 })();
 </script></body></html>`
@@ -134,6 +170,7 @@ ${client}
 /* ------------------------------------------------------------------ 截图 */
 const STATES = [
   { file: 'mcp-panel.png', state: 'mcp', width: 1440, height: 940 },
+  { file: 'tools-filter.png', state: 'tools', width: 1440, height: 1180 },
   { file: 'skills-panel.png', state: 'skills', width: 1440, height: 700 },
 ]
 

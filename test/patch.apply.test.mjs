@@ -6,7 +6,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { applyRowOp, setPatchIO } from '../src/patch/apply.js'
 
 const PATCH = `- insert:
@@ -30,6 +30,64 @@ const fresh = async () => {
   const ctx = { get: (n) => (n === 'profileContext' ? { dir } : undefined), logger: { warn() {}, info() {}, error() {} } }
   return { dir, ctx, text: () => readFile(join(dir, 'cordis.patch.yml'), 'utf8') }
 }
+
+test('备份只留一个文件：反复操作不堆积，内容是「上一次操作前」的状态', async () => {
+  const { ctx, text } = await fresh()
+  const beforeFirst = await text()
+  await applyRowOp(ctx, {
+    op: 'update', entryId: 'mcp-context7', serverName: 'first', transport: 'streamable-http',
+    url: 'https://a.example/mcp',
+  })
+
+  const afterFirst = await findBackups(home)
+  assert.equal(afterFirst.length, 1, `一次操作后只该有一个备份文件，实际 ${afterFirst.length}`)
+  // 文件名固定、不带时间戳 —— 带时间戳正是此前堆积 135 个文件的成因
+  assert.equal(basename(afterFirst[0]), 'cordis.patch.yml.bak')
+  assert.equal(await readFile(afterFirst[0], 'utf8'), beforeFirst, '备份内容 = 上一次操作前的状态')
+
+  // 再来一轮：文件数不能增长（真实环境里一天堆了 135 个，其中 130 个是纯重复）
+  for (let round = 0; round < 8; round += 1) {
+    await applyRowOp(ctx, {
+      op: 'update', entryId: 'mcp-context7', serverName: `round${round}`, transport: 'streamable-http',
+      url: `https://r${round}.example/mcp`,
+    })
+  }
+  const later = await findBackups(home)
+  assert.equal(later.length, 1, `9 次操作后仍应只有一个备份，实际 ${later.length}`)
+
+  // 再写一次，确认滚动到「这一次之前」：单文件方案的语义就是撤销上一次操作
+  const beforeFinal = await text()
+  await applyRowOp(ctx, {
+    op: 'update', entryId: 'mcp-context7', serverName: 'final', transport: 'streamable-http',
+    url: 'https://final.example/mcp',
+  })
+  const final = await findBackups(home)
+  assert.equal(final.length, 1)
+  assert.equal(await readFile(final[0], 'utf8'), beforeFinal, '滚动后的内容 = 最后一次操作前的状态')
+  assert.match(await text(), /serverName: final/)
+})
+
+test('备份写入失败不能挡住正常改写', async () => {
+  const { ctx, text } = await fresh()
+  const broken = {
+    withFileLock: (_key, run) => run(),
+    writeFileAtomic: async (path, content) => writeFile(path, content, 'utf8'),
+  }
+  // 让 DSH_HOME 指向一个不可创建目录的位置，备份必然失败
+  const original = process.env.DSH_HOME
+  process.env.DSH_HOME = join(home, 'cordis.patch.yml', 'nested-cannot-exist')
+  try {
+    const changed = await applyRowOp(ctx, {
+      op: 'update', entryId: 'mcp-context7', serverName: 'still-works', transport: 'streamable-http',
+      url: 'https://ok.example/mcp',
+    })
+    assert.equal(changed, true, '备份失败也必须让改写继续')
+    assert.match(await text(), /serverName: still-works/)
+  } finally {
+    process.env.DSH_HOME = original
+    setPatchIO(broken)
+  }
+})
 
 test('add：stdio 行写入 name/config，且先备份', async () => {
   const { dir, ctx, text } = await fresh()
@@ -169,6 +227,80 @@ test('未知 entryId：抛错且不写文件（drain 会把它记进 rowOps.erro
     /not found/,
   )
   assert.equal(await text(), before)
+})
+
+test('update：请求头可写入、可清空（headersChanged 为真时清空即删键）', async () => {
+  const { ctx, text } = await fresh()
+  // 写入
+  await applyRowOp(ctx, {
+    op: 'update', entryId: 'mcp-context7', serverName: 'context7', transport: 'streamable-http',
+    url: 'https://mcp.context7.com/mcp', headers: 'Authorization=Bearer sk-abc', headersChanged: true,
+  })
+  let out = await text()
+  assert.match(out, /Authorization: Bearer sk-abc/)
+
+  // 清空：headersChanged 为真 → 删键，不能留下空 headers: {}
+  await applyRowOp(ctx, {
+    op: 'update', entryId: 'mcp-context7', serverName: 'context7', transport: 'streamable-http',
+    url: 'https://mcp.context7.com/mcp', headers: '', headersChanged: true,
+  })
+  out = await text()
+  assert.doesNotMatch(out, /Authorization/)
+  assert.doesNotMatch(out, /headers/)
+})
+
+test('update：未改动的请求头不会被写坏（headersChanged 为假且字段为空）', async () => {
+  const { ctx, text } = await fresh()
+  await applyRowOp(ctx, {
+    op: 'update', entryId: 'mcp-context7', serverName: 'context7', transport: 'streamable-http',
+    url: 'https://mcp.context7.com/mcp', headers: 'X-K=1', headersChanged: true,
+  })
+  assert.match(await text(), /X-K: 1|X-K: '1'|X-K: "1"/)
+
+  // 旧面板没有回填该字段（headers 为空、headersChanged 为假）→ 只改 URL 不能动它
+  await applyRowOp(ctx, {
+    op: 'update', entryId: 'mcp-context7', serverName: 'context7', transport: 'streamable-http',
+    url: 'https://mcp.context7.com/mcp2', headers: '', headersChanged: false,
+  })
+  const out = await text()
+  assert.match(out, /X-K/, '未改动的请求头必须保留')
+  assert.match(out, /mcp2/)
+})
+
+test('update：stdio 的环境变量可写入、可清空（PATH 例外，它必须保留）', async () => {
+  const { ctx, text } = await fresh()
+  await applyRowOp(ctx, {
+    op: 'update', entryId: 'mcp-context7', serverName: 'ctx', transport: 'stdio',
+    command: 'npx', args: '-y pkg', env: 'TOKEN=abc', envChanged: true,
+  })
+  assert.match(await text(), /TOKEN: abc/)
+
+  await applyRowOp(ctx, {
+    op: 'update', entryId: 'mcp-context7', serverName: 'ctx', transport: 'stdio',
+    command: 'npx', args: '-y pkg', env: '', envChanged: true,
+  })
+  const out = await text()
+  // 用户填的变量被清掉
+  assert.doesNotMatch(out, /TOKEN/)
+  // 但 PATH 会留下：spawnEnv 总要注入它，否则 stdio 行里的 node/npx 找不到可执行文件
+  assert.match(out, /env:/)
+  assert.match(out, /PATH:/)
+})
+
+test('update：未改动的环境变量不会被写坏（envChanged 为假且字段为空）', async () => {
+  const { ctx, text } = await fresh()
+  await applyRowOp(ctx, {
+    op: 'update', entryId: 'mcp-context7', serverName: 'ctx', transport: 'stdio',
+    command: 'npx', args: '-y pkg', env: 'TOKEN=keep', envChanged: true,
+  })
+  // 旧面板没回填 env：只改参数不能把已配好的令牌删掉
+  await applyRowOp(ctx, {
+    op: 'update', entryId: 'mcp-context7', serverName: 'ctx', transport: 'stdio',
+    command: 'npx', args: '-y other', env: '', envChanged: false,
+  })
+  const out = await text()
+  assert.match(out, /TOKEN: keep/, '未改动的环境变量必须保留')
+  assert.match(out, /other/)
 })
 
 /** 在 home 下递归找 .bak 文件。 */

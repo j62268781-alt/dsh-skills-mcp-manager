@@ -1,10 +1,60 @@
-/** components/card 接口测试：详情字段表（含密钥打码）。 */
+/** components/card 接口测试：详情字段表（含密钥打码、按传输省略无关字段）。 */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import React from 'react'
-import { detailNodes, entryDetailPairs, maskEnv, rowDetailPairs } from '../lib/src/components/card.jsx'
+import { detailNodes, entryDetailPairs, hasInjectedPath, headersText, maskEnv, maskHeaders, rowDetailPairs, splitEnv } from '../lib/src/components/card.jsx'
 
 globalThis.__dshReact = React
+
+test('splitEnv：把自动注入的 PATH 与用户自填变量分开', () => {
+  // 真实形态：全局 stdio 行会被注入一条超长 PATH（那是机器的登录 PATH）
+  const injected = 'TOKEN=abc\nPATH=C:\\WINDOWS\\system32;C:\\WINDOWS;D:\\nodejs\\'
+  const { own, path } = splitEnv(injected)
+  assert.equal(own, 'TOKEN=abc', '用户变量要单独拿出来')
+  assert.match(path, /^C:\\WINDOWS/, 'PATH 归到 path')
+
+  // 大小写不敏感：配置里也可能写成 Path
+  assert.equal(splitEnv('Path=/usr/bin:/bin').path, '/usr/bin:/bin')
+
+  // 没有 PATH 时 path 为空，用户变量原样保留
+  const plain = splitEnv('A=1\nB=2')
+  assert.equal(plain.path, '')
+  assert.equal(plain.own, 'A=1\nB=2')
+
+  // 空输入
+  assert.deepEqual(splitEnv(''), { own: '', path: '' })
+  assert.deepEqual(splitEnv(undefined), { own: '', path: '' })
+})
+
+test('hasInjectedPath：判断是否为 stdio 行自动注入了 PATH', () => {
+  assert.equal(hasInjectedPath('PATH=C:\\a;C:\\b'), true)
+  assert.equal(hasInjectedPath('TOKEN=abc'), false)
+  assert.equal(hasInjectedPath(''), false)
+  assert.equal(hasInjectedPath(undefined), false)
+})
+
+test('rowDetailPairs：stdio 行有注入 PATH 时单独标注，不混进用户变量', () => {
+  const map = Object.fromEntries(rowDetailPairs({
+    entryId: 'mcp-chrome-devtools', transport: 'stdio', target: 'npx -y chrome-devtools-mcp@latest',
+    args: '-y chrome-devtools-mcp@latest', env: 'PATH=C:\\WINDOWS;D:\\nodejs\\', enabled: true,
+  }))
+  // 关键：不能把那一长串 PATH 当成「环境变量」显示
+  assert.equal(map['环境变量'], undefined, '用户没配变量时不该出现「环境变量」行')
+  assert.match(map['PATH'], /自动注入/)
+  // 标签必须短：详情区标签列只有 76px，长的会折行并破坏对齐
+  assert.ok(map['PATH'] !== undefined, '键名保持为 PATH')
+  assert.ok(!('PATH（自动注入）' in map), '标签不能带括号后缀，否则折行')
+  assert.doesNotMatch(JSON.stringify(map), /D:\\\\nodejs/, '不该把整串 PATH 摊开')
+})
+
+test('rowDetailPairs：用户自填变量与注入 PATH 同时存在时两者都在', () => {
+  const map = Object.fromEntries(rowDetailPairs({
+    entryId: 'mcp-x', transport: 'stdio', target: 'npx', args: '-y p',
+    env: 'TOKEN=secret\nPATH=C:\\a;C:\\b', enabled: true,
+  }))
+  assert.equal(map['环境变量'], 'TOKEN=***', '用户变量打码后显示')
+  assert.match(map['PATH'], /自动注入/)
+})
 
 test('maskEnv：保留键、隐藏值，空值显示占位', () => {
   assert.equal(maskEnv('A=1\nB=two'), 'A=***\nB=***')
@@ -12,34 +62,72 @@ test('maskEnv：保留键、隐藏值，空值显示占位', () => {
   assert.equal(maskEnv(undefined), '—')
 })
 
-test('rowDetailPairs：http 行显示地址、隐藏命令', () => {
+test('maskHeaders：请求头打码，不能漏出 Bearer', () => {
+  // 请求头是 KEY: VALUE / KEY=VALUE，用 env 的掩码（只切 =）会原样泄露令牌
+  assert.equal(maskHeaders('Authorization: Bearer sk-abc'), 'Authorization:***')
+  assert.equal(maskHeaders('Authorization=Bearer sk-abc'), 'Authorization=***')
+  assert.equal(maskHeaders({ Authorization: 'Bearer sk-abc' }), 'Authorization:***')
+  assert.equal(maskHeaders(''), '—')
+  assert.equal(maskHeaders(undefined), '—')
+})
+
+test('headersText：对象与文本都渲染成行', () => {
+  assert.equal(headersText({ A: '1', B: '2' }), 'A: 1\nB: 2')
+  assert.equal(headersText('A: 1'), 'A: 1')
+  assert.equal(headersText(undefined), '')
+})
+
+test('rowDetailPairs：http 行只给地址，不出现命令/参数/环境变量', () => {
   const pairs = rowDetailPairs({
     entryId: 'include:mcp-context7', transport: 'streamable-http', target: 'https://mcp.context7.com/mcp', enabled: true,
   })
   const map = Object.fromEntries(pairs)
   assert.equal(map['行 id'], 'mcp-context7')
   assert.equal(map['地址'], 'https://mcp.context7.com/mcp')
-  assert.equal(map['命令'], '—')
   assert.equal(map['状态'], '已启用')
   assert.equal(map['范围'], '全局（配置文件行）')
+  // 无关字段整条省略，而不是显示占位符
+  assert.ok(!('命令' in map), 'http 行不该出现「命令」')
+  assert.ok(!('参数' in map), 'http 行不该出现「参数」')
+  assert.ok(!('环境变量' in map), 'http 行不该出现「环境变量」')
 })
 
-test('rowDetailPairs：stdio 行显示命令、隐藏地址，停用可辨', () => {
-  const pairs = new Map(rowDetailPairs({
+test('rowDetailPairs：http 行有请求头才显示，且已打码', () => {
+  const map = Object.fromEntries(rowDetailPairs({
+    entryId: 'mcp-x', transport: 'streamable-http', target: 'https://x/mcp', headersText: 'Authorization=Bearer sk-abc',
+  }))
+  assert.equal(map['请求头'], 'Authorization=***')
+  const bare = Object.fromEntries(rowDetailPairs({
+    entryId: 'mcp-y', transport: 'streamable-http', target: 'https://y/mcp',
+  }))
+  assert.ok(!('请求头' in bare), '没有请求头就不显示这一行')
+})
+test('rowDetailPairs：stdio 行只给命令，不出现地址', () => {
+  const map = Object.fromEntries(rowDetailPairs({
     entryId: 'mcp-github', transport: 'stdio', target: 'npx', args: '-y pkg', env: 'TOKEN=abc', enabled: false,
   }))
-  assert.equal(pairs.get('命令'), 'npx')
-  assert.equal(pairs.get('地址'), '—')
-  assert.equal(pairs.get('参数'), '-y pkg')
-  assert.equal(pairs.get('环境变量'), 'TOKEN=***')
-  assert.equal(pairs.get('状态'), '已停用')
+  assert.equal(map['命令'], 'npx')
+  assert.equal(map['参数'], '-y pkg')
+  assert.equal(map['环境变量'], 'TOKEN=***')
+  assert.equal(map['状态'], '已停用')
+  assert.ok(!('地址' in map), 'stdio 行不该出现「地址」')
+  assert.ok(!('请求头' in map), 'stdio 行不该出现「请求头」')
 })
 
 test('entryDetailPairs：项目条目用数组参数并带上项目名', () => {
-  const pairs = new Map(entryDetailPairs({ transport: 'stdio', command: 'npx', args: ['-y', 'pkg'], enabled: true }, 'tcl_jiguang'))
-  assert.equal(pairs.get('命令'), 'npx')
-  assert.equal(pairs.get('参数'), '-y pkg')
-  assert.equal(pairs.get('范围'), 'tcl_jiguang')
+  const map = Object.fromEntries(entryDetailPairs({ transport: 'stdio', command: 'npx', args: ['-y', 'pkg'], enabled: true }, 'tcl_jiguang'))
+  assert.equal(map['命令'], 'npx')
+  assert.equal(map['参数'], '-y pkg')
+  assert.equal(map['范围'], 'tcl_jiguang')
+})
+
+test('entryDetailPairs：http 条目不显示命令，请求头打码', () => {
+  const map = Object.fromEntries(entryDetailPairs({
+    transport: 'streamable-http', url: 'https://x/mcp', headers: { Authorization: 'Bearer sk-abc' },
+  }))
+  assert.equal(map['地址'], 'https://x/mcp')
+  assert.equal(map['请求头'], 'Authorization:***')
+  assert.ok(!('命令' in map))
 })
 
 test('detailNodes：标签值交替展开，空值显示占位', () => {

@@ -6,7 +6,7 @@
 
 [![DSH](https://img.shields.io/badge/DSH-0.2.0--rc.2%20实测-4c6ef5)](#)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![tests](https://img.shields.io/badge/npm%20test-140%20passed-2ea043)](#)
+[![tests](https://img.shields.io/badge/npm%20test-228%20passed-2ea043)](#)
 [![runtime deps](https://img.shields.io/badge/运行时依赖-0-8a8f99)](#工作原理)
 [![Listed on dsh-plugin.org](https://dsh-plugin.org/badges/listed.svg)](https://dsh-plugin.org/plugins/j62268781-alt/dsh-skills-mcp-manager)
 
@@ -18,9 +18,10 @@ DSH 插件：把 **Skills** 与 **MCP** 的管理搬进 **设置 → Skills & MC
 
 - 🗂️ **技能**：列表 / 搜索 / 预览全文 / 新建 / 重命名 / 删除，落盘就是 `<技能根>/<名字>/SKILL.md`；删除先备份再删，可手动恢复
 - 🔌 **MCP**：全局条目就是 profile `cordis.patch.yml` 里的**真实 Loader 行**，增删改停写回配置文件；项目级条目只挂到该项目里运行的 agent
+- 🎛️ **按服务器筛选工具**：展开卡片就能看到这一行**实际注册了哪些工具**（名字 + 描述，来自 harness 自己的工具注册表），并按服务器选择「全部保留 / 只保留勾选 / 只挡勾选」。被挡下的工具**不进工具注册表**，所以也不占用每次组装工具面的 token——实测一个 `chrome-devtools` 就有 30 个工具、约 25 KB schema
 - 📥 **MCP 导入**：一键扫描 Claude Code / Cursor / VS Code / Gemini / Codex 等 **26 个来源**的用户级或项目级配置，预览后导入
 - ↩️ **两级分明**：同一个页面里切换「全局」和「项目」，项目选择器带工作区补全
-- 🧯 **不动坏你的配置**：插件里绝不把异常抛出去（DSH 会因此隔离整个 profile 配置），写 `cordis.patch.yml` 前自动备份、写前重新校验
+- 🧯 **不动坏你的配置**：插件里绝不把异常抛出去（DSH 会因此隔离整个 profile 配置），写 `cordis.patch.yml` 前自动备份（只留一个滚动 `.bak`）、写前重新校验
 - 📦 **零运行时依赖**：`react` / `yaml` 都用宿主已有的那份，插件本体不带第三方运行时依赖
 
 **目录**：[界面预览](#界面预览) · [安装](#安装) · [使用](#使用) · [工作原理](#工作原理) · [已知边界](#已知边界) · [更多文档](#更多文档) · [License](#license)
@@ -34,6 +35,11 @@ DSH 插件：把 **Skills** 与 **MCP** 的管理搬进 **设置 → Skills & MC
 <p align="center">
   <img src="https://raw.githubusercontent.com/j62268781-alt/dsh-skills-mcp-manager/master/docs/images/mcp-panel.png" width="1000" alt="MCP 面板：全局配置文件行、项目级条目、导入与搜索">
   <br><sub>MCP 面板 · 全局（配置文件行 + 停用/编辑/删除）· 项目级 · 导入 MCP</sub>
+</p>
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/j62268781-alt/dsh-skills-mcp-manager/master/docs/images/tools-filter.png" width="1000" alt="展开卡片：工具清单与「只保留勾选 / 只挡勾选」三档过滤">
+  <br><sub>展开卡片 · 这一行注册了哪些工具 + 只保留勾选（未勾的淡化，且不会注册给模型）</sub>
 </p>
 
 <p align="center">
@@ -109,7 +115,26 @@ npm run deploy     # 拷贝进 profile；部署前先跑加载冒烟，失败则
 
 - 卡片上的「配置文件」标签表示这一行来自 `cordis.patch.yml`；这种行可以**编辑 / 停用 / 删除**，改动由 Host 排空 `rowOps` 队列后落盘
 - 展开卡片能看传输方式、地址或命令、参数、环境变量（值打码）、范围与启停状态
-- 停用只是把该行的 `enabled` 置 false，不删你的配置
+- **展开卡片的「工具」一栏可以只保留你需要的工具**。每个服务器的工具清单下面有三档：
+  | 档位 | 含义 |
+  |---|---|
+  | 全部保留（默认） | 不做任何干预，该服务器列出的工具全部注册 |
+  | 只保留勾选 | 勾选的才注册，没勾的**不会进入工具注册表**（也不占 token） |
+  | 只挡勾选 | 勾选的被挡住，其余照常注册 |
+
+  被挡下的工具不只是「不显示」——它们从未注册，所以也不占用每次组装工具面的 JSON schema 体积。
+  实测本机 chrome-devtools 一个服务器就占 30 个工具、约 25 KB（≈5.8k tokens），
+  只留常用的几个收益很明显。
+
+  两点如实说明：
+  - **改动要等该服务器重新注册工具时才完全生效**。规则本身是**即时**读取的（改完保存即可，
+    不用重启），但已经注册进注册表的工具无法被插件注销，所以已存在的工具不会当场消失。
+    想立刻看到效果：把这张卡片**「停用」再「启用」**（几秒即可）——停用会销毁该服务器的桥接、
+    连带注销它的工具，启用时重新连接并重新注册，于是全部工具重新过一遍过滤；或者重启 DSH。
+  - 过滤靠劫持工具服务的 `register` 实现——因为 `dsh-mcp-client` 自身没有白名单字段，
+    而 `ctx.tools.restrict()` 要求 scoped 上下文（全局调用会抛错）、且只遮罩不注销。
+    这是唯一能真正把工具挡在注册表外的接缝。装不上时面板会显示原因，而不是假装在工作。
+- **停用只是把该行的 `enabled` 置 false，不删你的配置**
 - **连接与重连**（添加/编辑 MCP 时的最后一组输入，全局与项目级都支持）：直接对应 `@deepseek-ai/dsh-mcp-client` 自己的配置字段
   | 表单里填的 | 落到 config 的 | 默认值 | 作用 |
   |---|---|---|---|
@@ -142,7 +167,7 @@ lib/src/**    Client 半（esbuild → lib/client.js） 跑在浏览器，单文
 cordis.patch.yml                                   声明插件行（本包自己的 bundle patch）
 ```
 
-**数据通道**：第三方 bundle 不能注册自己的 `ctx.remote` 命名空间，所以两半靠**官方 settings remote** 通信——面板 UI 状态、`servers[]` / `skills[]`、Host 投影出来的 `profileServers` / `discoveredSkills`，都在同一个 settings 命名空间里。这不是绕过，是第三方插件唯一能同时触达两侧的官方管道。
+**数据通道**：第三方 bundle 不能注册自己的 `ctx.remote` 命名空间，所以两半靠**官方 settings remote** 通信——面板 UI 状态、`servers[]` / `skills[]`、Host 投影出来的 `profileServers` / `discoveredSkills` / `serverTools` / `filterState`，以及面板写回的 `toolFilters`，都在同一个 settings 命名空间里。这不是绕过，是第三方插件唯一能同时触达两侧的官方管道。
 
 **技能**：面板写的、导入的、手工放进根目录的，最终都以磁盘文件为准。Host 每 2 秒读一次运行中的 `config.skills[]`，把每个条目对账成 `<根>/<名字>/SKILL.md`，并回收自己之前写过、现在不该存在的文件（清单在 `$DSH_HOME/skills-mcp-panel.state.json`）。默认技能根与 DSH 自带的文件技能提供方一致。
 
@@ -150,12 +175,31 @@ cordis.patch.yml                                   声明插件行（本包自�
 
 **全局 MCP**：对 `cordis.patch.yml` 的写入照抄官方 config-editor 的做法——同一把文件锁、原子写、写前重新 `parseDocument` 校验、每次改写前自动备份，块外的用户内容逐字节保留（注释、`!!js` 表达式都不会被写坏）。
 
+**备份只留一个文件**：改写前把当前内容写到 `$DSH_HOME/skills-mcp-panel.backups/cordis.patch.yml.bak`，
+每次覆盖。它保存的是「**当前状态之前的那一份**」，也就是**撤销上一次操作**——这也是它唯一的用途，
+所以不留带时间戳的历史副本（早先那样做，一天就堆了 135 个文件、其中 130 个是逐字节重复）。
+需要长期历史请用版本控制。
+
 **安全边界**：DSH 的 `sanitizeProfile` 会在**插件加载或通道处理抛出未捕获异常**时，把用户整份 `cordis.patch.yml` 改名隔离并禁用其它插件。所以本插件的每个通道处理都包了双层 `try/catch`：宁可回一条失败原因，也不让异常逃出去。
+
+**工具过滤**：`dsh-mcp-client` 会把每个连接到的服务器列出的**全部**工具无条件注册，而它的配置里**没有**任何白名单字段（stdio / streamable-http 两种 schema 都没有），`ctx.tools.restrict()` 也不能替代——它要求 scoped 上下文（全局调用会抛错），而且只**遮罩**定义、定义仍留在注册表里可被内省。唯一能把工具挡在注册表外的接缝是 `register` 本身，所以面板在 `apply()` 里**劫持工具服务实例上的 `register`**：
+
+- 打在**实例**上而不是原型：按名字查找的调用方（`syncTools` 正是如此）只看得见实例上的写入；原型属于恰好被导入的那份包副本。
+- **顺序上正好占优**：本插件是 bundle 层，而 MCP 行在 profile 的 `cordis.patch.yml`（用户补丁层），profile 组装时**先应用 bundle 补丁、再应用用户补丁**——所以劫持一定在 MCP 客户端注册第一批工具之前装好，且这个顺序不依赖用户手工排行。真机上 `filterState.installed === true` 且 `preExisting` 为空，证实了这一点。
+- **fail-open**：判不了名字就放行。过滤器自身的 bug 不该表现成「工具凭空消失」。`Reflect.set` 在不可写属性上会返回 `false` 且可能静默失败，所以写入结果是被**验证**的——否则会出现「报告安装成功、实际一个都没过滤」这种最坏情况。
+- 规则**每次注册时实时读取**，所以改完保存即对新注册生效；未配置的服务器与非 MCP 的内置工具一律放行；归属按**最长前缀**判定（`github` 与 `github__enterprise` 并存时不会挂错）。
 
 ## 已知边界
 
 - 面板列出**磁盘上**的技能（其它工具放进去的也在），但只对其中「本插件能定位到的根」执行写操作
 - **项目级 MCP 对 subagent 不可见**：subagent 只继承 root 作用域；需要所有 agent 都用就配成全局
+- **工具过滤对「已注册」的工具无能为力**：插件只能在注册那一刻放行或拦下，无法注销别的插件
+  已经注册的工具。所以刚开启的档位要等该服务器重新注册工具才完全见效——把该卡片「停用」再
+  「启用」即可立即触发，或重启 DSH
+- **工具过滤依赖工具服务的 `register` 可被写入**：若某个版本的 DSH 把它设成不可写，
+  面板会显示「过滤未生效」并给出原因，而不是静默失效
+- **过滤看的是公开工具名**：MCP 客户端把工具注册为 `mcp__<serverName>__<原始名>`，名字过长时
+  会规范化并加哈希后缀——勾选界面里的短名就是按这个公开名切的，与服务器端的原始名可能不同
 - **stdio MCP 首次启动要等**：`npx` 首次下载包约 1–2 分钟，这期间挂载已建立但工具还没注册
 - `command: npx` 走**用户自己的 npm 缓存**；`~/.npm` 里若有 root 所有的文件会 `EACCES`，一次性修复：`sudo chown -R $(whoami):staff ~/.npm`
 - 装/更新之后：Client 半刷新页面即可，Host 半的改动需要重启 DSH（安装器与市场都会提示）
@@ -167,6 +211,7 @@ cordis.patch.yml                                   声明插件行（本包自�
 | [`CHANGELOG.md`](CHANGELOG.md) | 每个版本改了什么 |
 | [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | 改这个插件的人：自测命令、诊断文件、故障恢复 |
 | [`docs/PUBLISHING.md`](docs/PUBLISHING.md) | 维护者：npm 发包、GitHub Release、上架插件市场 |
+| [`docs/ICON.md`](docs/ICON.md) | 改图标的人：插件的绘制规范（画布 / 尺寸 / 配色）与两个易踩的坑 |
 | [`docs/ENGINEERING.md`](docs/ENGINEERING.md) | 开发手记（真机验证记录 / 事故复盘 / 踩坑清单，历史归档） |
 
 ## License
