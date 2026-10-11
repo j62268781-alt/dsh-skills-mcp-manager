@@ -9,7 +9,12 @@ import { scanImportSource } from '../src/import/scan.js'
 
 const home = mkdtempSync(join(tmpdir(), 'smp-import-home-'))
 const project = mkdtempSync(join(tmpdir(), 'smp-import-proj-'))
+// `~` is resolved by the product through `os.homedir()`, which reads `USERPROFILE`
+// on Windows and `HOME` elsewhere. Setting only `HOME` left the Windows run reading
+// the real user home, so the global fixtures were never found and three sources
+// looked broken — a test bug, not a product one.
 process.env.HOME = home
+process.env.USERPROFILE = home
 
 const write = (base, rel, json) => {
   const file = join(base, rel)

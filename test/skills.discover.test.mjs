@@ -32,8 +32,10 @@ mkdirSync(join(agentsHome, 'skills', 'no-skill-md'), { recursive: true })   // �
 test('skillRootsFor：四个根、顺序与 source 标签与 DSH 对齐', () => {
   const roots = skillRootsFor({ projectRoots: ['/p/a'], dshHome: '/h', agentsHome: '/u' })
   assert.deepEqual(roots.map((r) => r.source), ['project-dsh', 'project-agents', 'user-dsh', 'user-agents'])
-  assert.equal(roots[0].path, '/p/a/.dsh/skills')
-  assert.equal(roots[1].path, '/p/a/.agents/skills')
+  // 用 join 拼期望值，而不是写死正斜杠：插件用原生 join，Windows 上得到的是反斜杠，
+  // 那是正确行为。写死分隔符会把「平台差异」误报成「功能坏了」。
+  assert.equal(roots[0].path, join('/p/a', '.dsh', 'skills'))
+  assert.equal(roots[1].path, join('/p/a', '.agents', 'skills'))
   assert.equal(roots[2].scope, 'global')
 })
 

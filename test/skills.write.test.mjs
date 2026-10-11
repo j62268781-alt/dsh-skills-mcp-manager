@@ -12,8 +12,10 @@ const dir = join(root, 'skills')
 test('writableRoots：全局与项目的 dsh/agents 四个目标', () => {
   const roots = writableRoots({ dshHome: '/h', agentsHome: '/a', projectRoot: '/p' })
   assert.deepEqual(roots.map((r) => `${r.scope}:${r.id}`), ['global:dsh', 'global:agents', 'project:agents', 'project:dsh'])
-  assert.equal(roots[0].dir, '/h/skills')
-  assert.equal(roots[2].dir, '/p/.agents/skills')
+  // 用 join 拼期望值：插件走原生 join，Windows 上得到反斜杠属于正确行为，
+  // 把分隔符写死只会把平台差异误报成功能故障。
+  assert.equal(roots[0].dir, join('/h', 'skills'))
+  assert.equal(roots[2].dir, join('/p', '.agents', 'skills'))
 })
 
 test('validateSkillName：拒绝空、斜杠、点开头、超长', () => {
