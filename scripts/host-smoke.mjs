@@ -91,6 +91,10 @@ let escaped = null
 process.on('uncaughtException', (error) => { escaped = 'uncaughtException: ' + error.message })
 process.on('unhandledRejection', (error) => { escaped = 'unhandledRejection: ' + (error?.message ?? error) })
 
+// Declared outside the `try` because the `finally` below has to restore it: the stub is
+// installed inside the block, but a binding created there is out of scope for cleanup.
+const realFetch = globalThis.fetch
+
 try {
   const pkgDir = stage
   await cp(join(root, 'dist'), join(pkgDir, 'dist'), { recursive: true })
@@ -116,6 +120,32 @@ try {
     reconnectResult: { nonce: '', ok: false, error: '' },
   }
   const noop = () => {}
+  /**
+   * The auth probe's network seam.
+   *
+   * The Host's auth probe builds its own `fetch` call (it cannot go through
+   * `mcpResources`, which throws "server is disconnected" before any HTTP happens), so the
+   * smoke has to stand in for the network. `smoke-auth` answers 401 with a Bearer challenge;
+   * anything else answers 200. Installed on `globalThis` only for the duration of the run
+   * and restored in the caller's `finally`.
+   */
+  const authProbeRequests = []
+  globalThis.fetch = async (url, init) => {
+    authProbeRequests.push({ url: String(url), method: init?.method })
+    const headers = { get: () => null }
+    if (String(url).includes('auth.smoke.invalid')) {
+      return {
+        status: 401,
+        headers: {
+          get: (name) => (String(name).toLowerCase() === 'www-authenticate'
+            ? 'Bearer error="invalid_token", scope="mcp:read", error_description="authorization required"'
+            : null),
+        },
+        body: { cancel: async () => {} },
+      }
+    }
+    return { status: 200, headers, body: { cancel: async () => {} } }
+  }
   const mod = await import(pathToFileURL(join(pkgDir, 'dist', 'index.js')).href)
   // The harness tool registry, with a real `register` so the tool filter's shadow
   // has something to install onto and its effect can be observed.
@@ -149,6 +179,10 @@ try {
       probeRequests.push({ server, method: request?.method, agent: exec?.agent })
       // Provider present, client not connected.
       if (server === 'smoke-dead') throw new Error(`mcp-client(${server}): server is disconnected`)
+      // Same shape for the auth-protected row: a server that refuses the connection until
+      // it is authorized is *not connected*, so the client throws before any HTTP happens.
+      // That is exactly why the 401 is invisible here and the Host needs its own probe.
+      if (server === 'smoke-auth') throw new Error(`mcp-client(${server}): server is disconnected`)
       // No provider at all — this is the "never mounted / activation failed" answer, and
       // it must be distinguishable from the one above.
       if (server === 'smoke-idle') throw new Error(`MCP resource server "${server}" is unavailable in this agent's scope`)
@@ -191,6 +225,19 @@ try {
     options: {
       name: '@deepseek-ai/dsh-mcp-client',
       config: { serverName: 'smoke-dead', transport: 'streamable-http', url: 'https://dead.invalid/mcp' },
+    },
+    fiber: { state: 2 },
+  }, {
+    // A server that refuses connections until it is authorized. This is the case the
+    // panel used to misreport: with no OAuth support in the MCP client, its 401 is
+    // retried like a network fault and finally shown as 「已放弃重试」 — telling the user
+    // their server is broken when all they need is to authorize it. The smoke proves the
+    // Host now classifies it as 「需要授权」 instead of a fault.
+    id: 'mcp-smoke-auth',
+    disabled: false,
+    options: {
+      name: '@deepseek-ai/dsh-mcp-client',
+      config: { serverName: 'smoke-auth', transport: 'streamable-http', url: 'https://auth.smoke.invalid/mcp' },
     },
     fiber: { state: 2 },
   }]
@@ -362,6 +409,45 @@ try {
   )
   note(probeRequests.length > 0, 'Host 真的通过服务公开的 request() 探测（而不是劫持 register）')
   note(probeRequests.every((call) => call.method === 'resources/list'), '探测用 resources/list 判断客户端是否活着')
+
+  // Channel 5d-bis: a server that refuses connections until authorized must be labelled
+  // 「需要授权」 rather than a fault. The MCP client ships no OAuth at all (no `authProvider`
+  // ever reaches the SDK), so its 401 is retried like a network fault and finally reported
+  // as 「已放弃重试」 — which tells the user their server is broken when the only thing
+  // missing is a grant. The 401 is invisible through `mcpResources` too (the client throws
+  // "server is disconnected" before any HTTP), so the Host probes over HTTP itself; the
+  // injected fetch below is that probe's seam.
+  //
+  // The probe is fire-and-forget by design (`publish` is synchronous and must not await a
+  // remote round trip), so this waits for the verdict to land on a later tick.
+  let authStatus = null
+  for (let tick = 0; tick < 40; tick += 1) {
+    authStatus = (Array.isArray(live.serverStatus) ? live.serverStatus : [])
+      .find((item) => item.serverName === 'smoke-auth')
+    if (authStatus?.status === 'needs-auth') break
+    await new Promise((resolveWait) => setTimeout(resolveWait, 250))
+  }
+  note(
+    authProbeRequests.length > 0,
+    'Host 真的发起了 HTTP 鉴权探测（mcpResources 看不到 401，必须自己发）',
+  )
+  note(
+    authProbeRequests.every((call) => call.method === 'POST'),
+    '用 POST 探测（GET/HEAD 在 Streamable HTTP 上会把「不支持 GET」误读成「需要授权」）',
+  )
+  note(
+    authStatus?.status === 'needs-auth',
+    `401 的服务器判成「需要授权」而不是故障（收到「${authStatus?.status}」）`,
+  )
+  note(
+    /不是故障/.test(String(authStatus?.detail ?? '')),
+    `需要授权的说明必须点明它不是故障（收到「${authStatus?.detail}」）`,
+  )
+  // 需要授权不是「可重连」状态：重连治不了缺授权，给按钮只会教用户反复点一个无效操作。
+  note(
+    authStatus?.status !== 'needs-auth' || authStatus?.remainingSeconds === 0,
+    '需要授权不发布剩余重试时间（它不是重试中的一种）',
+  )
 
   // A provider that exists but refuses the connection is "not connected", NOT "activation
   // failed" — the two have different fixes and must not be collapsed.
@@ -553,6 +639,10 @@ try {
 } finally {
   process.removeAllListeners('uncaughtException')
   process.removeAllListeners('unhandledRejection')
+  // Restore the real network function: leaving a stub installed would silently break
+  // anything the harness runs after this point.
+  if (realFetch === undefined) delete globalThis.fetch
+  else globalThis.fetch = realFetch
   await rm(stage, { recursive: true, force: true })
   if (createdScopeLink) await rm(scopeLink, { force: true })
 }

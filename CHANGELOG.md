@@ -1,5 +1,78 @@
 # Changelog
 
+## 未发布 — 「需要授权」：OAuth 拒绝不是故障
+
+**这一版修的是同一类谎言的另一种形态**：前面的状态标签让「悄悄失效」看得见，但受 OAuth 保护
+的服务器被拒绝连接时，标签会说「已放弃重试」——把「你去补一次授权就好」说成了「这台服务器
+坏了」。
+
+根因是 `@deepseek-ai/dsh-mcp-client` **完全没有 OAuth 支持**：整份实现里没有任何
+`authProvider`／`oauth` 字样，`createTransport` 只把 `requestInit.headers` 交给 SDK。于是
+SDK 的 401 分支（`if (response.status === 401 && this._authProvider)`）永远不成立，直接落到
+`throw new UnauthorizedError()`，客户端随后按普通网络故障重试、预算耗尽后永久放弃。受保护的
+服务器拒绝未授权连接是**协议规定的正常行为**，不是故障。
+
+### 新增
+
+- 🔐 **`需要授权` 状态**（`needs-auth`）。用一次轻量 HTTP 探测读响应里的鉴权挑战：
+
+  | 观测到的响应 | 判定 |
+  |---|---|
+  | `401`（带或不带 `WWW-Authenticate: Bearer`） | 需要授权 |
+  | `403` + `error="insufficient_scope"` | 已授权但范围不足（step-up） |
+  | 其它一切（404/405/5xx/超时/网络错误/非 Bearer 挑战） | **不下结论**，回落原本的重试推导 |
+
+  挑战里的 `scope` 与 `error_description` 会转述到卡片上。判定方向刻意偏保守：**漏报可以接受，
+  误报不行** —— 给一台真故障的服务器贴「需要授权」会让用户去补一个根本不需要的授权。
+
+- **探测为什么自己发 HTTP**：`mcpResources.request()` 在客户端未连接时会在**发出请求前**就抛
+  "server is disconnected"，401 根本到不了那一层。所以探测直接发一个合法的 `initialize` POST
+  —— 不用 GET/HEAD，因为 Streamable HTTP 端点对它们的回答五花八门（405/404/SSE），会把
+  「不支持 GET」误读成「需要授权」。MCP 规定鉴权发生在协议层之前，所以 `initialize` 能稳定
+  拿到 401/403。
+- **探测节奏与连接探测分开**：真实 HTTP 往返要几秒，而授权需求不会在 tick 之间忽生忽灭 ——
+  连接探测保持 12 秒 TTL，鉴权探测 2 分钟。
+- 卡片展开后给出**下一步**，而不只是一个标签：说明这不是故障，并指出 DSH 的客户端不带 OAuth，
+  只能靠给这一行加 `Authorization` 请求头（或换成带 token 的地址）来补。
+
+### 设计要点
+
+- **`needs-auth` 不用红色**（用 warn 而非 danger）：红色会让人以为服务器坏了，而这正是这个状态
+  要消除的误解。
+- **`needs-auth` 不给「重连」按钮**：重连治不了缺授权，给按钮只会教用户反复点一个无效操作。
+  它因此**不在** `RECOVERABLE_STATUSES` 里。
+- **已连接优先于鉴权挑战**：挑战是缓存观测值，连接状态才是当下事实。反过来的话，一台已经连上
+  的服务器会因为几分钟前的一次 401 被标成需要授权，用户会去补一个已经生效的授权。
+- **`expected` 仍然优先**：项目级条目在没有对应会话时压根没挂载，此时谈授权没有意义。
+
+### 测试
+
+- `test/mcp.auth.test.mjs`（6 项）：`WWW-Authenticate` 解析逐字对齐 SDK
+  （含 `error` 与 `error_description` 的前缀易混、引号可有可无、scheme 大小写不敏感），
+  以及 `insufficient_scope` 是**下划线**的协议取值。
+- `test/mcp.authprobe.test.mjs`（10 项）：只探该探的（stdio／坏 URL／非 http(s) 一概不发请求）、
+  网络错误收敛成 null 而不抛错、header 解析，以及**大小写不敏感的头合并**
+  （`Accept` 与 `accept` 同时发出会让结果取决于迭代顺序）。
+- `test/mcp.status.test.mjs`（+5 项）、`test/client.statusTag.test.mjs`（+4 项）：优先级与 UI。
+- `scripts/host-smoke.mjs`：新增一行 401 夹具，在真实 Host 装配下验证「需要授权」，
+  并断言用 POST 探测、说明里含「不是故障」。
+
+### 文档（本轮只提交代码，不发布）
+
+- 新增 [`docs/tools-persistence.md`](docs/tools-persistence.md)：工具清单为什么不该落盘。
+  实测 `serverTools` 占 patch 全文 **34.6%**（3179/9176 字节），并**实测确认** patch
+  文件每 5 秒被重写一次 —— 根因不是它，而是 `discoveryInfo.at` 每次 scan 都变、
+  让 `publish` 的去重 key 永久失效（即那个去重机制目前是坏的）。给出三条路线，
+  推荐走 `webServer` 路由（DSH 官方插件同款，无私有 API 依赖）。
+- 新增 [`docs/oauth-feasibility.md`](docs/oauth-feasibility.md)：点击授权的可行性
+  （**调研，未决策**）。含独立复核发现的三个前置问题，其中最关键的一条是**插件目前
+  根本 import 不到 MCP SDK**（未声明依赖 + 真实 profile 里没有
+  `@modelcontextprotocol` + DSH 只路由 `@deepseek-ai/dsh-*`）。
+- 修正 `docs/ENGINEERING.md` 里过期的仓库名与安装步骤（旧名 `dsh-skills-mcp-panel`），
+  并删掉 `scripts/deploy.mjs` 里一个从未存在于本仓库历史的 `.scaffold-panel` 过滤项。
+- `docs/PUBLISHING.md` 补上「不要改成 `dsh-skills-mcp-panel`」的具体依据（该名字在 npm
+  上被 KyattoCat 占用）。
+
 ## 0.5.4 — 连接状态标签 + 一键重连（含 0.6.x 撤回后的修复）
 
 > **版本说明**：这一版的功能曾以 `0.6.0` / `0.6.1` 发布过，但两个版本都带着缺陷 ——
@@ -32,6 +105,7 @@
   | `未连接 · 重试中 · 预计剩 Ns` | 还在预算内，会自己恢复 |
   | `已放弃重试` | 预算已用完，**不会**自己恢复 |
   | `激活失败` | 权威信号（Loader / 挂载 fiber）说这个实例失败了 |
+  | `需要授权` | 服务器要求先 OAuth 授权（401/403 挑战）—— **不是故障**，见上一条未发布说明 |
   | `连接中` | 首次连接仍在进行（客户端最久等到 `toolCallTimeoutMs`，默认 60 秒） |
   | `未挂载` | 该项目当前没有会话 —— 不是故障 |
   | `状态未知` | 观测机制不可用 —— 如实说明，而不是假装正常 |

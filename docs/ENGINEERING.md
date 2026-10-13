@@ -25,6 +25,10 @@ Harness Client 包，也没有第三方依赖。
 
 ## 安装（当前是手工装的最小步骤）
 
+> **这一节是历史记录，包名已过期**：0.4.0 起包名是 `@j62268781-alt/dsh-skills-mcp-manager`
+> （不再是 `@local/dsh-skills-mcp-panel`）。当前的安装方式看
+> [`README.md` 的安装一节](../README.md#安装)。
+
 ```bash
 PROFILE=~/.dsh/profiles/desktop
 mkdir -p "$PROFILE/node_modules/@local"
@@ -434,7 +438,8 @@ npm run deploy  # 安装进 desktop profile（旧版自动备份）
 - **Client 半**：15 个模块（样式 / CRUD / 组件），`lib/src/client.js` 余 908 行组件主体
 - **测试**：21 个 `test/*.test.mjs`，94 项断言全绿（`npm test`）
 - **安装脚本**：`npm run deploy`（拷贝式安装 + 旧版自动备份 + 回滚只需改名）
-- **仓库**：https://github.com/j62268781-alt/dsh-skills-mcp-panel （tag `v0.3.0` 起）
+- **仓库**：https://github.com/j62268781-alt/dsh-skills-mcp-manager （tag `v0.3.0` 起）
+  > 当时仓库名还叫 `dsh-skills-mcp-panel`，0.4.0 改名后旧地址 301 到这里。当前名字是 manager。
 
 已知未尽事项：
 

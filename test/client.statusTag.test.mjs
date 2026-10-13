@@ -164,3 +164,91 @@ test('全局行也会显示状态标签', { skip: skipWithoutBundle() }, async (
     panel.restore()
   }
 })
+
+/** 一条全局（配置文件）行 —— 全局层的卡片走的是 profileCard。 */
+const profileServer = (over = {}) => ({
+  entryId: 'include:mcp-protected', serverName: 'protected', transport: 'streamable-http',
+  target: 'https://api.example.com/mcp', command: '', args: '', env: '', headersText: '',
+  failOnStartupError: false, reconnectInitialDelayMs: '', reconnectMaxDelayMs: '', reconnectMaxAttempts: '',
+  enabled: true, phase: 'active', ...over,
+})
+
+test('需要授权：给 warn 标签而不是 danger（它不是故障）', { skip: skipWithoutBundle() }, async () => {
+  const panel = await bootPanel(emptyDoc({
+    profileServers: [profileServer()], rowOpsReady: true, reconnectReady: true,
+    serverStatus: [statusEntry({
+      serverName: 'protected', tier: 'global', scope: '', status: 'needs-auth',
+      detail: '服务器要求先授权（OAuth）才能连接，这不是故障：需要 files:read 范围',
+    })],
+  }))
+  try {
+    const warn = panel.findAll((node) => node.props['data-tone'] === 'warn')[0]
+    assert.ok(warn !== undefined, `没有警示标签：${JSON.stringify(tagTexts(panel))}`)
+    assert.match(textOf(warn), /需要授权/)
+    // 红色会让人以为服务器坏了 —— 而这恰恰是「需要授权」要避免的误解
+    const danger = panel.findAll((node) => node.props['data-tone'] === 'danger')
+    assert.equal(danger.length, 0, '需要授权不该用 danger 色')
+  } finally {
+    panel.restore()
+  }
+})
+
+test('需要授权：展开卡片给出下一步，且**不**提供重连按钮', { skip: skipWithoutBundle() }, async () => {
+  const panel = await bootPanel(emptyDoc({
+    profileServers: [profileServer()], rowOpsReady: true, reconnectReady: true,
+    serverStatus: [statusEntry({
+      serverName: 'protected', tier: 'global', scope: '', status: 'needs-auth',
+      detail: '服务器要求先授权（OAuth）才能连接，这不是故障：需要 files:read 范围',
+    })],
+  }))
+  try {
+    // 展开这张卡片（收起状态下说明文字不渲染）
+    const toggle = panel.findAll((node) => String(node.props.className ?? '').includes('smp-cardToggle'))[0]
+    assert.ok(toggle !== undefined, '没有卡片可展开')
+    panel.click(toggle)
+    const text = panel.text()
+    // 必须转述 Host 的判断（含「不是故障」），否则用户会按「它坏了」去排查
+    assert.match(text, /不是故障/)
+    assert.match(text, /files:read/)
+    // 必须给出可执行的下一步：DSH 的客户端不带 OAuth，只能靠凭据
+    assert.match(text, /Authorization/)
+    // 重连治不了缺授权，给按钮等于教用户反复点一个无效操作
+    assert.equal(panel.byText('重连'), null, '需要授权时不该出现重连按钮')
+  } finally {
+    panel.restore()
+  }
+})
+
+test('已连接时即使带着陈旧的授权挑战也不显示「需要授权」', { skip: skipWithoutBundle() }, async () => {
+  // 挑战是缓存观测值，连接状态才是当下事实：反过来会把一台已经连上的服务器标成要授权
+  const panel = await bootPanel(emptyDoc({
+    profileServers: [profileServer()], rowOpsReady: true, reconnectReady: true,
+    serverStatus: [statusEntry({
+      serverName: 'protected', tier: 'global', scope: '', status: 'connected', toolCount: 7,
+    })],
+  }))
+  try {
+    const texts = tagTexts(panel)
+    assert.ok(!texts.includes('需要授权'), `已连接时不该说需要授权：${JSON.stringify(texts)}`)
+  } finally {
+    panel.restore()
+  }
+})
+
+test('需要授权：展开时如果没有 Host 说明，也要给出一个默认说明', { skip: skipWithoutBundle() }, async () => {
+  // detail 可能为空（旧 Host／尚未探到）。此时不能只留一个「需要授权」标签就完事 ——
+  // 用户会按「服务器坏了」去排查，而这正是这个状态要防止的误解。
+  const panel = await bootPanel(emptyDoc({
+    profileServers: [profileServer()], rowOpsReady: true, reconnectReady: true,
+    serverStatus: [statusEntry({ serverName: 'protected', tier: 'global', scope: '', status: 'needs-auth', detail: '' })],
+  }))
+  try {
+    const toggle = panel.findAll((node) => String(node.props.className ?? '').includes('smp-cardToggle'))[0]
+    panel.click(toggle)
+    const text = panel.text()
+    assert.match(text, /不是故障/)
+    assert.match(text, /Authorization/)
+  } finally {
+    panel.restore()
+  }
+})

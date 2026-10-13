@@ -7,7 +7,10 @@
   > 不带 scope 的 `dsh-skills-mcp-manager` 虽然 npm 上是空的，但市场目录里已经有一个**同名同功能**的
   > 插件（`zebbkira/dsh-skills-mcp-manager`），所以用 scope 把 npm 名固定在自己账号下。
   > 发布前提：**scope 必须等于你的 npm 用户名**（或你拥有的组织），否则 `npm publish` 报 E403。
-  > 顺便一提：`dsh-skills-mcp-panel` 这个名字在 npm 上也被占了（KyattoCat 的同类插件）。
+  > 顺便一提：`dsh-skills-mcp-panel` 这个名字在 npm 上也被占了（KyattoCat 的同类插件，最新
+  > 0.2.0，仓库 `KyattoCat/dsh-skills-mcp-panel`）——所以**不要**把任何东西改成这个名字。
+  > 本仓库只在**历史记录**（CHANGELOG 的 0.3.x/0.4.0 条目、`docs/ENGINEERING.md` 的存档）里
+  > 保留这个旧名，那是"当时确实叫过"的事实，不是待改的遗漏。
 - GitHub 仓库：<https://github.com/j62268781-alt/dsh-skills-mcp-manager>（仓库名不带 scope）
 - 市场目录：<https://github.com/awesome-dsh-plugin/awesome-dsh-plugin>（DSH 里「设置 → 插件市场」的数据源）
 

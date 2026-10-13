@@ -11,7 +11,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  RECONNECT_DEFAULTS, SERVER_STATUS, deriveStatus, reconnectBudgetMs, reconnectPolicy, remainingSeconds,
+  AUTH_STATUSES, RECONNECT_DEFAULTS, RECOVERABLE_STATUSES, SERVER_STATUS, SERVER_STATUS_TEXT,
+  deriveStatus, reconnectBudgetMs, reconnectPolicy, remainingSeconds,
 } from '../src/mcp/status.js'
 
 test('reconnectPolicy：留空/垃圾值回落到客户端默认值', () => {
@@ -129,4 +130,62 @@ test('deriveStatus：激活失败只由权威 phase 判定', () => {
   // phase 为空（Loader 还没建出 fiber）时，宽限期内仍然不猜
   assert.equal(deriveStatus({ connected: false, hasInstance: false, phase: '', elapsedMs: 5000 }), SERVER_STATUS.pending)
   assert.equal(deriveStatus({ connected: false, hasInstance: false, phase: '', elapsedMs: 60000 }), SERVER_STATUS.failed)
+})
+
+test('deriveStatus：需要授权 ≠ 故障，且优先于重试/放弃推导', () => {
+  const challenge = { kind: 'required', scope: 'files:read' }
+  const base = { connected: false, hasInstance: true, elapsedMs: 1000, budgetMs: 151500 }
+  // 未授权时客户端会一路重试到放弃；如果不先判鉴权，界面上就是「已放弃重试」——
+  // 把「去授权就好」说成「它坏了」，这正是这个状态要修的那个谎。
+  assert.equal(deriveStatus({ ...base, authChallenge: challenge }), SERVER_STATUS.needsAuth)
+  assert.equal(
+    deriveStatus({ ...base, elapsedMs: 999999, authChallenge: challenge }), SERVER_STATUS.needsAuth,
+    '预算耗尽也不该改口成「已放弃重试」',
+  )
+  // 权威 phase=failed 也不能盖过鉴权挑战：受保护服务器上 failOnStartupError 会让 fiber
+  // 直接失败，那是同一个 401 的另一种表现，用户要做的仍然是去授权。
+  assert.equal(
+    deriveStatus({ ...base, phase: 'failed', authChallenge: challenge }), SERVER_STATUS.needsAuth,
+  )
+})
+
+test('deriveStatus：已连接优先于鉴权挑战（陈旧 401 不能说健康服务器要授权）', () => {
+  // 挑战是**缓存**观测值，连接状态才是当下事实。反过来的话，一台已经连上的服务器
+  // 会因为几分钟前的一次 401 被标成「需要授权」，用户会去补一个已经生效的授权。
+  assert.equal(
+    deriveStatus({ connected: true, hasInstance: true, authChallenge: { kind: 'required' } }),
+    SERVER_STATUS.connected,
+  )
+})
+
+test('deriveStatus：停用与未挂载优先于鉴权挑战', () => {
+  const challenge = { kind: 'required' }
+  // 停用是你自己的选择，跟授权无关
+  assert.equal(deriveStatus({ enabled: false, connected: false, authChallenge: challenge }), SERVER_STATUS.disabled)
+  // 项目级条目在没有对应会话时压根没挂载，此时谈授权没有意义
+  assert.equal(
+    deriveStatus({ connected: false, expected: false, hasInstance: false, authChallenge: challenge }),
+    SERVER_STATUS.unmounted,
+  )
+  // 观测机制没装上时仍然如实说未知，不拿缓存的挑战去猜
+  assert.equal(deriveStatus({ observed: false, connected: null, authChallenge: challenge }), SERVER_STATUS.unknown)
+})
+
+test('deriveStatus：没有挑战时一切照旧（不能凭空报需要授权）', () => {
+  const base = { connected: false, hasInstance: true, elapsedMs: 1000, budgetMs: 151500 }
+  for (const authChallenge of [null, undefined]) {
+    assert.equal(deriveStatus({ ...base, authChallenge }), SERVER_STATUS.retrying)
+    assert.equal(deriveStatus({ ...base, elapsedMs: 999999, authChallenge }), SERVER_STATUS.gaveUp)
+  }
+})
+
+test('需要授权不算「可重连」状态', () => {
+  // 「重连」治不了缺授权：把它放进去会教用户反复点一个无效按钮。
+  assert.ok(!RECOVERABLE_STATUSES.includes(SERVER_STATUS.needsAuth))
+  assert.deepEqual([...AUTH_STATUSES], [SERVER_STATUS.needsAuth])
+  // 每个状态都要有中文标题，否则标签会渲染成 undefined
+  for (const value of Object.values(SERVER_STATUS)) {
+    assert.equal(typeof SERVER_STATUS_TEXT[value], 'string', `${value} 缺标题`)
+    assert.ok(SERVER_STATUS_TEXT[value].length > 0, `${value} 标题为空`)
+  }
 })

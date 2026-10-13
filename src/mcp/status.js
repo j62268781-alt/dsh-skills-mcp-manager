@@ -41,6 +41,14 @@ export const SERVER_STATUS = Object.freeze({
   unmounted: 'unmounted',
   /** 用户停用了它。 */
   disabled: 'disabled',
+  /**
+   * 服务器要求先授权（OAuth）才能连接。
+   *
+   * **这不是故障**：受保护的服务器在未授权时拒绝连接是协议规定的正常行为，
+   * 但它与「连不上」在界面上长得一样，而两者要做的事完全不同（去授权 vs 去修服务器）。
+   * 识别依据是 HTTP 401 的 Bearer 挑战 / 403 `insufficient_scope`，见 `src/mcp/auth.js`。
+   */
+  needsAuth: 'needs-auth',
   /** 观测机制没装上（mcpResources 服务不可用），如实说明而不是猜。 */
   unknown: 'unknown',
 })
@@ -54,14 +62,23 @@ export const SERVER_STATUS_TEXT = Object.freeze({
   [SERVER_STATUS.pending]: '连接中',
   [SERVER_STATUS.unmounted]: '未挂载',
   [SERVER_STATUS.disabled]: '已停用',
+  [SERVER_STATUS.needsAuth]: '需要授权',
   [SERVER_STATUS.unknown]: '状态未知',
 })
 
-/** 需要用户点「重连」的状态：它们都不会自己恢复。 */
+/**
+ * 需要用户点「重连」的状态：它们都不会自己恢复。
+ *
+ * `needsAuth` **不在**这里：它缺的是授权而不是连接，「重连」按钮对它毫无意义
+ * —— 应该给的是「去授权」的指引。把它塞进这里会教用户反复点一个治不好病的按钮。
+ */
 export const RECOVERABLE_STATUSES = Object.freeze([
   SERVER_STATUS.gaveUp,
   SERVER_STATUS.failed,
 ])
+
+/** 鉴权挑战的状态：界面据此给出「去授权」而不是「重连」。 */
+export const AUTH_STATUSES = Object.freeze([SERVER_STATUS.needsAuth])
 
 /**
  * 一个值转成正整数，否则回落到默认值。
@@ -130,6 +147,8 @@ export function reconnectBudgetMs(raw) {
  * @param input.elapsedMs - 从首次观测到「未连接」起已经过去多久。
  * @param input.budgetMs - 该服务器的重试预算总长。
  * @param input.graceMs - 实例出现前的宽限期（启动瞬间不闪告警）。
+ * @param input.authChallenge - 该服务器的鉴权挑战（`{ kind, ... }`，见 `src/mcp/auth.js`）；
+ *   null/undefined = 没观测到挑战。只有在**未连接**时才参与判定。
  * @returns 状态取值之一。
  */
 export function deriveStatus(input) {
@@ -143,10 +162,23 @@ export function deriveStatus(input) {
     elapsedMs = 0,
     budgetMs = 0,
     graceMs = 15000,
+    authChallenge = null,
   } = input ?? {}
   if (!enabled) return SERVER_STATUS.disabled
   if (observed !== true) return SERVER_STATUS.unknown
   if (connected === true) return SERVER_STATUS.connected
+  // 鉴权挑战排在「未连接」之后、失败判定之前。
+  //
+  // 位置很关键，两个方向都不能挪：
+  //   · 必须在 `connected === true` 之后 —— 已经连上的服务器不该因为一次陈旧的 401
+  //     被标成需要授权（挑战是缓存值，连接状态才是当下的事实）。
+  //   · 必须在 `phase === 'failed'` 与「重试中/已放弃」之前 —— 401 会让客户端一路重试
+  //     到放弃，如果按预算推导就会显示「已放弃重试」，把「去授权就好」说成「它坏了」，
+  //     这正是这个状态要修的那个谎。
+  // 但仍然要求 `expected`：项目级条目在没有对应会话时压根没挂载，此时不该谈授权。
+  if (authChallenge !== null && authChallenge !== undefined && expected === true) {
+    return SERVER_STATUS.needsAuth
+  }
   if (expected !== true) return SERVER_STATUS.unmounted
   // 还没拿到探测结论（刚装上、探测在途中）：说「连接中」而不是猜一个故障。
   // 猜错的代价是给一台正常的服务器挂上告警，比晚几秒显示严重得多。

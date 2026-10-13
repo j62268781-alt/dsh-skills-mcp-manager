@@ -38,6 +38,8 @@ import { connectionDraftOf } from './mcp/connection.js'
 import { toolsByServer } from './mcp/tools.js'
 import { installShadow, isMcpName, judge, liveToolNames } from './mcp/filter.js'
 import { PROBE_STATE, createConnectionProbe } from './mcp/probe.js'
+import { authDetailText } from './mcp/auth.js'
+import { createAuthProbe } from './mcp/authprobe.js'
 import { SERVER_STATUS, deriveStatus, reconnectBudgetMs, remainingSeconds } from './mcp/status.js'
 
 setMountClient(mcpClient)
@@ -633,6 +635,31 @@ export function apply(ctx, config) {
   }
 
   /**
+   * Auth-challenge probe: asks the server over HTTP whether it is demanding authorization.
+   *
+   * A separate detector from {@link probe} on purpose. The MCP client supports no OAuth at
+   * all (no `authProvider` reaches the SDK), so a protected server's 401 is retried like a
+   * network fault and finally reported as "gave up" — the panel would tell the user their
+   * server is broken when all they need is to authorize it. `mcpResources.request()` cannot
+   * see the 401 either: the client throws "server is disconnected" before any HTTP happens.
+   *
+   * See `src/mcp/authprobe.js` for why the probe has to be a real `initialize` POST.
+   */
+  const authProbe = createAuthProbe({ warn: (message) => ctx.logger.warn(message) })
+  /** Last auth-challenge verdict per server: `{ at, challenge }`. null challenge = none seen. */
+  const authCache = new Map()
+  /** Servers with an auth probe in flight, so a slow server cannot pile up requests. */
+  const authProbing = new Set()
+  /**
+   * The auth probe runs on a much slower cadence than the connection probe.
+   *
+   * It makes a real HTTP round trip that can take seconds, and an authorization requirement
+   * is not something that appears and disappears between ticks — while a connection state
+   * genuinely flips quickly. So the cheap probe keeps its 12s TTL and this one takes minutes.
+   */
+  const AUTH_PROBE_TTL_MS = 120000
+
+  /**
    * When each server was first seen not-connected, in epoch ms.
    *
    * The client keeps its own attempt counter in a closure, so elapsed time against
@@ -690,6 +717,42 @@ export function apply(ctx, config) {
     if (cached.state === PROBE_STATE.absent) return { connected: false, hasInstance: false, known: true }
     return { connected: null, hasInstance: false, known: false }
   }
+
+  /**
+   * Ask a server whether it is demanding authorization, at most once per TTL.
+   *
+   * Fire-and-forget like {@link refreshProbe}: `publish` is synchronous and must never
+   * await a remote round trip. The verdict lands in `authCache` for a later tick.
+   *
+   * @param serverName - the MCP server name.
+   * @param server - `{ transport, url, headers }` read from the row/entry that owns it.
+   */
+  const refreshAuth = (serverName, server) => {
+    const cached = authCache.get(serverName)
+    const now = Date.now()
+    if (cached !== undefined && now - cached.at < AUTH_PROBE_TTL_MS) return
+    if (authProbing.has(serverName)) return
+    authProbing.add(serverName)
+    Promise.resolve(authProbe.probe({ serverName, ...server }))
+      .then((challenge) => {
+        authCache.set(serverName, { at: Date.now(), challenge: challenge ?? null })
+      })
+      .catch(() => {
+        // `probe` already never rejects; a defensive branch keeps a future refactor from
+        // turning a detector bug into an unhandled rejection in the Host.
+        authCache.set(serverName, { at: Date.now(), challenge: null })
+      })
+      .finally(() => authProbing.delete(serverName))
+  }
+
+  /**
+   * The last auth challenge for a server, or null.
+   *
+   * Deliberately not consulted while connected: a challenge is a cached observation, and a
+   * live connection is the present fact. Letting a stale 401 outrank a working connection
+   * would relabel a healthy server as needing authorization.
+   */
+  const authChallengeOf = (serverName) => authCache.get(serverName)?.challenge ?? null
 
   /**
    * Mount fibers, per server name — the project tier's equivalent of a Loader row's
@@ -757,6 +820,8 @@ export function apply(ctx, config) {
         // The Loader's own verdict, which is what makes "activation failed" a fact
         // rather than an inference. See deriveStatus.
         phase: String(row.phase ?? ''),
+        // The auth probe needs the connection parameters, which only the row carries.
+        probeTarget: { transport: row.transport, url: row.target, headers: row.headersText },
       })),
       ...entries.map((entry) => ({
         tier: 'project', scope: String(entry.scope ?? ''), serverName: String(entry.serverName ?? ''),
@@ -765,6 +830,7 @@ export function apply(ctx, config) {
         agent: expected.get(entry.serverName),
         source: entry,
         phase: mountedPhaseOf(String(entry.serverName ?? '')),
+        probeTarget: { transport: entry.transport, url: entry.url, headers: entry.headers },
       })),
     ]
     const reported = []
@@ -781,7 +847,13 @@ export function apply(ctx, config) {
       // mounted into agent scopes and their tools are invisible in the unscoped view,
       // so for them the probe is the only source.
       const connected = target.tier === 'global' && toolCount > 0 ? true : probed.connected
-      if (connected !== true) refreshProbe(target.serverName, target.agent)
+      if (connected !== true) {
+        refreshProbe(target.serverName, target.agent)
+        // Only asked while not connected. An authorization requirement is a *reason a
+        // connection is being refused*, so it is meaningless — and, given the cache, stale —
+        // once the server is actually talking to us.
+        refreshAuth(target.serverName, target.probeTarget ?? {})
+      }
       if (connected === true) {
         downSince.delete(target.serverName)
       } else if (!downSince.has(target.serverName)) {
@@ -789,6 +861,7 @@ export function apply(ctx, config) {
       }
       const elapsedMs = connected === true ? 0 : Math.max(0, now - (downSince.get(target.serverName) ?? now))
       const budgetMs = reconnectBudgetMs(target.source)
+      const authChallenge = connected === true ? null : authChallengeOf(target.serverName)
       const status = deriveStatus({
         enabled: target.enabled,
         expected: target.expected,
@@ -798,6 +871,7 @@ export function apply(ctx, config) {
         connected,
         elapsedMs,
         budgetMs,
+        authChallenge,
       })
       const cached = probeCache.get(target.serverName)
       reported.push({
@@ -809,9 +883,13 @@ export function apply(ctx, config) {
         elapsedMs,
         budgetMs,
         remainingSeconds: status === SERVER_STATUS.retrying ? remainingSeconds(elapsedMs, budgetMs) : 0,
-        // Only carry a detail that explains a non-connected verdict; a healthy server
-        // that merely refuses `resources/list` must not look like a problem.
-        detail: status === SERVER_STATUS.connected ? '' : String(cached?.detail ?? ''),
+        // A connected server has nothing to explain; an auth challenge explains itself in
+        // words the protocol probe cannot produce ("不是故障" is the whole point).
+        detail: status === SERVER_STATUS.connected
+          ? ''
+          : status === SERVER_STATUS.needsAuth
+            ? authDetailText(authChallenge.kind, authChallenge)
+            : String(cached?.detail ?? ''),
       })
     }
     return reported

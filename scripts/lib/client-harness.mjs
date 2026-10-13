@@ -197,6 +197,22 @@ export async function bootPanel(doc = emptyDoc()) {
   const byClass = (className, text) => find((node) => String(node.props.className ?? '').split(/\s+/).includes(className)
     && (text === undefined || textOf(node).trim() === text))
   const byText = (text) => find((node) => node.type === 'button' && textOf(node).trim() === text)
+  /**
+   * Every text node currently rendered, as one string.
+   *
+   * For assertions about prose (a note, a warning) where the exact element does not
+   * matter — only that the sentence reached the page. Whitespace is collapsed so a
+   * multi-line JSX literal can still be matched with a plain regex.
+   */
+  const text = () => {
+    const parts = []
+    visit(runtime.tree, (node) => {
+      for (const child of Array.isArray(node.children) ? node.children : [node.children]) {
+        if (typeof child === 'string' || typeof child === 'number') parts.push(String(child))
+      }
+    })
+    return parts.join(' ').replace(/\s+/g, ' ')
+  }
   const byPlaceholder = (placeholder) => find((node) => node.props.placeholder === placeholder)
   const click = (node) => {
     assert.ok(node?.props?.onClick, `找不到可点击的节点：${node?.props?.className ?? node?.type ?? 'undefined'}`)
@@ -256,5 +272,5 @@ export async function bootPanel(doc = emptyDoc()) {
     delete globalThis.location
   }
 
-  return { doc, runtime, find, findAll, byClass, byText, byPlaceholder, click, change, toggle, restore }
+  return { doc, runtime, find, findAll, byClass, byText, byPlaceholder, click, change, toggle, text, restore }
 }
