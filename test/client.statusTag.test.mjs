@@ -130,6 +130,21 @@ test('重连按钮：Host 不支持时不给（避免点了没反应）', { skip
   }
 })
 
+test('状态标签：观测机制不可用时显示「状态未知」，而不是静默留白', { skip: skipWithoutBundle() }, async () => {
+  const panel = await bootPanel(emptyDoc({
+    servers: [project()], currentWorkspace: '/p/tcl', rowOpsReady: true, reconnectReady: true,
+    serverStatus: [statusEntry({ status: 'unknown' })],
+  }))
+  try {
+    const texts = tagTexts(panel)
+    assert.ok(texts.includes('状态未知'), `观测不可用时应如实说明：${JSON.stringify(texts)}`)
+    // 「不知道」不能给重连按钮 —— 那是给「确定没连上」用的
+    assert.equal(panel.byText('重连'), null, '状态未知时不该出现重连按钮')
+  } finally {
+    panel.restore()
+  }
+})
+
 test('全局行也会显示状态标签', { skip: skipWithoutBundle() }, async () => {
   const panel = await bootPanel(emptyDoc({
     profileServers: [{

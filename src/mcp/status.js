@@ -123,7 +123,9 @@ export function reconnectBudgetMs(raw) {
  * @param input.expected - 此刻**应该**有实例吗。项目级条目在没有该项目的会话时是
  *   false —— 那不是故障，所以与「该有却没有」必须分开。
  * @param input.observed - 观测机制是否可用。false 时不下任何结论。
- * @param input.hasInstance - 是否观测到活跃的 mcp-client 实例。
+ * @param input.phase - 权威的激活阶段：`pending`/`loading`/`active`/`failed`/`unloading`/''。
+ *   全局行取自 Loader entry 的 fiber，项目级取自本插件挂载时拿到的 fiber。
+ * @param input.hasInstance - 观测机制是否看到了活跃实例（次一级信号）。
  * @param input.connected - 探测结果：true 连着 / false 未连接 / null 未知。
  * @param input.elapsedMs - 从首次观测到「未连接」起已经过去多久。
  * @param input.budgetMs - 该服务器的重试预算总长。
@@ -135,6 +137,7 @@ export function deriveStatus(input) {
     enabled = true,
     expected = true,
     observed = true,
+    phase = '',
     hasInstance = false,
     connected = null,
     elapsedMs = 0,
@@ -148,9 +151,21 @@ export function deriveStatus(input) {
   // 还没拿到探测结论（刚装上、探测在途中）：说「连接中」而不是猜一个故障。
   // 猜错的代价是给一台正常的服务器挂上告警，比晚几秒显示严重得多。
   if (connected !== false) return SERVER_STATUS.pending
-  if (hasInstance !== true) {
-    // 注册点在 apply 一开始就跑了，所以「该有实例却没有」意味着激活失败（唯一的
-    // 例外是刚刚才配置好、Loader 还没加载完），用宽限期把后者挡掉。
+  // 「激活失败」是一个很重的断言，只由**权威**信号下：Loader / 挂载 fiber 自己说 failed。
+  //
+  // 这一条是被真机打出来的：早先版本从「观测不到实例」反推激活失败，结果一台启动时
+  // 连接较慢的 deepwiki 被标成「激活失败」，一分钟后就 connected 了 —— 误报比没有告警
+  // 更糟，用户会去修一个根本没坏的东西。
+  if (phase === 'failed') return SERVER_STATUS.failed
+  // `apply` 还在跑：客户端会 await 首次连接，最久可以等到 toolCallTimeoutMs（默认 60s）。
+  // 这期间 fiber 处于 LOADING，注册回调（`ctx.inject`）也还没执行，所以既不能算失败，
+  // 也不能算「未连接 · 重试中」——它只是在连。
+  if (phase === 'loading' || phase === 'pending') return SERVER_STATUS.pending
+  // `phase === 'active'` 是权威的「实例活着」，所以**跳过**下面的监听判据：监听漏了一个
+  // 实例只说明监听不完美，不构成「激活失败」的证据。
+  if (phase !== 'active' && hasInstance !== true) {
+    // 到了这里说明 fiber 既不是 loading/failed，也不说 active，而监听也没看到实例：
+    // 可能是已被卸载，也可能是观测漏了。宽限期内不下结论。
     return elapsedMs < graceMs ? SERVER_STATUS.pending : SERVER_STATUS.failed
   }
   // 实例活着但没连上：重试中还是已放弃，只能按预算推。

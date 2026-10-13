@@ -298,6 +298,19 @@ export const Config = z.object({
   }).default({ tier: '', serverName: '', scope: '', nonce: '', at: '' }).volatile(),
   /** Capability marker：Host 能处理 reconnectRequest 时才为 true。 */
   reconnectReady: z.boolean().default(false).volatile(),
+  /**
+   * 连接观测机制自身的状态，供面板如实展示。
+   *
+   * 与 `filterState` 同理：这个监听是「服务器是否还活着」的唯一事实来源，如果它没装上，
+   * 面板**必须说不知道**，而不是把「观测不到」当成「服务器死了」。`instances` 列出它
+   * 实际看到的实例名 —— 排查「标签说未连接但其实连着」这类问题时，这是唯一能区分
+   * 「真的没实例」和「监听漏了」的证据。
+   */
+  watchState: z.object({
+    installed: z.boolean().default(false),
+    reason: z.string().default(''),
+    instances: z.array(z.string()).default([]),
+  }).default({ installed: false, reason: '', instances: [] }).volatile(),
   /** 上一次重连的结果（按 nonce 回给发起的那个面板）。 */
   reconnectResult: z.object({
     nonce: z.string().default(''),
@@ -388,7 +401,12 @@ const FIBER_PHASE = ['pending', 'loading', 'active', 'failed', null, 'unloading'
 const phaseOf = (entry) => {
   const direct = entry?.fiberPhase
   if (typeof direct === 'string' && direct !== '') return direct
-  const state = entry?.fiber?.state
+  return fiberPhaseOf(entry?.fiber)
+}
+
+/** 同一个映射，但直接吃一个 fiber 对象 —— 本插件自己挂载的那些项目级服务器用这个。 */
+const fiberPhaseOf = (fiber) => {
+  const state = fiber?.state
   const mapped = Number.isInteger(state) ? FIBER_PHASE[state] : undefined
   return typeof mapped === 'string' ? mapped : ''
 }
@@ -650,6 +668,37 @@ export function apply(ctx, config) {
   }
 
   /**
+   * Mount fibers, per server name — the project tier's equivalent of a Loader row's
+   * `phase`.
+   *
+   * Project servers are mounted by this plugin rather than by the Loader, so there is
+   * no entry to read a phase from; keeping the fiber is what lets the status tell
+   * "still activating" from "activation failed" instead of guessing. Disposal is
+   * pruned lazily (a disposed fiber has no phase) because the three unmount paths
+   * have different shapes and none of them should have to remember this bookkeeping.
+   */
+  const mountFibers = new Map()
+  const recordMount = (serverName, fiber) => {
+    if (typeof serverName !== 'string' || serverName === '') return
+    if (fiber === null || typeof fiber !== 'object') return
+    const set = mountFibers.get(serverName) ?? new Set()
+    set.add(fiber)
+    mountFibers.set(serverName, set)
+  }
+
+  /** Phase for a project server: active wins, then failed, then still-loading. */
+  const mountedPhaseOf = (serverName) => {
+    const set = mountFibers.get(serverName)
+    if (set === undefined) return ''
+    const phases = [...set].map(fiberPhaseOf).filter((phase) => phase !== '')
+    if (phases.length === 0) return ''
+    if (phases.includes('active')) return 'active'
+    if (phases.includes('failed')) return 'failed'
+    if (phases.includes('loading') || phases.includes('pending')) return 'loading'
+    return phases[0]
+  }
+
+  /**
    * One status row per configured server, both tiers.
    *
    * Called on the publish tick. It never awaits anything: probes are kicked off and
@@ -677,12 +726,16 @@ export function apply(ctx, config) {
       ...rows.map((row) => ({
         tier: 'global', scope: '', serverName: String(row.serverName ?? ''),
         enabled: row.enabled !== false, expected: true, source: row,
+        // The Loader's own verdict, which is what makes "activation failed" a fact
+        // rather than an inference. See deriveStatus.
+        phase: String(row.phase ?? ''),
       })),
       ...entries.map((entry) => ({
         tier: 'project', scope: String(entry.scope ?? ''), serverName: String(entry.serverName ?? ''),
         enabled: entry.enabled !== false,
         expected: expected.has(entry.serverName),
         source: entry,
+        phase: mountedPhaseOf(String(entry.serverName ?? '')),
       })),
     ]
     const reported = []
@@ -708,6 +761,7 @@ export function apply(ctx, config) {
         enabled: target.enabled,
         expected: target.expected,
         observed: watch.installed,
+        phase: target.phase,
         hasInstance,
         connected,
         elapsedMs,
@@ -758,6 +812,7 @@ export function apply(ctx, config) {
     }
     try {
       const fiber = host.plugin(mcpPlugin, mountConfig)
+      recordMount(server.serverName, fiber)
       sink.push(typeof fiber === 'function' ? fiber : () => fiber?.dispose?.())
       ctx.logger.info('skills-mcp-panel: mounted mcp server %s (%s) in %s', server.serverName, mountConfig.transport, where)
       return true
@@ -927,7 +982,15 @@ export function apply(ctx, config) {
         dropped: [...filterState.dropped],
         preExisting: [...filterState.preExisting],
       }
-      const key = JSON.stringify([plain, serverTools, serverToolsError, serverStatus, filterStateOut, spaces, currentWorkspace, discoveredSkills, skillDirs, discoveryInfo])
+      // The watch's own health travels with the projection: "no server is down" and
+      // "we cannot tell" must never render the same, and `instances` is the evidence
+      // that separates a genuinely absent instance from a missed registration.
+      const watchStateOut = {
+        installed: watch.installed,
+        reason: watch.reason,
+        instances: watch.instances(),
+      }
+      const key = JSON.stringify([plain, serverTools, serverToolsError, serverStatus, filterStateOut, watchStateOut, spaces, currentWorkspace, discoveredSkills, skillDirs, discoveryInfo])
       if (key === published) return
       // Never erase a good projection because the Loader read came back empty.
       if (plain.length === 0 && !loaderFound) {
@@ -935,7 +998,7 @@ export function apply(ctx, config) {
         return
       }
       Promise.resolve(inner.settings.update('skills-mcp-panel', {
-          profileServers: plain, serverTools, serverToolsError, serverStatus, filterState: filterStateOut, workspaces: spaces, currentWorkspace, discoveredSkills, skillDirs, discoveryInfo,
+          profileServers: plain, serverTools, serverToolsError, serverStatus, filterState: filterStateOut, watchState: watchStateOut, workspaces: spaces, currentWorkspace, discoveredSkills, skillDirs, discoveryInfo,
           // Re-assert every publish: this marker has been lost by a later rewrite
           // before, and losing it hides the row actions in the panel.
           rowOpsReady: true,

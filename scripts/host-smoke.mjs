@@ -150,6 +150,33 @@ try {
       return () => registeredProviders.delete(server)
     },
   }
+  /**
+   * Loader entries, held in a stable array.
+   *
+   * Deliberately NOT built inside `entries()`: the smoke mutates a fiber state mid-run
+   * to prove the status reacts to it, and a fresh array per call would silently drop
+   * that mutation — the assertion would then pass or fail for the wrong reason.
+   */
+  const loaderEntries = [{
+    id: 'mcp-smoke-server',
+    disabled: false,
+    options: {
+      name: '@deepseek-ai/dsh-mcp-client',
+      config: { serverName: 'smoke-server', transport: 'streamable-http', url: 'https://smoke.invalid/mcp' },
+    },
+    fiber: { state: 2 },
+  }, {
+    // A second configured row with no tools. Used to prove a slow first connection is
+    // reported as "still connecting" rather than "activation failed" — the false alarm
+    // the real app actually produced. Kept LOADING until the smoke flips it.
+    id: 'mcp-smoke-idle',
+    disabled: false,
+    options: {
+      name: '@deepseek-ai/dsh-mcp-client',
+      config: { serverName: 'smoke-idle', transport: 'streamable-http', url: 'https://idle.invalid/mcp' },
+    },
+    fiber: { state: 1 },
+  }]
   const ctx = {
     logger: { info: noop, warn: noop, error: (...args) => problems.push('host logger.error: ' + args.map(String).join(' ')) },
     get: (name) => {
@@ -166,15 +193,7 @@ try {
       // derived field computed by `dsh-host-plugin-inventory`, and reading it off a raw
       // entry yields '' forever. This mock is deliberately the real shape, so the phase
       // assertion below fails if the Host ever goes back to reading the wrong one.
-      entries: () => [{
-        id: 'mcp-smoke-server',
-        disabled: false,
-        options: {
-          name: '@deepseek-ai/dsh-mcp-client',
-          config: { serverName: 'smoke-server', transport: 'streamable-http', url: 'https://smoke.invalid/mcp' },
-        },
-        fiber: { state: 2 },
-      }],
+      entries: () => loaderEntries,
     },
     effect: (fn) => { fn(); return noop },
     plugin: () => ({ dispose: noop }),
@@ -312,6 +331,43 @@ try {
   note(smokeStatus?.toolCount === 2, `连接状态带上工具数（收到 ${smokeStatus?.toolCount}，期望 2）`)
   note(smokeStatus?.budgetMs === 151500, `重试预算按客户端默认退避算出（收到 ${smokeStatus?.budgetMs}，期望 151500）`)
   note(live.reconnectReady === true, '发布了重连能力标记，面板据此才显示按钮')
+
+  // Channel 5d: the watch's own health. "No server is down" and "we cannot tell" must
+  // never render the same, and `instances` is the evidence that separates a genuinely
+  // absent instance from a registration the watch simply missed.
+  note(live.watchState !== undefined, '发布了连接观测自身的状态（缺失会让面板把「看不见」当成「正常」）')
+  note(live.watchState?.installed === true, `连接观测装上了（${live.watchState?.reason || 'ok'}）`)
+  note(Array.isArray(live.watchState?.instances), '观测状态带上了它实际看到的实例清单')
+
+  // Channel 5e: a slow first connection must not be reported as an activation failure.
+  //
+  // This is the regression the real app produced: deepwiki was labelled 激活失败 while
+  // its first connect was still in flight (a fiber stays LOADING until `apply` returns,
+  // which the client awaits for up to toolCallTimeoutMs — 60 s by default), and a minute
+  // later it was connected. False alarms are worse than no alarm here.
+  //
+  // `smoke-idle` is a configured row with no tools and no provider, so "not connected"
+  // is the only honest description; what it must NOT say is 激活失败 while the Loader
+  // reports LOADING. It is checked after the 15 s grace period, because that grace is
+  // exactly what would otherwise mask the bug.
+  const idleRow = ctx.loader.entries().find((entry) => entry.id === 'mcp-smoke-idle')
+  note(idleRow !== undefined, '冒烟夹具里有第二行（无工具、用于验证加载中不误报）')
+  await new Promise((resolveWait) => setTimeout(resolveWait, 16000))
+  const idleLoading = (Array.isArray(live.serverStatus) ? live.serverStatus : [])
+    .find((item) => item.serverName === 'smoke-idle')
+  note(idleLoading !== undefined, '无工具的服务器也发布了状态条目')
+  note(
+    idleLoading?.status === 'pending',
+    `首次连接仍在进行时不能报激活失败（收到「${idleLoading?.status}」，期望 pending）`,
+  )
+  if (idleRow !== undefined) idleRow.fiber = { state: 3 }
+  await new Promise((resolveWait) => setTimeout(resolveWait, 6500))
+  const idleFailed = (Array.isArray(live.serverStatus) ? live.serverStatus : [])
+    .find((item) => item.serverName === 'smoke-idle')
+  note(
+    idleFailed?.status === 'failed',
+    `Loader 说 failed 时才报激活失败（收到「${idleFailed?.status}」，期望 failed）`,
+  )
 
   // Channel 6: the tool filter. This is the one that changes what the MODEL is
   // offered, so the smoke drives a real registration through the shadow and checks

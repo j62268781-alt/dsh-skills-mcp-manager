@@ -91,3 +91,42 @@ test('剩余秒数不为负', () => {
   assert.equal(remainingSeconds(1000, 151000), 150)
   assert.equal(remainingSeconds(999999, 151000), 0)
 })
+
+test('deriveStatus：首次连接还在进行中时不能报「激活失败」', () => {
+  // 真机上打出来的回归：deepwiki 启动时连接较慢，fiber 处于 LOADING、注册回调还没跑，
+  // 于是「观测不到实例」被误判成激活失败 —— 结果一分钟后就 connected 了。
+  // 客户端 await 首次连接最久可等到 toolCallTimeoutMs（默认 60s），这期间只能是「连接中」。
+  for (const phase of ['loading', 'pending']) {
+    assert.equal(
+      deriveStatus({ connected: false, hasInstance: false, phase, elapsedMs: 60000, budgetMs: 151500 }),
+      SERVER_STATUS.pending,
+      `phase=${phase} 不该被报成激活失败`,
+    )
+    // 权威信号说还在加载，就不许因为「等得久」改口
+    assert.equal(
+      deriveStatus({ connected: false, hasInstance: false, phase, elapsedMs: 999999, budgetMs: 151500 }),
+      SERVER_STATUS.pending,
+    )
+  }
+})
+
+test('deriveStatus：激活失败只由权威 phase 判定', () => {
+  assert.equal(
+    deriveStatus({ connected: false, hasInstance: false, phase: 'failed', elapsedMs: 1000 }),
+    SERVER_STATUS.failed,
+  )
+  // 反过来：phase 说实例活着（active），即使监听漏了这个实例，也不能升级成「激活失败」——
+  // 那会让用户去修一个根本没坏的东西。
+  assert.equal(
+    deriveStatus({ connected: false, hasInstance: false, phase: 'active', elapsedMs: 600000, budgetMs: 151500 }),
+    SERVER_STATUS.gaveUp,
+    '监听漏掉实例时不该报激活失败',
+  )
+  assert.equal(
+    deriveStatus({ connected: false, hasInstance: false, phase: 'active', elapsedMs: 1000, budgetMs: 151500 }),
+    SERVER_STATUS.retrying,
+  )
+  // phase 为空（Loader 还没建出 fiber）时，宽限期内仍然不猜
+  assert.equal(deriveStatus({ connected: false, hasInstance: false, phase: '', elapsedMs: 5000 }), SERVER_STATUS.pending)
+  assert.equal(deriveStatus({ connected: false, hasInstance: false, phase: '', elapsedMs: 60000 }), SERVER_STATUS.failed)
+})
