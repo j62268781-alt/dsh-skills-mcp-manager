@@ -37,7 +37,7 @@ import { mountedKeyOf, projectServersFor, serverMountConfig, setMountClient, wor
 import { connectionDraftOf } from './mcp/connection.js'
 import { toolsByServer } from './mcp/tools.js'
 import { installShadow, isMcpName, judge, liveToolNames } from './mcp/filter.js'
-import { installConnectionWatch } from './mcp/watch.js'
+import { PROBE_STATE, createConnectionProbe } from './mcp/probe.js'
 import { SERVER_STATUS, deriveStatus, reconnectBudgetMs, remainingSeconds } from './mcp/status.js'
 
 setMountClient(mcpClient)
@@ -306,11 +306,16 @@ export const Config = z.object({
    * 实际看到的实例名 —— 排查「标签说未连接但其实连着」这类问题时，这是唯一能区分
    * 「真的没实例」和「监听漏了」的证据。
    */
-  watchState: z.object({
+  probeState: z.object({
     installed: z.boolean().default(false),
     reason: z.string().default(''),
-    instances: z.array(z.string()).default([]),
-  }).default({ installed: false, reason: '', instances: [] }).volatile(),
+    /** 最近一轮探测的逐服务器结果，是排查「标签说未连接但其实连着」的唯一证据。 */
+    results: z.array(z.object({
+      serverName: z.string().default(''),
+      state: z.string().default(''),
+      detail: z.string().default(''),
+    })).default([]),
+  }).default({ installed: false, reason: '', results: [] }).volatile(),
   /** 上一次重连的结果（按 nonce 回给发起的那个面板）。 */
   reconnectResult: z.object({
     nonce: z.string().default(''),
@@ -604,21 +609,27 @@ export function apply(ctx, config) {
   ctx.effect(() => () => shadow.restore(), 'skills-mcp-panel.tool-filter')
 
   /**
-   * Connection watch, installed next to the filter and for the same ordering
-   * reason: `dsh-mcp-client` publishes its connection to `mcpResources` while it
-   * starts, so the shadow has to be in place before the first MCP row loads.
+   * Connection probe: asks `mcpResources` what each server's state is.
    *
-   * This is what lets the panel warn about a server that quietly died. The client
-   * gives up permanently once its retry budget runs out, and until now that was
-   * invisible: the tools simply disappeared and nothing said whether the server was
-   * still retrying or already dead.
+   * Deliberately a *caller* of the service rather than a hijack of it. The first
+   * implementation shadowed `mcpResources.register`, which looked tidy and was wrong:
+   * the profile recreates that service instance on recomposition, so a shadow written
+   * once sat on a dead instance and captured nothing — while still reporting itself
+   * installed. Calling the public `request()` re-resolves the provider on every probe
+   * and cannot rot that way.
+   *
+   * This is what lets the panel warn about a server that quietly died. The client gives
+   * up permanently once its retry budget runs out, and until then that was invisible:
+   * the tools simply disappeared and nothing said whether the server was still retrying
+   * or already dead.
    */
-  const watch = installConnectionWatch(ctx, { warn: (message) => ctx.logger.warn(message) })
-  ctx.effect(() => () => watch.restore(), 'skills-mcp-panel.connection-watch')
-  if (!watch.installed) {
-    // Reported, never swallowed: "no server is down" and "we cannot tell" must not
-    // look the same, or the status tag would show a confident lie.
-    ctx.logger.warn('skills-mcp-panel: MCP connection watch not installed — %s', watch.reason)
+  const probe = createConnectionProbe(ctx, { warn: (message) => ctx.logger.warn(message) })
+  if (!probe.available()) {
+    // Reported, never swallowed: "no server is down" and "we cannot tell" must not look
+    // the same, or the status tag would show a confident lie. The service can also appear
+    // later (the profile composes rows after this plugin), so this is not fatal — the
+    // availability check is re-run on every publish.
+    ctx.logger.warn('skills-mcp-panel: MCP connection probe unavailable — %s', probe.reason())
   }
 
   /**
@@ -635,36 +646,49 @@ export function apply(ctx, config) {
   const PROBE_TTL_MS = 12000
 
   /**
-   * Ask a server whether it is connected, at most once per TTL.
+   * Ask a server for its state, at most once per TTL.
    *
-   * Fire-and-forget on purpose: `publish` is synchronous and must not await a
-   * remote round-trip. The tag renders from the last known answer, which is at most
-   * one TTL stale — a few seconds on a status label nobody needs to the millisecond.
+   * Fire-and-forget on purpose: `publish` is synchronous and must not await a remote
+   * round-trip. The tag renders from the last known answer, which is at most one TTL
+   * stale — a few seconds on a status label nobody needs to the millisecond.
+   *
+   * The `agent` matters: a project server's provider is registered in that agent's
+   * scope, and the service resolves it from the caller's scope. Probing without it
+   * would report a mounted project server as absent.
    */
-  const refreshProbe = (serverName) => {
-    if (!watch.installed) return
+  const refreshProbe = (serverName, agent) => {
+    if (!probe.available()) return
     const cached = probeCache.get(serverName)
     const now = Date.now()
     if (cached !== undefined && now - cached.at < PROBE_TTL_MS) return
     if (probing.has(serverName)) return
     probing.add(serverName)
-    Promise.resolve(watch.probe(serverName))
+    Promise.resolve(probe.probe(serverName, { agent }))
       .then((result) => {
         probeCache.set(serverName, { at: Date.now(), state: result.state, detail: result.detail })
       })
       .catch((error) => {
-        probeCache.set(serverName, { at: Date.now(), state: 'unknown', detail: String(error?.message ?? error) })
+        probeCache.set(serverName, { at: Date.now(), state: PROBE_STATE.unknown, detail: String(error?.message ?? error) })
       })
       .finally(() => probing.delete(serverName))
   }
 
+  /**
+   * Connected / not, from the last probe.
+   *
+   * `absent` counts as "not connected" **and** "no instance": the service answered that
+   * there is no provider for this server, which is a fact about the mount, not about the
+   * network. Everything still comes from the service, so nothing is inferred from the
+   * mere absence of a tap firing.
+   */
   const probeStateOf = (serverName) => {
-    if (!watch.has(serverName)) return { connected: false, known: watch.installed }
+    if (!probe.available()) return { connected: null, hasInstance: false, known: false }
     const cached = probeCache.get(serverName)
-    if (!watch.installed || cached === undefined) return { connected: null, known: watch.installed }
-    if (cached.state === 'connected') return { connected: true, known: true }
-    if (cached.state === 'down') return { connected: false, known: true }
-    return { connected: null, known: false }
+    if (cached === undefined) return { connected: null, hasInstance: false, known: false }
+    if (cached.state === PROBE_STATE.connected) return { connected: true, hasInstance: true, known: true }
+    if (cached.state === PROBE_STATE.down) return { connected: false, hasInstance: true, known: true }
+    if (cached.state === PROBE_STATE.absent) return { connected: false, hasInstance: false, known: true }
+    return { connected: null, hasInstance: false, known: false }
   }
 
   /**
@@ -715,11 +739,15 @@ export function apply(ctx, config) {
     const now = Date.now()
     // A project server is only mounted for an agent whose cwd falls in its scope, so
     // "not mounted" is the normal state when no such session is open — not a fault.
-    const expected = new Set()
-    for (const entry of agents.values()) {
+    // The agent is kept because that is the scope its provider registered in, and the
+    // probe has to run in the same scope to find it.
+    const expected = new Map()
+    for (const [agent, entry] of agents) {
       if (typeof entry.cwd !== 'string' || entry.cwd === '') continue
       for (const server of projectServersFor(committedServers, entry.cwd)) {
-        if (server.enabled !== false && typeof server.serverName === 'string') expected.add(server.serverName)
+        if (server.enabled !== false && typeof server.serverName === 'string' && !expected.has(server.serverName)) {
+          expected.set(server.serverName, agent)
+        }
       }
     }
     const targets = [
@@ -734,6 +762,7 @@ export function apply(ctx, config) {
         tier: 'project', scope: String(entry.scope ?? ''), serverName: String(entry.serverName ?? ''),
         enabled: entry.enabled !== false,
         expected: expected.has(entry.serverName),
+        agent: expected.get(entry.serverName),
         source: entry,
         phase: mountedPhaseOf(String(entry.serverName ?? '')),
       })),
@@ -745,11 +774,14 @@ export function apply(ctx, config) {
       const key = `${target.tier}\u0000${target.scope}\u0000${target.serverName}`
       if (seen.has(key)) continue
       seen.add(key)
-      const hasInstance = watch.has(target.serverName)
-      const probe = probeStateOf(target.serverName)
+      const probed = probeStateOf(target.serverName)
+      const hasInstance = probed.hasInstance
       const toolCount = toolCounts.get(target.serverName) ?? 0
-      const connected = target.tier === 'global' && toolCount > 0 ? true : probe.connected
-      if (connected !== true) refreshProbe(target.serverName)
+      // The registry is a cheap positive signal for a global row. Project servers are
+      // mounted into agent scopes and their tools are invisible in the unscoped view,
+      // so for them the probe is the only source.
+      const connected = target.tier === 'global' && toolCount > 0 ? true : probed.connected
+      if (connected !== true) refreshProbe(target.serverName, target.agent)
       if (connected === true) {
         downSince.delete(target.serverName)
       } else if (!downSince.has(target.serverName)) {
@@ -760,7 +792,7 @@ export function apply(ctx, config) {
       const status = deriveStatus({
         enabled: target.enabled,
         expected: target.expected,
-        observed: watch.installed,
+        observed: probe.available(),
         phase: target.phase,
         hasInstance,
         connected,
@@ -982,15 +1014,19 @@ export function apply(ctx, config) {
         dropped: [...filterState.dropped],
         preExisting: [...filterState.preExisting],
       }
-      // The watch's own health travels with the projection: "no server is down" and
-      // "we cannot tell" must never render the same, and `instances` is the evidence
-      // that separates a genuinely absent instance from a missed registration.
-      const watchStateOut = {
-        installed: watch.installed,
-        reason: watch.reason,
-        instances: watch.instances(),
+      // The probe's own health travels with the projection: "no server is down" and
+      // "we cannot tell" must never render the same, and the per-server results are the
+      // evidence that separates a genuinely absent instance from a missed one.
+      const probeStateOut = {
+        installed: probe.available(),
+        reason: probe.reason(),
+        results: [...probeCache.entries()].map(([serverName, cached]) => ({
+          serverName,
+          state: String(cached?.state ?? ''),
+          detail: String(cached?.detail ?? ''),
+        })),
       }
-      const key = JSON.stringify([plain, serverTools, serverToolsError, serverStatus, filterStateOut, watchStateOut, spaces, currentWorkspace, discoveredSkills, skillDirs, discoveryInfo])
+      const key = JSON.stringify([plain, serverTools, serverToolsError, serverStatus, filterStateOut, probeStateOut, spaces, currentWorkspace, discoveredSkills, skillDirs, discoveryInfo])
       if (key === published) return
       // Never erase a good projection because the Loader read came back empty.
       if (plain.length === 0 && !loaderFound) {
@@ -998,7 +1034,7 @@ export function apply(ctx, config) {
         return
       }
       Promise.resolve(inner.settings.update('skills-mcp-panel', {
-          profileServers: plain, serverTools, serverToolsError, serverStatus, filterState: filterStateOut, watchState: watchStateOut, workspaces: spaces, currentWorkspace, discoveredSkills, skillDirs, discoveryInfo,
+          profileServers: plain, serverTools, serverToolsError, serverStatus, filterState: filterStateOut, probeState: probeStateOut, workspaces: spaces, currentWorkspace, discoveredSkills, skillDirs, discoveryInfo,
           // Re-assert every publish: this marker has been lost by a later rewrite
           // before, and losing it hides the row actions in the panel.
           rowOpsReady: true,

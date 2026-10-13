@@ -136,18 +136,23 @@ try {
     ],
   }
   /**
-   * The service `dsh-mcp-client` publishes its connection to.
+   * The service the panel probes for connection state.
    *
-   * Present here on purpose: the connection watch hooks this method, and the smoke has
-   * to prove two things about it — that the original call is still forwarded and
-   * returns a working disposer, and that a registered provider is what makes the
-   * status channel report a live connection.
+   * Present here on purpose: the probe goes through this public `request()` (it used to
+   * hijack `register`, which broke whenever the profile recreated the instance), so the
+   * smoke has to prove the Host actually drives it and maps the three answers — connected,
+   * disconnected, and no-provider — onto the right labels.
    */
-  const registeredProviders = new Map()
+  const probeRequests = []
   const mcpResourcesService = {
-    register(server, provider) {
-      registeredProviders.set(server, provider)
-      return () => registeredProviders.delete(server)
+    async request(server, request, exec) {
+      probeRequests.push({ server, method: request?.method, agent: exec?.agent })
+      // Provider present, client not connected.
+      if (server === 'smoke-dead') throw new Error(`mcp-client(${server}): server is disconnected`)
+      // No provider at all — this is the "never mounted / activation failed" answer, and
+      // it must be distinguishable from the one above.
+      if (server === 'smoke-idle') throw new Error(`MCP resource server "${server}" is unavailable in this agent's scope`)
+      return { resources: [] }
     },
   }
   /**
@@ -176,6 +181,18 @@ try {
       config: { serverName: 'smoke-idle', transport: 'streamable-http', url: 'https://idle.invalid/mcp' },
     },
     fiber: { state: 1 },
+  }, {
+    // A row whose provider exists but whose client is not connected. Probing it must
+    // yield "not connected" (retrying / gave up), which is a different situation from
+    // having no provider at all — conflating the two was one of the ways this label
+    // could mislead.
+    id: 'mcp-smoke-dead',
+    disabled: false,
+    options: {
+      name: '@deepseek-ai/dsh-mcp-client',
+      config: { serverName: 'smoke-dead', transport: 'streamable-http', url: 'https://dead.invalid/mcp' },
+    },
+    fiber: { state: 2 },
   }]
   const ctx = {
     logger: { info: noop, warn: noop, error: (...args) => problems.push('host logger.error: ' + args.map(String).join(' ')) },
@@ -332,12 +349,28 @@ try {
   note(smokeStatus?.budgetMs === 151500, `重试预算按客户端默认退避算出（收到 ${smokeStatus?.budgetMs}，期望 151500）`)
   note(live.reconnectReady === true, '发布了重连能力标记，面板据此才显示按钮')
 
-  // Channel 5d: the watch's own health. "No server is down" and "we cannot tell" must
-  // never render the same, and `instances` is the evidence that separates a genuinely
-  // absent instance from a registration the watch simply missed.
-  note(live.watchState !== undefined, '发布了连接观测自身的状态（缺失会让面板把「看不见」当成「正常」）')
-  note(live.watchState?.installed === true, `连接观测装上了（${live.watchState?.reason || 'ok'}）`)
-  note(Array.isArray(live.watchState?.instances), '观测状态带上了它实际看到的实例清单')
+  // Channel 5d: the probe's own health plus its per-server answers. "No server is down"
+  // and "we cannot tell" must never render the same, and the recorded answers are the
+  // evidence that separates a genuinely absent instance from a refused connection.
+  note(live.probeState !== undefined, '发布了连接探测自身的状态（缺失会让面板把「看不见」当成「正常」）')
+  note(live.probeState?.installed === true, `连接探测可用（${live.probeState?.reason || 'ok'}）`)
+  const probed = Array.isArray(live.probeState?.results) ? live.probeState.results : []
+  note(probed.some((item) => item.serverName === 'smoke-dead'), '探测结果记录了逐服务器的回答')
+  note(
+    probed.find((item) => item.serverName === 'smoke-dead')?.state === 'down',
+    `服务说 disconnected 时探测记为 down（收到「${probed.find((i) => i.serverName === 'smoke-dead')?.state}」）`,
+  )
+  note(probeRequests.length > 0, 'Host 真的通过服务公开的 request() 探测（而不是劫持 register）')
+  note(probeRequests.every((call) => call.method === 'resources/list'), '探测用 resources/list 判断客户端是否活着')
+
+  // A provider that exists but refuses the connection is "not connected", NOT "activation
+  // failed" — the two have different fixes and must not be collapsed.
+  const deadStatus = (Array.isArray(live.serverStatus) ? live.serverStatus : [])
+    .find((item) => item.serverName === 'smoke-dead')
+  note(
+    deadStatus?.status === 'retrying' || deadStatus?.status === 'gave-up',
+    `有 provider 但连不上 ⇒ 未连接（收到「${deadStatus?.status}」）`,
+  )
 
   // Channel 5e: a slow first connection must not be reported as an activation failure.
   //
