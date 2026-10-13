@@ -112,6 +112,8 @@ try {
     servers: [], skills: [], rowOps: [], rowOpsReady: false,
     importRequest: { source: '', scope: '', project: '', nonce: '' },
     importResult: { nonce: '', files: [], servers: [], error: '' },
+    reconnectRequest: { tier: '', serverName: '', scope: '', nonce: '', at: '' },
+    reconnectResult: { nonce: '', ok: false, error: '' },
   }
   const noop = () => {}
   const mod = await import(pathToFileURL(join(pkgDir, 'dist', 'index.js')).href)
@@ -133,16 +135,37 @@ try {
       { name: 'read_file', description: 'built-in, not from MCP' },
     ],
   }
+  /**
+   * The service `dsh-mcp-client` publishes its connection to.
+   *
+   * Present here on purpose: the connection watch hooks this method, and the smoke has
+   * to prove two things about it — that the original call is still forwarded and
+   * returns a working disposer, and that a registered provider is what makes the
+   * status channel report a live connection.
+   */
+  const registeredProviders = new Map()
+  const mcpResourcesService = {
+    register(server, provider) {
+      registeredProviders.set(server, provider)
+      return () => registeredProviders.delete(server)
+    },
+  }
   const ctx = {
     logger: { info: noop, warn: noop, error: (...args) => problems.push('host logger.error: ' + args.map(String).join(' ')) },
     get: (name) => {
       if (name === 'workspaceRegistry') return { list: () => [] }
       if (name === 'tools') return toolsService
+      if (name === 'mcpResources') return mcpResourcesService
       return undefined
     },
     loader: {
       // One configured mcp-client row, exactly as the Loader reports it. This drives
       // the profile-row projection AND the tool-inventory channel built on top of it.
+      //
+      // The entry carries `fiber` (a Fiber object), NOT `fiberPhase`: that name is a
+      // derived field computed by `dsh-host-plugin-inventory`, and reading it off a raw
+      // entry yields '' forever. This mock is deliberately the real shape, so the phase
+      // assertion below fails if the Host ever goes back to reading the wrong one.
       entries: () => [{
         id: 'mcp-smoke-server',
         disabled: false,
@@ -150,7 +173,7 @@ try {
           name: '@deepseek-ai/dsh-mcp-client',
           config: { serverName: 'smoke-server', transport: 'streamable-http', url: 'https://smoke.invalid/mcp' },
         },
-        fiberPhase: 'active',
+        fiber: { state: 2 },
       }],
     },
     effect: (fn) => { fn(); return noop },
@@ -168,6 +191,8 @@ try {
     // channel has something to report.
     profileServers: { get: () => [] }, workspaces: { get: () => [] }, currentWorkspace: { get: () => '' },
     importRequest: { get: () => live.importRequest }, importResult: { get: () => live.importResult },
+    // The panel's reconnect channel: written by the panel, drained by the Host.
+    reconnectRequest: { get: () => live.reconnectRequest },
     // Read live on every registration, so this mock is also what proves a panel edit
     // takes effect without a restart.
     toolFilters: { get: () => live.toolFilters },
@@ -232,6 +257,16 @@ try {
   await new Promise((resolveWait) => setTimeout(resolveWait, 1500))
   note(Array.isArray(live.rowOps) && live.rowOps.length === 0, 'rowOps 被排空（失败被记录而非逃逸）')
 
+  // Channel 3b: the reconnect request. A server the profile does not configure cannot
+  // be reconnected, so the request must still be consumed — and the failure must come
+  // back as a reason. Silently swallowing it would leave the panel showing "重连中…"
+  // forever, which is worse than the dead server the user was trying to fix.
+  live.reconnectRequest = { tier: 'global', serverName: 'no-such-server', scope: '', nonce: 'smoke-reconnect-1', at: '' }
+  await new Promise((resolveWait) => setTimeout(resolveWait, 1500))
+  note(live.reconnectRequest?.nonce === '', '重连请求被排空（否则面板一直显示重连中）')
+  note(live.reconnectResult?.nonce === 'smoke-reconnect-1', '重连结果按 nonce 回给了发起方')
+  note(live.reconnectResult?.ok === false && live.reconnectResult?.error !== '', '重连失败带上了原因，而不是静默失败')
+
   // Channel 4: disk-skill discovery. This is where the real app silently published
   // an empty list, so the smoke must prove the channel actually publishes.
   const discovered = Array.isArray(live.discoveredSkills) ? live.discoveredSkills : []
@@ -258,6 +293,25 @@ try {
   // registry — so publishing the *absence* of an error is itself the contract.
   note(live.serverToolsError !== undefined, '读了错误字段本身（缺失会让面板误判为旧 Host）')
   note(live.serverToolsError?.reason === '', '读取正常时原因字段为空串（不是缺字段）')
+
+  // Channel 5b: the row phase. It used to read `entry.fiberPhase`, which does not
+  // exist on a raw Loader entry (it is derived by dsh-host-plugin-inventory), so the
+  // field was permanently '' and the panel could not tell "connected with no tools"
+  // from "never loaded". The mock entry above carries the real `fiber` shape.
+  note(rows[0]?.phase === 'active', `行状态由 fiber.state 推出（收到「${rows[0]?.phase}」，期望 active）`)
+
+  // Channel 5c: per-server connection status. This is the channel that makes a
+  // silently dead MCP visible, so the smoke proves it publishes for a configured
+  // server rather than trusting the unit tests alone.
+  const statuses = Array.isArray(live.serverStatus) ? live.serverStatus : []
+  const smokeStatus = statuses.find((item) => item.serverName === 'smoke-server')
+  note(smokeStatus !== undefined, '连接状态为已配置的服务器发布了条目')
+  // The registry is the cheap positive signal for a global row: two tools are
+  // registered for this name, so it must read as connected without any probing.
+  note(smokeStatus?.status === 'connected', `注册表里有工具即视为已连接（收到「${smokeStatus?.status}」）`)
+  note(smokeStatus?.toolCount === 2, `连接状态带上工具数（收到 ${smokeStatus?.toolCount}，期望 2）`)
+  note(smokeStatus?.budgetMs === 151500, `重试预算按客户端默认退避算出（收到 ${smokeStatus?.budgetMs}，期望 151500）`)
+  note(live.reconnectReady === true, '发布了重连能力标记，面板据此才显示按钮')
 
   // Channel 6: the tool filter. This is the one that changes what the MODEL is
   // offered, so the smoke drives a real registration through the shadow and checks

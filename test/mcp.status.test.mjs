@@ -1,0 +1,93 @@
+/**
+ * mcp/status 接口测试。
+ *
+ * 这里钉住的是**推导**的正确性，因为它最终会以「重试中 / 已放弃重试」这种确定语气
+ * 出现在界面上。几条关键约定：
+ *   · 预算必须复刻客户端的退避序列（否则「已放弃」的时机会系统性偏早/偏晚）
+ *   · maxAttempts 很大时不能逐次循环（表单允许到安全整数）
+ *   · 「该有实例却没有」与「此刻本就不该挂载」必须分开（前者是故障，后者不是）
+ *   · 观测机制没装上时给 unknown，不猜
+ */
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import {
+  RECONNECT_DEFAULTS, SERVER_STATUS, deriveStatus, reconnectBudgetMs, reconnectPolicy, remainingSeconds,
+} from '../src/mcp/status.js'
+
+test('reconnectPolicy：留空/垃圾值回落到客户端默认值', () => {
+  assert.deepEqual(reconnectPolicy({}), {
+    enabled: true, initialDelayMs: 500, maxDelayMs: 30000, maxAttempts: 10,
+  })
+  // 表单里是字符串；YAML 里可能是数字
+  assert.equal(reconnectPolicy({ reconnectInitialDelayMs: '1000' }).initialDelayMs, 1000)
+  assert.equal(reconnectPolicy({ reconnectInitialDelayMs: 1000 }).initialDelayMs, 1000)
+  // 非法值不能被当成配置，否则一行坏数据会让预算算成 0 → 立刻报「已放弃」
+  for (const bad of ['', '  ', 'abc', '-5', '0', null, undefined, NaN]) {
+    assert.equal(reconnectPolicy({ reconnectInitialDelayMs: bad }).initialDelayMs, 500, `坏值 ${String(bad)}`)
+  }
+  assert.equal(reconnectPolicy({ reconnectEnabled: false }).enabled, false)
+})
+
+test('reconnectBudgetMs：复刻客户端退避序列', () => {
+  // 默认：500,1000,2000,4000,8000,16000,30000,30000,30000,30000
+  assert.equal(reconnectBudgetMs({}), 500 + 1000 + 2000 + 4000 + 8000 + 16000 + 30000 * 4)
+  // 用户那三条项目级条目：initialDelayMs=1000，其余空
+  // → 1000,2000,4000,8000,16000,30000,30000,30000,30000,30000 = 181000（约 3 分钟）
+  assert.equal(reconnectBudgetMs({ reconnectInitialDelayMs: '1000' }), 1000 + 2000 + 4000 + 8000 + 16000 + 30000 * 5)
+  // 关掉重连 = 预算 0
+  assert.equal(reconnectBudgetMs({ reconnectEnabled: false }), 0)
+  // 触顶后整段求和：不能逐次循环，否则这个会卡住
+  const started = Date.now()
+  const huge = reconnectBudgetMs({ reconnectMaxAttempts: 100000, reconnectMaxDelayMs: 30000 })
+  assert.ok(Date.now() - started < 200, '大 maxAttempts 不该逐次循环')
+  assert.equal(huge, 500 + 1000 + 2000 + 4000 + 8000 + 16000 + 30000 * (100000 - 6))
+  // maxAttempts=1 → 只有第一次退避
+  assert.equal(reconnectBudgetMs({ reconnectMaxAttempts: 1 }), 500)
+})
+
+test('deriveStatus：已连接优先于一切', () => {
+  assert.equal(deriveStatus({ connected: true, enabled: true, hasInstance: true }), SERVER_STATUS.connected)
+  // 就算还没观测到实例，探测说连着就也是连着
+  assert.equal(deriveStatus({ connected: true, hasInstance: false }), SERVER_STATUS.connected)
+  // 停用的服务器不再探测，标签应是「已停用」而不是「已连接」
+  assert.equal(deriveStatus({ connected: true, enabled: false }), SERVER_STATUS.disabled)
+})
+
+test('deriveStatus：该有实例却没有 = 激活失败，但要先过宽限期', () => {
+  assert.equal(deriveStatus({ connected: false, hasInstance: false, elapsedMs: 0 }), SERVER_STATUS.pending)
+  assert.equal(deriveStatus({ connected: false, hasInstance: false, elapsedMs: 60000 }), SERVER_STATUS.failed)
+})
+
+test('deriveStatus：本就不该挂载 ≠ 故障', () => {
+  // 项目级条目：当前没有该项目的会话，压根没挂 —— 显示「未挂载」
+  assert.equal(deriveStatus({ connected: false, expected: false, hasInstance: false, elapsedMs: 600000 }), SERVER_STATUS.unmounted)
+  // 但「该挂却没有」仍然是故障
+  assert.equal(deriveStatus({ connected: false, expected: true, hasInstance: false, elapsedMs: 600000 }), SERVER_STATUS.failed)
+})
+
+test('deriveStatus：实例活着但没连上 —— 按预算区分重试中与已放弃', () => {
+  const base = { connected: false, hasInstance: true, budgetMs: 151000 }
+  assert.equal(deriveStatus({ ...base, elapsedMs: 1000 }), SERVER_STATUS.retrying)
+  assert.equal(deriveStatus({ ...base, elapsedMs: 150999 }), SERVER_STATUS.retrying)
+  assert.equal(deriveStatus({ ...base, elapsedMs: 151000 }), SERVER_STATUS.gaveUp)
+  assert.equal(deriveStatus({ ...base, elapsedMs: 600000 }), SERVER_STATUS.gaveUp)
+  // 重连被关掉：预算 0，不会自己恢复
+  assert.equal(deriveStatus({ ...base, budgetMs: 0, elapsedMs: 1 }), SERVER_STATUS.gaveUp)
+})
+
+test('deriveStatus：观测机制没装上时如实说未知', () => {
+  assert.equal(deriveStatus({ observed: false, connected: null, hasInstance: false }), SERVER_STATUS.unknown)
+  assert.equal(deriveStatus({ observed: false, connected: false, hasInstance: true }), SERVER_STATUS.unknown)
+})
+
+test('deriveStatus：探测还没结论时给「连接中」，不猜故障', () => {
+  // 刚装上、探测还在途中：绝不能给一台正常服务器挂告警
+  assert.equal(deriveStatus({ connected: null, hasInstance: true, elapsedMs: 0, budgetMs: 151000 }), SERVER_STATUS.pending)
+  // 就算已经等过了预算，只要没有探测结论就仍然不下判断
+  assert.equal(deriveStatus({ connected: null, hasInstance: true, elapsedMs: 999999, budgetMs: 1000 }), SERVER_STATUS.pending)
+})
+
+test('剩余秒数不为负', () => {
+  assert.equal(remainingSeconds(1000, 151000), 150)
+  assert.equal(remainingSeconds(999999, 151000), 0)
+})

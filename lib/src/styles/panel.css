@@ -53,6 +53,15 @@
 .smp-detailsValue{color:var(--dsw-alias-label-secondary);word-break:break-all}
 .smp-tag{display:inline-flex;align-items:center;border-radius:999px;padding:1px 8px;font-size:11px;line-height:17px;font-weight:500;white-space:nowrap}
 .smp-tag[data-tone=neutral]{background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary)}
+/* 连接状态标签的三档语气。
+   danger 一档必须真的显眼：它出现的场景正是「这个 MCP 已经永久失效、要用户动手」，
+   而这个问题以前在界面上完全不可见（工具凭空消失，没有任何说明）。
+   主题里没有 error-tertiary 背景，所以用描边而不是填色来拉开对比。 */
+.smp-tag[data-tone=ok]{background:var(--dsw-alias-state-success-tertiary,var(--dsw-alias-bg-module-platform));color:var(--dsw-alias-state-success-primary,#067647)}
+.smp-tag[data-tone=warn]{background:var(--dsw-alias-state-warn-tertiary,var(--dsw-alias-bg-module-platform));color:var(--dsw-alias-state-warn-primary,#b54708)}
+.smp-tag[data-tone=danger]{background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-state-error-primary,#d92d20);box-shadow:inset 0 0 0 1px var(--dsw-alias-state-error-primary,#d92d20)}
+.smp-reconnect{display:inline-flex;align-items:center;gap:6px}
+.smp-reconnect .smp-error{max-width:280px;white-space:normal}
 /* 展开区里的工具清单：数据来自 harness 工具注册表，只读展示。
    分隔线与间距挂在标题上而不是包裹层：空清单与「不可读」两种状态只渲染标题，
    挂在包裹层会让它们紧贴字段表，看起来像表格的一部分。 */

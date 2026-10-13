@@ -37,6 +37,8 @@ import { mountedKeyOf, projectServersFor, serverMountConfig, setMountClient, wor
 import { connectionDraftOf } from './mcp/connection.js'
 import { toolsByServer } from './mcp/tools.js'
 import { installShadow, isMcpName, judge, liveToolNames } from './mcp/filter.js'
+import { installConnectionWatch } from './mcp/watch.js'
+import { SERVER_STATUS, deriveStatus, reconnectBudgetMs, remainingSeconds } from './mcp/status.js'
 
 setMountClient(mcpClient)
 
@@ -254,6 +256,55 @@ export const Config = z.object({
     detail: z.string().default(''),
   }).default({ reason: '', detail: '' }).volatile(),
   /**
+   * 每个 MCP 服务器的连接状态，供面板打告警标签。
+   *
+   * 为什么要发布这个：`dsh-mcp-client` 在重试预算用尽后会**永久放弃**
+   * （"giving up after N consecutive failed reconnect attempts — reload the plugin or
+   * restart the Host to reconnect"），而这件事在界面上原本**完全不可见** —— 用户只
+   * 看到工具没了，不知道是没连上、正在重试、还是已经放弃。实测一个启动时连不上的
+   * deepwiki 就是这样静默失效 15 分钟以上的。
+   *
+   * `status` 是**推导**值（客户端把重试计数关在闭包里，见 `src/mcp/status.js`），
+   * 所以带 `remainingMs` 这类预计量，界面措辞也必须说成「预计」。
+   */
+  serverStatus: z.array(z.object({
+    serverName: z.string().default(''),
+    /** `global`（Loader 行）或 `project`（本插件挂载）。 */
+    tier: z.string().default(''),
+    scope: z.string().default(''),
+    status: z.string().default(''),
+    toolCount: z.number().default(0),
+    /** 从首次观测到「未连接」起已过去多久。 */
+    elapsedMs: z.number().default(0),
+    /** 该服务器配置下的重试预算总长。 */
+    budgetMs: z.number().default(0),
+    /** 按预算预计还能重试多久（秒）；仅 `retrying` 有意义。 */
+    remainingSeconds: z.number().default(0),
+    detail: z.string().default(''),
+  })).default([]).volatile(),
+  /**
+   * 面板请求重连一台服务器。
+   *
+   * 与 `rowOps` 同构：面板写、Host 排空后清空。全局行只能靠让 Loader 重建实例
+   * （停用 → 启用）才拿得到新的重试预算，项目级条目则由本插件失效挂载 key 重挂。
+   * 两条路都不需要重启 DSH。
+   */
+  reconnectRequest: z.object({
+    tier: z.string().default(''),
+    serverName: z.string().default(''),
+    scope: z.string().default(''),
+    nonce: z.string().default(''),
+    at: z.string().default(''),
+  }).default({ tier: '', serverName: '', scope: '', nonce: '', at: '' }).volatile(),
+  /** Capability marker：Host 能处理 reconnectRequest 时才为 true。 */
+  reconnectReady: z.boolean().default(false).volatile(),
+  /** 上一次重连的结果（按 nonce 回给发起的那个面板）。 */
+  reconnectResult: z.object({
+    nonce: z.string().default(''),
+    ok: z.boolean().default(false),
+    error: z.string().default(''),
+  }).default({ nonce: '', ok: false, error: '' }).volatile(),
+  /**
    * 每个服务器的工具过滤规则：`{ [serverName]: { mode, tools } }`。
    *
    * `mode`：`off`（不过滤，默认）/ `allow`（只保留 tools 里的）/ `deny`（只挡 tools 里的）。
@@ -315,6 +366,31 @@ const mcpPlugin = {
   apply: mcpClient.apply,
   inject: mcpClient.inject,
   Config: mcpClient.Config,
+}
+
+/**
+ * cordis fiber 状态 → 官方 phase 文案。
+ *
+ * 顺序就是 `FiberState` 的枚举顺序（PENDING/LOADING/ACTIVE/FAILED/DISPOSED/UNLOADING），
+ * 与 `@deepseek-ai/dsh-host-plugin-inventory` 的 FIBER_PHASE 一致。`null` 表示没有对应
+ * 文案（DISPOSED）。
+ */
+const FIBER_PHASE = ['pending', 'loading', 'active', 'failed', null, 'unloading']
+
+/**
+ * 读一行的 fiber 状态。
+ *
+ * 修掉一个死字段：原先读的是 `entry.fiberPhase`，但那是
+ * `dsh-host-plugin-inventory` **另外算出来**的派生字段，原始 Loader entry 上只有
+ * `entry.fiber`（Fiber 对象），于是 `phase` 永远是空串 —— 面板因此无法区分
+ * 「连上了但没有工具」和「压根没加载起来」。两种形态都认，优先用官方已算好的。
+ */
+const phaseOf = (entry) => {
+  const direct = entry?.fiberPhase
+  if (typeof direct === 'string' && direct !== '') return direct
+  const state = entry?.fiber?.state
+  const mapped = Number.isInteger(state) ? FIBER_PHASE[state] : undefined
+  return typeof mapped === 'string' ? mapped : ''
 }
 
 /** Stable identity of the global servers that should be mounted. */
@@ -408,7 +484,7 @@ function configuredMcpRows(ctx) {
           // Connection policy travels with the row so 编辑 can show what is set.
           ...connectionDraftOf(row),
           enabled: !entry.disabled,
-          phase: String(entry.fiberPhase ?? ''),
+          phase: phaseOf(entry),
         }
       })
     return { loaderFound: true, rows }
@@ -508,6 +584,152 @@ export function apply(ctx, config) {
     ctx.logger.warn('skills-mcp-panel: MCP tool filter not installed — %s', shadow.reason)
   }
   ctx.effect(() => () => shadow.restore(), 'skills-mcp-panel.tool-filter')
+
+  /**
+   * Connection watch, installed next to the filter and for the same ordering
+   * reason: `dsh-mcp-client` publishes its connection to `mcpResources` while it
+   * starts, so the shadow has to be in place before the first MCP row loads.
+   *
+   * This is what lets the panel warn about a server that quietly died. The client
+   * gives up permanently once its retry budget runs out, and until now that was
+   * invisible: the tools simply disappeared and nothing said whether the server was
+   * still retrying or already dead.
+   */
+  const watch = installConnectionWatch(ctx, { warn: (message) => ctx.logger.warn(message) })
+  ctx.effect(() => () => watch.restore(), 'skills-mcp-panel.connection-watch')
+  if (!watch.installed) {
+    // Reported, never swallowed: "no server is down" and "we cannot tell" must not
+    // look the same, or the status tag would show a confident lie.
+    ctx.logger.warn('skills-mcp-panel: MCP connection watch not installed — %s', watch.reason)
+  }
+
+  /**
+   * When each server was first seen not-connected, in epoch ms.
+   *
+   * The client keeps its own attempt counter in a closure, so elapsed time against
+   * the configured budget is the only way to tell "still retrying" from "gave up".
+   */
+  const downSince = new Map()
+  /** Last probe result per server: `{ at, state, detail }`. */
+  const probeCache = new Map()
+  /** Servers with a probe in flight, so a slow server cannot pile up requests. */
+  const probing = new Set()
+  const PROBE_TTL_MS = 12000
+
+  /**
+   * Ask a server whether it is connected, at most once per TTL.
+   *
+   * Fire-and-forget on purpose: `publish` is synchronous and must not await a
+   * remote round-trip. The tag renders from the last known answer, which is at most
+   * one TTL stale — a few seconds on a status label nobody needs to the millisecond.
+   */
+  const refreshProbe = (serverName) => {
+    if (!watch.installed) return
+    const cached = probeCache.get(serverName)
+    const now = Date.now()
+    if (cached !== undefined && now - cached.at < PROBE_TTL_MS) return
+    if (probing.has(serverName)) return
+    probing.add(serverName)
+    Promise.resolve(watch.probe(serverName))
+      .then((result) => {
+        probeCache.set(serverName, { at: Date.now(), state: result.state, detail: result.detail })
+      })
+      .catch((error) => {
+        probeCache.set(serverName, { at: Date.now(), state: 'unknown', detail: String(error?.message ?? error) })
+      })
+      .finally(() => probing.delete(serverName))
+  }
+
+  const probeStateOf = (serverName) => {
+    if (!watch.has(serverName)) return { connected: false, known: watch.installed }
+    const cached = probeCache.get(serverName)
+    if (!watch.installed || cached === undefined) return { connected: null, known: watch.installed }
+    if (cached.state === 'connected') return { connected: true, known: true }
+    if (cached.state === 'down') return { connected: false, known: true }
+    return { connected: null, known: false }
+  }
+
+  /**
+   * One status row per configured server, both tiers.
+   *
+   * Called on the publish tick. It never awaits anything: probes are kicked off and
+   * their answers are consumed on a later tick, so a hung MCP server can slow a
+   * label by seconds but can never stall the projection.
+   *
+   * `connected` merges two sources of different reach. The tool registry is the
+   * cheap positive signal, but it is an **unscoped** view and project servers mount
+   * into agent scopes, so their tools are invisible there — using it for both tiers
+   * would report every project server as down. Hence: registry for global rows,
+   * probe for everything.
+   */
+  const computeServerStatus = ({ rows, entries, toolCounts }) => {
+    const now = Date.now()
+    // A project server is only mounted for an agent whose cwd falls in its scope, so
+    // "not mounted" is the normal state when no such session is open — not a fault.
+    const expected = new Set()
+    for (const entry of agents.values()) {
+      if (typeof entry.cwd !== 'string' || entry.cwd === '') continue
+      for (const server of projectServersFor(committedServers, entry.cwd)) {
+        if (server.enabled !== false && typeof server.serverName === 'string') expected.add(server.serverName)
+      }
+    }
+    const targets = [
+      ...rows.map((row) => ({
+        tier: 'global', scope: '', serverName: String(row.serverName ?? ''),
+        enabled: row.enabled !== false, expected: true, source: row,
+      })),
+      ...entries.map((entry) => ({
+        tier: 'project', scope: String(entry.scope ?? ''), serverName: String(entry.serverName ?? ''),
+        enabled: entry.enabled !== false,
+        expected: expected.has(entry.serverName),
+        source: entry,
+      })),
+    ]
+    const reported = []
+    const seen = new Set()
+    for (const target of targets) {
+      if (target.serverName === '') continue
+      const key = `${target.tier}\u0000${target.scope}\u0000${target.serverName}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      const hasInstance = watch.has(target.serverName)
+      const probe = probeStateOf(target.serverName)
+      const toolCount = toolCounts.get(target.serverName) ?? 0
+      const connected = target.tier === 'global' && toolCount > 0 ? true : probe.connected
+      if (connected !== true) refreshProbe(target.serverName)
+      if (connected === true) {
+        downSince.delete(target.serverName)
+      } else if (!downSince.has(target.serverName)) {
+        downSince.set(target.serverName, now)
+      }
+      const elapsedMs = connected === true ? 0 : Math.max(0, now - (downSince.get(target.serverName) ?? now))
+      const budgetMs = reconnectBudgetMs(target.source)
+      const status = deriveStatus({
+        enabled: target.enabled,
+        expected: target.expected,
+        observed: watch.installed,
+        hasInstance,
+        connected,
+        elapsedMs,
+        budgetMs,
+      })
+      const cached = probeCache.get(target.serverName)
+      reported.push({
+        serverName: target.serverName,
+        tier: target.tier,
+        scope: target.scope,
+        status,
+        toolCount,
+        elapsedMs,
+        budgetMs,
+        remainingSeconds: status === SERVER_STATUS.retrying ? remainingSeconds(elapsedMs, budgetMs) : 0,
+        // Only carry a detail that explains a non-connected verdict; a healthy server
+        // that merely refuses `resources/list` must not look like a problem.
+        detail: status === SERVER_STATUS.connected ? '' : String(cached?.detail ?? ''),
+      })
+    }
+    return reported
+  }
 
   /**
    * Import scan state. The panel asks for one source at a time through the
@@ -683,6 +905,7 @@ export function apply(ctx, config) {
       // the panel can say *why* it is unknown instead of showing a bare "unreadable"
       // — "the registry is missing" is actionable, "this server has no tools" is not
       // a failure at all, and the two must never look the same.
+      const entries = readServers()
       const inventory = toolsByServer(ctx, plain.map((row) => row.serverName))
       const serverTools = inventory.ok ? inventory.servers : []
       const serverToolsError = inventory.ok
@@ -693,6 +916,8 @@ export function apply(ctx, config) {
       } else {
         projection.toolsError = null
       }
+      const toolCounts = new Map(serverTools.map((entry) => [entry.serverName, entry.tools.length]))
+      const serverStatus = computeServerStatus({ rows: plain, entries, toolCounts })
       // The filter may only judge servers the panel can see, so its cached name set
       // is refreshed on the same slow tick that publishes everything else.
       refreshFilterServers(readServers())
@@ -702,7 +927,7 @@ export function apply(ctx, config) {
         dropped: [...filterState.dropped],
         preExisting: [...filterState.preExisting],
       }
-      const key = JSON.stringify([plain, serverTools, serverToolsError, filterStateOut, spaces, currentWorkspace, discoveredSkills, skillDirs, discoveryInfo])
+      const key = JSON.stringify([plain, serverTools, serverToolsError, serverStatus, filterStateOut, spaces, currentWorkspace, discoveredSkills, skillDirs, discoveryInfo])
       if (key === published) return
       // Never erase a good projection because the Loader read came back empty.
       if (plain.length === 0 && !loaderFound) {
@@ -710,10 +935,11 @@ export function apply(ctx, config) {
         return
       }
       Promise.resolve(inner.settings.update('skills-mcp-panel', {
-          profileServers: plain, serverTools, serverToolsError, filterState: filterStateOut, workspaces: spaces, currentWorkspace, discoveredSkills, skillDirs, discoveryInfo,
+          profileServers: plain, serverTools, serverToolsError, serverStatus, filterState: filterStateOut, workspaces: spaces, currentWorkspace, discoveredSkills, skillDirs, discoveryInfo,
           // Re-assert every publish: this marker has been lost by a later rewrite
           // before, and losing it hides the row actions in the panel.
           rowOpsReady: true,
+          reconnectReady: true,
         }))
         .then(() => {
           published = key
@@ -777,6 +1003,129 @@ export function apply(ctx, config) {
     drain()
     const opTimer = setInterval(drain, 500)
     inner.effect(() => () => clearInterval(opTimer))
+
+    /**
+     * Panel requests to reconnect one MCP server.
+     *
+     * Why the instance has to be recreated instead of "nudged": the retry state lives
+     * inside the client's closure (`failedAttempts`, `reconnectTimer`) and there is no
+     * API to reset it. Worse, `dispose()` clears the pending reconnect timer, so once
+     * a server has given up only a **new plugin instance** gets a fresh budget. For a
+     * global row that means letting the Loader rebuild the row; for a project entry
+     * this plugin owns the mount and can drop it directly.
+     *
+     * The global sequence is two writes (disable, then re-enable) that are deliberately
+     * spread across ticks: `dsh-hmr` watches the patch file, and a value written and
+     * immediately restored can coalesce into "no change" and never reload at all. It
+     * also waits for the disable to actually show up in the Loader before re-enabling,
+     * so the re-enable can never land while the old instance is still alive.
+     */
+    let reconnectTask = null
+    let seenReconnectNonce = ''
+    let reconnectResult = { nonce: '', ok: false, error: '' }
+    /** How long to wait for the Loader to reflect a disable before giving up on it. */
+    const RECONNECT_STEP_TIMEOUT_MS = 25000
+
+    const clearReconnectRequest = () => Promise.resolve(inner.settings.update('skills-mcp-panel', {
+      reconnectRequest: { tier: '', serverName: '', scope: '', nonce: '', at: '' },
+      reconnectResult: { ...reconnectResult },
+    }))
+
+    const finishReconnect = (nonce, error) => {
+      reconnectResult = { nonce, ok: error === undefined, error: error === undefined ? '' : String(error) }
+      if (error !== undefined) ctx.logger.warn('skills-mcp-panel: reconnect failed: %s', reconnectResult.error)
+      reconnectTask = null
+      // Refresh first so the tag moves immediately, then clear the request so the panel
+      // stops showing it as in flight. A leftover `disabled: true` is never acceptable,
+      // so any failure path still lands here having restored the row.
+      clearReconnectRequest()
+        .then(() => {
+          try {
+            tick()
+            publish()
+          } catch (refreshError) {
+            ctx.logger.warn('skills-mcp-panel: post-reconnect refresh failed: %s', String(refreshError?.message ?? refreshError))
+          }
+        })
+        .catch((writeError) => {
+          ctx.logger.warn('skills-mcp-panel: cannot clear the reconnect request: %s', String(writeError?.message ?? writeError))
+        })
+    }
+
+    const remountProject = (serverName) => {
+      let touched = 0
+      for (const [agent, entry] of agents) {
+        const desired = projectServersFor(committedServers, entry.cwd)
+        if (!desired.some((server) => server.serverName === serverName)) continue
+        // Re-mounting is per-agent and covers that agent's whole project set: the mount
+        // bookkeeping keeps one disposer list per agent, so a single server cannot be
+        // swapped on its own. A manual reconnect is rare and every server involved gets
+        // a fresh budget, which is the safer direction.
+        entry.key = null
+        mountForAgent(agent, entry)
+        touched += 1
+      }
+      return touched
+    }
+
+    const advanceReconnect = () => {
+      const task = reconnectTask
+      if (task === null) return
+      if (task.stage === 'project') {
+        const touched = remountProject(task.serverName)
+        finishReconnect(task.nonce, touched === 0 ? `没有会话正在使用项目级服务器 ${task.serverName}，无需重连` : undefined)
+        return
+      }
+      // Global row: disable → wait for the Loader to confirm → re-enable.
+      if (task.stage === 'stop') {
+        if (applying) return // never interleave patch writes with the row-op drain
+        const row = configuredMcpRows(ctx).rows.find((item) => item.serverName === task.serverName)
+        if (row === undefined || row.entryId === '') {
+          finishReconnect(task.nonce, `profile 里找不到服务器 ${task.serverName} 对应的行`)
+          return
+        }
+        if (row.enabled === false) {
+          finishReconnect(task.nonce, `服务器 ${task.serverName} 处于停用状态，先在面板里启用它`)
+          return
+        }
+        task.entryId = row.entryId
+        task.stage = 'await-stop'
+        task.sentAt = Date.now()
+        Promise.resolve(applyRowOp(ctx, { op: 'toggle', entryId: row.entryId, enabled: false }))
+          .catch((error) => finishReconnect(task.nonce, String(error?.message ?? error)))
+        return
+      }
+      if (task.stage === 'await-stop') {
+        const row = configuredMcpRows(ctx).rows.find((item) => item.entryId === task.entryId)
+        const stopped = row === undefined || row.enabled === false
+        if (!stopped && Date.now() - task.sentAt < RECONNECT_STEP_TIMEOUT_MS) return
+        task.stage = 'start'
+        // Re-enable even on timeout: leaving the row disabled would turn a failed
+        // reconnect into a worse regression than the one the user was fixing.
+        Promise.resolve(applyRowOp(ctx, { op: 'toggle', entryId: task.entryId, enabled: true }))
+          .then(() => finishReconnect(task.nonce, stopped ? undefined : '停用后未等到 Loader 卸载该行，已重新启用，请再试一次'))
+          .catch((error) => finishReconnect(task.nonce, String(error?.message ?? error)))
+      }
+    }
+
+    const drainReconnect = () => {
+      const request = config?.reconnectRequest?.get?.() ?? config?.reconnectRequest
+      const nonce = typeof request?.nonce === 'string' ? request.nonce : ''
+      if (reconnectTask === null && nonce !== '' && nonce !== seenReconnectNonce) {
+        seenReconnectNonce = nonce
+        const serverName = String(request?.serverName ?? '')
+        const tier = String(request?.tier ?? '')
+        if (serverName === '') {
+          finishReconnect(nonce, '请求里没有服务器名')
+          return
+        }
+        reconnectTask = { nonce, serverName, tier, entryId: '', stage: tier === 'project' ? 'project' : 'stop', sentAt: Date.now() }
+      }
+      advanceReconnect()
+    }
+    drainReconnect()
+    const reconnectTimer = setInterval(drainReconnect, 500)
+    inner.effect(() => () => clearInterval(reconnectTimer))
 
     // Project MCP import: the panel posts a request, this half scans one tool's
     // project files and writes the answer back for the panel to preview.
