@@ -10,7 +10,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { bootPanel, emptyDoc, skipWithoutBundle, textOf } from '../scripts/lib/client-harness.mjs'
+import { bootPanel, emptyDoc, skipWithoutBundle, textOf, visit } from '../scripts/lib/client-harness.mjs'
 
 /**
  * A project-scoped row, in the shape the Host now projects from `mcp-client` rows.
@@ -31,76 +31,117 @@ const statusEntry = (over = {}) => ({
   toolCount: 0, elapsedMs: 400000, budgetMs: 181000, remainingSeconds: 0, detail: '', ...over,
 })
 
-/** 全部标签文字，便于断言。 */
-const tagTexts = (panel) => panel.findAll((node) => String(node.props.className ?? '').includes('smp-tag')).map((node) => textOf(node))
+/** 所有状态圆点的取值（`data-dot`），便于断言颜色档位。 */
+const dotTones = (panel) => panel.findAll((node) => node.props.className === 'smp-dot').map((node) => node.props['data-dot'])
 
-test('状态标签：已放弃重试时给出显眼的 danger 标签', { skip: skipWithoutBundle() }, async () => {
+/**
+ * 某一个圆点档位对应的状态行文字。
+ *
+ * 状态行是「圆点 + 文字 + 数字」三个兄弟节点（见 `statusDot`），所以要按同一个
+ * `.smp-status` 分组找，不能只按 `data-dot` 取文字。`visit` 是深度优先，所以
+ * 父节点命中的那个区间内才会包含它自己的子圆点。
+ */
+const statusTextOf = (panel, dot) => {
+  const lines = panel.findAll((node) => String(node.props.className ?? '') === 'smp-status')
+  for (const line of lines) {
+    const dots = []
+    visit(line, (child) => { if (child.props?.['data-dot'] !== undefined) dots.push(child.props['data-dot']) })
+    if (dots.includes(dot)) return textOf(line)
+  }
+  return ''
+}
+
+test('状态圆点：已放弃重试用红点', { skip: skipWithoutBundle() }, async () => {
   const panel = await bootPanel(emptyDoc({
     profileServers: [project()], currentWorkspace: '/p/tcl', rowOpsReady: true, reconnectReady: true,
     serverStatus: [statusEntry()],
   }))
   try {
-    const tags = panel.findAll((node) => String(node.props.className ?? '').includes('smp-tag'))
-    const danger = tags.find((node) => node.props['data-tone'] === 'danger')
-    assert.ok(danger !== undefined, `没有 danger 标签，实际标签：${JSON.stringify(tagTexts(panel))}`)
-    assert.match(textOf(danger), /已放弃重试/)
+    assert.ok(dotTones(panel).includes('danger'), `没有 danger 圆点，实际：${JSON.stringify(dotTones(panel))}`)
+    assert.match(statusTextOf(panel, 'danger'), /已放弃重试/)
   } finally {
     panel.restore()
   }
 })
 
-test('状态标签：未连接但仍在重试时给警示色，并标出预计剩余', { skip: skipWithoutBundle() }, async () => {
+test('状态圆点：连接中给黄点，并标出预计剩余', { skip: skipWithoutBundle() }, async () => {
   const panel = await bootPanel(emptyDoc({
     profileServers: [project()], currentWorkspace: '/p/tcl', rowOpsReady: true, reconnectReady: true,
     serverStatus: [statusEntry({ status: 'retrying', elapsedMs: 60000, remainingSeconds: 121 })],
   }))
   try {
-    const warn = panel.findAll((node) => node.props['data-tone'] === 'warn')[0]
-    assert.ok(warn !== undefined, '没有警示标签')
-    const text = textOf(warn)
-    assert.match(text, /重试中/)
-    // 剩余时间是从预算推的，措辞必须说成「预计」
-    assert.match(text, /预计剩 121s/)
+    assert.ok(dotTones(panel).includes('warn'), `没有 warn 圆点，实际：${JSON.stringify(dotTones(panel))}`)
+    const text = statusTextOf(panel, 'warn')
+    // 「连接中」同时覆盖首次连接与断线重试：对用户来说是同一件事，两档都不需要他动手。
+    assert.match(text, /连接中/)
+    // 剩余时间是从预算推的，措辞必须说成约数
+    assert.match(text, /约 121s/)
   } finally {
     panel.restore()
   }
 })
 
-test('状态标签：已连接显示工具数', { skip: skipWithoutBundle() }, async () => {
+test('状态圆点：已连接给绿点并显示工具数', { skip: skipWithoutBundle() }, async () => {
   const panel = await bootPanel(emptyDoc({
     profileServers: [project()], currentWorkspace: '/p/tcl', rowOpsReady: true, reconnectReady: true,
     serverStatus: [statusEntry({ status: 'connected', toolCount: 12, elapsedMs: 0 })],
   }))
   try {
-    const ok = panel.findAll((node) => node.props['data-tone'] === 'ok')[0]
-    assert.ok(ok !== undefined, '已连接没有 ok 标签')
-    assert.match(textOf(ok), /已连接 · 12 个工具/)
+    assert.ok(dotTones(panel).includes('ok'), `没有 ok 圆点，实际：${JSON.stringify(dotTones(panel))}`)
+    const text = statusTextOf(panel, 'ok')
+    assert.match(text, /可用/)
+    assert.match(text, /12 个工具/)
   } finally {
     panel.restore()
   }
 })
 
-test('状态标签：停用的条目不显示连接状态', { skip: skipWithoutBundle() }, async () => {
+test('停用的条目：开关显示为关，且不显示状态圆点', { skip: skipWithoutBundle() }, async () => {
   const panel = await bootPanel(emptyDoc({
     profileServers: [project({ enabled: false })], currentWorkspace: '/p/tcl', rowOpsReady: true, reconnectReady: true,
     serverStatus: [statusEntry({ status: 'connected', toolCount: 3 })],
   }))
   try {
-    const texts = tagTexts(panel)
-    assert.ok(texts.includes('已停用'), `缺少「已停用」标签：${JSON.stringify(texts)}`)
-    assert.ok(!texts.some((text) => text.includes('已连接')), `停用条目仍显示连接状态：${JSON.stringify(texts)}`)
+    // 「停用」这件事现在由开关表达（它同时说状态和提供切换），不再是一个「已停用」标签，
+    // 也不再需要「启用/停用」两个按钮 —— 一列卡片扫下来开关的开关态就能看明白。
+    const sw = panel.findAll((node) => String(node.props.className ?? '') === 'smp-switch')[0]
+    assert.ok(sw !== undefined, '停用条目没有开关')
+    assert.equal(sw.props['data-on'], 'false', '停用条目的开关应显示为关')
+    // 关键：没有连接可报告，就不该留一个过期的绿点说「可用」
+    assert.deepEqual(dotTones(panel), [], `停用条目仍显示连接状态圆点：${JSON.stringify(dotTones(panel))}`)
   } finally {
     panel.restore()
   }
 })
 
-test('重连按钮：点了会把请求写进设置（带 tier/scope/nonce）', { skip: skipWithoutBundle() }, async () => {
+test('开关：点一下会把 toggle 行操作写进队列（乐观显示为关）', { skip: skipWithoutBundle() }, async () => {
   const panel = await bootPanel(emptyDoc({
     profileServers: [project()], currentWorkspace: '/p/tcl', rowOpsReady: true, reconnectReady: true,
     serverStatus: [statusEntry()],
   }))
   const { doc } = panel
   try {
+    const sw = panel.findAll((node) => String(node.props.className ?? '') === 'smp-switch')[0]
+    assert.equal(sw.props['data-on'], 'true', '启用的条目开关应为开')
+    panel.click(sw)
+    const op = (doc.rowOps ?? []).find((o) => o.op === 'toggle')
+    assert.ok(op, '点击开关后没有写 toggle 行操作')
+    assert.equal(op.entryId, 'mcp-gitnexus')
+    assert.equal(op.enabled, false, '从「开」点一下应变「关」')
+  } finally {
+    panel.restore()
+  }
+})
+
+test('重连在 popup 里：点了会把请求写进设置（带 tier/scope/nonce）', { skip: skipWithoutBundle() }, async () => {
+  const panel = await bootPanel(emptyDoc({
+    profileServers: [project()], currentWorkspace: '/p/tcl', rowOpsReady: true, reconnectReady: true,
+    serverStatus: [statusEntry()],
+  }))
+  const { doc } = panel
+  try {
+    // 重连现在收在「…」菜单里，先开菜单
+    panel.click(panel.findAll((node) => String(node.props.className ?? '') === 'smp-moreTrigger')[0])
     panel.click(panel.byText('重连'))
     const request = doc.reconnectRequest
     assert.ok(request, '点击重连后没有写 reconnectRequest')
@@ -113,46 +154,64 @@ test('重连按钮：点了会把请求写进设置（带 tier/scope/nonce）', 
   }
 })
 
-test('重连按钮：已连接时不给（没什么可重连的）', { skip: skipWithoutBundle() }, async () => {
+/**
+ * Open the row's `…` popup and return the text of its items.
+ *
+ * 重连/编辑/删除 都收进了 popup（三个按钮并排会把服务器名挤出视野），所以断言它们
+ * 存不存在必须先开菜单。返回空串表示这张卡片根本没有「…」（例如 Host 不支持行操作）。
+ */
+const openMenuText = (panel, index = 0) => {
+  const triggers = panel.findAll((node) => String(node.props.className ?? '') === 'smp-moreTrigger')
+  if (triggers.length <= index) return ''
+  panel.click(triggers[index])
+  const menu = panel.find((node) => String(node.props.className ?? '') === 'smp-menu')
+  return menu === null ? '' : textOf(menu)
+}
+
+test('重连：已连接时菜单里没有这一项（没什么可重连的）', { skip: skipWithoutBundle() }, async () => {
   const panel = await bootPanel(emptyDoc({
     profileServers: [project()], currentWorkspace: '/p/tcl', rowOpsReady: true, reconnectReady: true,
     serverStatus: [statusEntry({ status: 'connected', toolCount: 5 })],
   }))
   try {
-    assert.equal(panel.byText('重连'), null, '已连接的条目不该出现重连按钮')
+    const menu = openMenuText(panel)
+    assert.ok(!menu.includes('重连'), `已连接时不该有重连项：${JSON.stringify(menu)}`)
+    // 但编辑/删除仍然要在 —— 菜单只有一个动作就说明筛过头了
+    assert.ok(menu.includes('编辑') && menu.includes('删除'), `菜单项不完整：${JSON.stringify(menu)}`)
   } finally {
     panel.restore()
   }
 })
 
-test('重连按钮：Host 不支持时不给（避免点了没反应）', { skip: skipWithoutBundle() }, async () => {
+test('重连：Host 不支持时不给（避免点了没反应）', { skip: skipWithoutBundle() }, async () => {
   const panel = await bootPanel(emptyDoc({
     profileServers: [project()], currentWorkspace: '/p/tcl', rowOpsReady: true,
     serverStatus: [statusEntry()],
   }))
   try {
-    assert.equal(panel.byText('重连'), null, 'reconnectReady 缺失时不该出现重连按钮')
+    // 状态是 gave-up（本该给重连），但 Host 没发布 reconnectReady → 不该给
+    assert.ok(!openMenuText(panel).includes('重连'), 'reconnectReady 缺失时不该出现重连项')
   } finally {
     panel.restore()
   }
 })
 
-test('状态标签：观测机制不可用时显示「状态未知」，而不是静默留白', { skip: skipWithoutBundle() }, async () => {
+test('状态圆点：观测机制不可用时显示「状态未知」灰点，而不是静默留白', { skip: skipWithoutBundle() }, async () => {
   const panel = await bootPanel(emptyDoc({
     profileServers: [project()], currentWorkspace: '/p/tcl', rowOpsReady: true, reconnectReady: true,
     serverStatus: [statusEntry({ status: 'unknown' })],
   }))
   try {
-    const texts = tagTexts(panel)
-    assert.ok(texts.includes('状态未知'), `观测不可用时应如实说明：${JSON.stringify(texts)}`)
-    // 「不知道」不能给重连按钮 —— 那是给「确定没连上」用的
-    assert.equal(panel.byText('重连'), null, '状态未知时不该出现重连按钮')
+    assert.ok(dotTones(panel).includes('neutral'), `观测不可用时应给中性圆点：${JSON.stringify(dotTones(panel))}`)
+    assert.match(statusTextOf(panel, 'neutral'), /状态未知/)
+    // 「不知道」不能给重连 —— 那是给「确定没连上」用的
+    assert.ok(!openMenuText(panel).includes('重连'), '状态未知时不该出现重连项')
   } finally {
     panel.restore()
   }
 })
 
-test('全局行也会显示状态标签', { skip: skipWithoutBundle() }, async () => {
+test('全局行也会显示状态圆点', { skip: skipWithoutBundle() }, async () => {
   const panel = await bootPanel(emptyDoc({
     profileServers: [{
       entryId: 'include:mcp-deepwiki', serverName: 'deepwiki', transport: 'streamable-http',
@@ -164,9 +223,8 @@ test('全局行也会显示状态标签', { skip: skipWithoutBundle() }, async (
     serverStatus: [{ ...statusEntry({ serverName: 'deepwiki', tier: 'global', scope: '' }) }],
   }))
   try {
-    const danger = panel.findAll((node) => node.props['data-tone'] === 'danger')[0]
-    assert.ok(danger !== undefined, `全局行没有状态标签：${JSON.stringify(tagTexts(panel))}`)
-    assert.match(textOf(danger), /已放弃重试/)
+    assert.ok(dotTones(panel).includes('danger'), `全局行没有状态圆点：${JSON.stringify(dotTones(panel))}`)
+    assert.match(statusTextOf(panel, 'danger'), /已放弃重试/)
   } finally {
     panel.restore()
   }
@@ -180,7 +238,7 @@ const profileServer = (over = {}) => ({
   enabled: true, phase: 'active', ...over,
 })
 
-test('需要授权：给 warn 标签而不是 danger（它不是故障）', { skip: skipWithoutBundle() }, async () => {
+test('需要授权：给黄点而不是红点（它不是故障）', { skip: skipWithoutBundle() }, async () => {
   const panel = await bootPanel(emptyDoc({
     profileServers: [profileServer()], rowOpsReady: true, reconnectReady: true,
     serverStatus: [statusEntry({
@@ -189,18 +247,19 @@ test('需要授权：给 warn 标签而不是 danger（它不是故障）', { sk
     })],
   }))
   try {
-    const warn = panel.findAll((node) => node.props['data-tone'] === 'warn')[0]
-    assert.ok(warn !== undefined, `没有警示标签：${JSON.stringify(tagTexts(panel))}`)
-    assert.match(textOf(warn), /需要授权/)
+    const tones = dotTones(panel)
+    // 「需要授权」与「连接中」同为黄色：主题里除红/绿只有一档状态色，而两者都是
+    // 「有一件事在等」—— 区别是前者等用户，后者等服务器。区分靠文字，不靠颜色。
+    assert.ok(tones.includes('warn'), `需要授权应给黄点：${JSON.stringify(tones)}`)
+    assert.match(statusTextOf(panel, 'warn'), /需要授权/)
     // 红色会让人以为服务器坏了 —— 而这恰恰是「需要授权」要避免的误解
-    const danger = panel.findAll((node) => node.props['data-tone'] === 'danger')
-    assert.equal(danger.length, 0, '需要授权不该用 danger 色')
+    assert.ok(!tones.includes('danger'), '需要授权不该用红色')
   } finally {
     panel.restore()
   }
 })
 
-test('需要授权：展开卡片给出下一步，且**不**提供重连按钮', { skip: skipWithoutBundle() }, async () => {
+test('需要授权：展开卡片给出下一步，且菜单里**没有**重连', { skip: skipWithoutBundle() }, async () => {
   const panel = await bootPanel(emptyDoc({
     profileServers: [profileServer()], rowOpsReady: true, reconnectReady: true,
     serverStatus: [statusEntry({
@@ -209,6 +268,8 @@ test('需要授权：展开卡片给出下一步，且**不**提供重连按钮'
     })],
   }))
   try {
+    // 重连治不了缺授权，给这一项等于教用户反复点一个无效操作
+    assert.ok(!openMenuText(panel).includes('重连'), '需要授权时不该出现重连项')
     // 展开这张卡片（收起状态下说明文字不渲染）
     const toggle = panel.findAll((node) => String(node.props.className ?? '').includes('smp-cardToggle'))[0]
     assert.ok(toggle !== undefined, '没有卡片可展开')
@@ -219,8 +280,6 @@ test('需要授权：展开卡片给出下一步，且**不**提供重连按钮'
     assert.match(text, /files:read/)
     // 必须给出可执行的下一步：DSH 的客户端不带 OAuth，只能靠凭据
     assert.match(text, /Authorization/)
-    // 重连治不了缺授权，给按钮等于教用户反复点一个无效操作
-    assert.equal(panel.byText('重连'), null, '需要授权时不该出现重连按钮')
   } finally {
     panel.restore()
   }
@@ -235,8 +294,9 @@ test('已连接时即使带着陈旧的授权挑战也不显示「需要授权�
     })],
   }))
   try {
-    const texts = tagTexts(panel)
-    assert.ok(!texts.includes('需要授权'), `已连接时不该说需要授权：${JSON.stringify(texts)}`)
+    const tones = dotTones(panel)
+    assert.ok(!tones.includes('auth'), `已连接时不该说需要授权：${JSON.stringify(tones)}`)
+    assert.ok(tones.includes('ok'), `已连接应给绿点：${JSON.stringify(tones)}`)
   } finally {
     panel.restore()
   }

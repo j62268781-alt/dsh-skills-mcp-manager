@@ -76,16 +76,20 @@ test('phaseOf：从 fiber.state 推导（不是读不存在的 fiberPhase）', (
   assert.equal(phaseOf({ fiberPhase: 'active' }), '', 'raw entry 上没有 fiberPhase 这个字段')
 })
 
-test('serverRows：两档一起返回、按名字排序、跳过非 MCP 行与分组行', () => {
+test('serverRows：两档一起返回、保持 patch 插入顺序、跳过非 MCP 行与分组行', () => {
+  // 顺序 = patch 里的顺序（= 用户创建的顺序），**不按名字排**。
+  // 按名字排会让新加的服务器窜到最前（哪个名字靠前就顶到 top 1），
+  // 读起来像「它把我的第一台服务器顶掉了」。
   const rows = serverRows([
+    httpRow('mcp-z', 'zeta'),
     httpRow('mcp-b', 'beta', '/p/one'),
     httpRow('mcp-a', 'alpha'),
     { id: 'group', options: { name: MCP, group: true, config: {} } },
     { id: 'other', options: { name: 'some-other-plugin', config: {} } },
     httpRow('mcp-noname', ''),
   ])
-  assert.deepEqual(rows.map((s) => s.serverName), ['alpha', 'beta'])
-  assert.deepEqual(rows.map((s) => s.scope), [GLOBAL_SCOPE, '/p/one'])
+  assert.deepEqual(rows.map((s) => s.serverName), ['zeta', 'beta', 'alpha'], '按 patch 顺序，不按字母序')
+  assert.deepEqual(rows.map((s) => s.scope), [GLOBAL_SCOPE, '/p/one', GLOBAL_SCOPE])
 })
 
 test('scopeCovers：按目录前缀匹配，项目之间不串台', () => {
@@ -156,8 +160,22 @@ test('serverRows 接受 generator —— loader.entries() 就是 generator', () 
   assert.deepEqual(fromGenerator, serverRows([...entries()]), 'generator 与数组结果一致')
 })
 
-test('serverRows 对空/非法输入是空列表，不抛错', () => {
-  assert.deepEqual(serverRows(undefined), [])
+test('新增的服务器排在最后（回归：原先按名字排会窜到 top 1）', () => {
+  // 真实反馈：用户加了 chrome-devtools，它出现在列表**第一位**（"c" 排在
+  // context7/deepwiki 前面），看起来像把原来的第一台挤掉了。
+  // 排序契约是「patch 插入序」，所以后加的必须在末尾。
+  const existing = [httpRow('mcp-context7', 'context7'), httpRow('mcp-deepwiki', 'deepwiki')]
+  const afterAdd = [...existing, httpRow('mcp-chrome-devtools', 'chrome-devtools')]
+  assert.deepEqual(
+    serverRows(afterAdd).map((s) => s.serverName),
+    ['context7', 'deepwiki', 'chrome-devtools'],
+    '新加的在末尾',
+  )
+  // 名字按字母序完全可能排在前面，所以这条断言必须靠顺序而不是巧合
+  assert.ok('chrome-devtools'.localeCompare('context7') < 0, '前提：按字母序它会排最前')
+})
+
+test('serverRows 对空/非法输入是空列表，不抛错', () => {  assert.deepEqual(serverRows(undefined), [])
   assert.deepEqual(serverRows(null), [])
   assert.deepEqual(serverRows([]), [])
   assert.deepEqual(serverRows(42), [])

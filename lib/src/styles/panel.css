@@ -65,6 +65,48 @@
 .smp-tag[data-tone=ok]{background:var(--dsw-alias-state-success-tertiary,var(--dsw-alias-bg-module-platform));color:var(--dsw-alias-state-success-primary,#067647)}
 .smp-tag[data-tone=warn]{background:var(--dsw-alias-state-warn-tertiary,var(--dsw-alias-bg-module-platform));color:var(--dsw-alias-state-warn-primary,#b54708)}
 .smp-tag[data-tone=danger]{background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-state-error-primary,#d92d20);box-shadow:inset 0 0 0 1px var(--dsw-alias-state-error-primary,#d92d20)}
+/* 连接状态：小圆点 + 小号文字（照 Chrome 扩展列表那种形态）。
+   取代了原来的药丸标签：药丸的视觉重量与卡片自己的标签一样重，
+   于是「一切正常」看起来也像个警告，而真正的警告反而混进了装饰里。
+   圆点承担颜色，文字承担含义，权重让开 —— 所以文字取 10px，比正文小一档。 */
+.smp-status{display:inline-flex;align-items:center;gap:5px;font-size:10px;line-height:16px;white-space:nowrap}
+.smp-dot{flex:none;width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-label-tertiary,currentColor)}
+.smp-dot[data-dot=ok]{background:var(--dsw-alias-state-success-primary,#067647)}
+.smp-dot[data-dot=warn]{background:var(--dsw-alias-state-warn-primary,#b54708)}
+.smp-dot[data-dot=danger]{background:var(--dsw-alias-state-error-primary,#d92d20)}
+.smp-dot[data-dot=neutral]{background:var(--dsw-alias-label-tertiary,#9aa4b2)}
+.smp-statusText{color:var(--dsw-alias-label-secondary)}
+/* 数字（工具数 / 剩余时间）退到第三层：它们是佐证，不是状态本身。 */
+.smp-statusMeta{color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary))}
+/* danger 一档的文字要跟上圆点：它出现的场景正是「这个 MCP 已经永久失效、要用户动手」，
+   而这个问题以前在界面上完全不可见（工具凭空消失，没有任何说明）。
+   黄一档不上色：「连接中」是常态，「需要授权」也不是故障，加重它们只会制造噪音。 */
+.smp-status:has(.smp-dot[data-dot=danger]) .smp-statusText{color:var(--dsw-alias-state-error-primary,#d92d20)}
+/* 小号开关：替代「启用 / 停用」两个按钮。
+   按钮只说「点了我做什么」，开关同时说「现在是哪一档」—— 一列卡片扫下来能直接看出
+   哪些是开着的。竖直居中，与它所在行的文字基线对齐。 */
+.smp-switch{box-sizing:border-box;flex:none;width:26px;height:15px;border-radius:999px;border:0;padding:0;cursor:pointer;position:relative;background:var(--dsw-alias-border-l3,#cbd2d9);transition:background .12s ease}
+.smp-switch[data-on=true]{background:var(--dsw-alias-state-success-primary,#067647)}
+.smp-switch:disabled{opacity:.5;cursor:default}
+.smp-switchKnob{position:absolute;top:1.5px;left:1.5px;width:12px;height:12px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.2);transition:transform .12s ease}
+.smp-switch[data-on=true] .smp-switchKnob{transform:translateX(11px)}
+.smp-switch:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}
+/* 「…」+ 竖向菜单：把 重连/编辑/删除 收进一个 popup。
+   三个按钮并排时操作区比它所属的名字还宽，两列网格下会把服务器名挤出视野。
+   菜单让这一行保持安静，而「删除」这种很少用的动作本来就该多一次点击。 */
+.smp-more{position:relative;display:inline-flex;flex:none}
+.smp-moreTrigger{box-sizing:border-box;width:22px;height:22px;border:0;border-radius:var(--dsw-radius-sm);background:0 0;color:var(--dsw-alias-label-secondary);cursor:pointer;font-size:15px;line-height:1;display:inline-flex;align-items:center;justify-content:center;padding:0}
+.smp-moreTrigger:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.smp-moreTrigger:disabled{opacity:.5;cursor:default}
+/* 遮罩挡住页面其余部分的点击：菜单不该在一次无关点击后还开着，
+   否则下一次点击会落在用户没打算打开的菜单项上。 */
+.smp-menuScrim{position:fixed;inset:0;z-index:40}
+.smp-menu{position:absolute;top:calc(100% + 4px);right:0;z-index:41;min-width:104px;padding:4px;display:flex;flex-direction:column;background:var(--dsw-alias-bg-layer-1,#fff);border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);box-shadow:0 6px 20px rgba(0,0,0,.12)}
+.smp-menuItem{box-sizing:border-box;width:100%;text-align:left;border:0;background:0 0;border-radius:var(--dsw-radius-sm);padding:6px 10px;font-size:13px;line-height:18px;color:var(--dsw-alias-label-primary);cursor:pointer;white-space:nowrap}
+.smp-menuItem:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.smp-menuItem:disabled{opacity:.5;cursor:default}
+.smp-menuItem[data-variant=danger]{color:var(--dsw-alias-state-error-primary,#d92d20)}
+.smp-menuError{display:block;padding:4px 10px;font-size:11px;line-height:16px;color:var(--dsw-alias-state-error-primary,#d92d20);white-space:normal;max-width:220px}
 .smp-reconnect{display:inline-flex;align-items:center;gap:6px}
 .smp-reconnect .smp-error{max-width:280px;white-space:normal}
 /* 展开区里的工具清单：数据来自 harness 工具注册表，只读展示。

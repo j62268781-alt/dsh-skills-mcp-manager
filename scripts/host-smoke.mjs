@@ -240,6 +240,25 @@ try {
       config: { serverName: 'smoke-auth', transport: 'streamable-http', url: 'https://auth.smoke.invalid/mcp' },
     },
     fiber: { state: 2 },
+  }, {
+    // A project-scoped row. Both tiers are loader rows now and only `scope` tells them
+    // apart, so this fixture is what proves the status projection splits on that field
+    // instead of assuming "rows are global, entries are project".
+    //
+    // That assumption published every server twice (once per tier), and since the panel
+    // matches a card's status on tier **and** scope, a project row could pick up the
+    // bogus global entry. Without a project row in the fixture the bug is invisible —
+    // which is exactly how it got in.
+    //
+    // `disabled: true` is mandatory for a project row: the Loader only honours `disabled`,
+    // not `scope`, so an enabled one would be connected twice (see src/mcp/serverRows.js).
+    id: 'mcp-smoke-project',
+    disabled: true,
+    options: {
+      name: '@deepseek-ai/dsh-mcp-client',
+      config: { serverName: 'smoke-project', transport: 'streamable-http', url: 'https://project.invalid/mcp', scope: '/p/smoke' },
+    },
+    fiber: { state: 2 },
   }]
   const ctx = {
     logger: { info: noop, warn: noop, error: (...args) => problems.push('host logger.error: ' + args.map(String).join(' ')) },
@@ -395,6 +414,30 @@ try {
   note(smokeStatus?.toolCount === 2, `连接状态带上工具数（收到 ${smokeStatus?.toolCount}，期望 2）`)
   note(smokeStatus?.budgetMs === 151500, `重试预算按客户端默认退避算出（收到 ${smokeStatus?.budgetMs}，期望 151500）`)
   note(live.reconnectReady === true, '发布了重连能力标记，面板据此才显示按钮')
+
+  // Channel 5c-bis: one status row per server, not one per (server × tier).
+  //
+  // Both tiers are loader rows now and `readServers()` returns the whole list, so the
+  // projection must split on each row's own `scope`. Assuming "rows are global, entries
+  // are project" published every server twice, and since the panel matches a card's
+  // status on tier **and** scope, a project row could pick up the bogus global entry —
+  // a status line about a connection that does not exist.
+  const statusKeys = statuses.map((item) => `${item.serverName}\u0000${item.tier}\u0000${item.scope ?? ''}`)
+  note(
+    new Set(statusKeys).size === statusKeys.length,
+    `每台服务器每个档位只发布一条状态（发出 ${statusKeys.length} 条，去重后 ${new Set(statusKeys).size} 条）`,
+  )
+  const projectStatus = statuses.find((item) => item.serverName === 'smoke-project')
+  note(projectStatus !== undefined, '项目级行也发布了状态条目')
+  note(
+    projectStatus?.tier === 'project' && projectStatus?.scope === '/p/smoke',
+    `项目级行按 tier=project + 自己的 scope 发布（收到 tier=${projectStatus?.tier} scope=${projectStatus?.scope}）`,
+  )
+  // The other half of the same bug: a global row must NOT also appear as a project row.
+  note(
+    !statuses.some((item) => item.serverName === 'smoke-server' && item.tier !== 'global'),
+    '全局行不会同时被当成项目级发布',
+  )
 
   // Channel 5d: the probe's own health plus its per-server answers. "No server is down"
   // and "we cannot tell" must never render the same, and the recorded answers are the

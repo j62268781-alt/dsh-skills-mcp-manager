@@ -67,9 +67,9 @@ test('MCP 表单：编辑配置行时回填连接参数，且 command 不被 tar
   const panel = await bootPanel(emptyDoc({ profileServers: [PROFILE_ROW], rowOpsReady: true }))
   const { doc, runtime, byText, find } = panel
   try {
-    // 切到 MCP tab（默认就是），点该行的「编辑」
-    panel.click(find((node) => String(node.props.className ?? '').includes('smp-button')
-      && textOf(node).trim() === '编辑'))
+    // 切到 MCP tab（默认就是），点该行的「…」→「编辑」
+    panel.openMenu()
+    panel.click(byText('编辑'))
     assert.ok(byText('保存到配置行') !== null, '没有进入配置行的编辑态')
 
     // 回填：三个数字来自行配置；command 是原始可执行文件，不是拼好的 target
@@ -100,7 +100,8 @@ test('MCP 表单：编辑配置行时回填连接参数，且 command 不被 tar
     const settled = find((node) => String(node.props.className ?? '').includes('smp-card') && textOf(node).includes('existing'))
     assert.ok(settled !== null, '保存后找不到该行')
     runtime.render()
-    panel.click(find((node) => String(node.props.className ?? '').includes('smp-button') && textOf(node).trim() === '编辑'))
+    panel.openMenu()
+    panel.click(byText('编辑'))
     panel.change(panel.byPlaceholder('10（默认）'), '30')
     panel.click(byText('保存到配置行'))
     op = (doc.rowOps ?? [])[0]
@@ -136,9 +137,11 @@ test('项目级编辑：回填连接字段，并作为**行操作**写入（不�
   }))
   const { doc, findAll, find, byText, change, restore } = panel
   try {
-    const editButtons = findAll((node) => String(node.props.className ?? '').includes('smp-button') && textOf(node).trim() === '编辑')
-    assert.ok(editButtons.length >= 2, `项目级条目没渲染出编辑按钮：${editButtons.length}`)
-    panel.click(editButtons[0])
+    // 每条都该有「…」触发器（编辑/删除收在里面）。开第一条的菜单再点编辑。
+    const triggers = findAll((node) => String(node.props.className ?? '') === 'smp-moreTrigger')
+    assert.ok(triggers.length >= 2, `项目级条目没渲染出操作菜单：${triggers.length}`)
+    panel.openMenu(0)
+    panel.click(byText('编辑'))
 
     // 回填：必须显示已配置的 1000 / 60000 / 60，而不是空（空会显示成 placeholder 500）
     const numbers = findAll((node) => node.type === 'input' && node.props.type === 'number').map((n) => n.props.value)

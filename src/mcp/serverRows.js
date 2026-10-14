@@ -116,7 +116,16 @@ export function phaseOf(entry) {
 }
 
 /**
- * Every MCP row the profile configures, both tiers, in a stable order.
+ * Every MCP row the profile configures, both tiers, in the order the patch lists them.
+ *
+ * **Insertion order, not alphabetical.** The panel is the only place these rows are
+ * managed, so the order a user sees must be the order they created them in — a server
+ * added a minute ago belongs at the end of the list, where they will look for it.
+ * Sorting by name instead made every newly added server jump to the top (whichever name
+ * happened to sort first), which reads as "it replaced my first server".
+ *
+ * Patch order is the stable source of that intent: `insert` entries are appended by
+ * `applyRowOp`, and the Loader reports them in file order.
  *
  * Grouped entries (`options.group !== undefined`) are skipped: they exist for patch
  * indexing, not as servers.
@@ -137,7 +146,6 @@ export function serverRows(ctxLoaderEntries) {
     .filter((entry) => entry?.options?.name === '@deepseek-ai/dsh-mcp-client' && entry.options.group === undefined)
     .map(serverFromRow)
     .filter((server) => server.serverName !== '')
-    .sort((left, right) => left.serverName.localeCompare(right.serverName))
 }
 
 /** Whether a project scope covers a working directory (a scope is a directory prefix). */

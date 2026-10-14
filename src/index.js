@@ -34,7 +34,7 @@ import { projectRootOf, reconcileSkills, scopeRoot } from './skills/reconcile.js
 import { bodyOf, discoverSkills } from './skills/discover.js'
 import { createSkill, deleteSkill, renameSkill, updateSkill, writableRoots } from './skills/write.js'
 import { serverMountConfig, setMountClient, workingDirectoryOf } from './project/mount.js'
-import { projectServersFor, serverRows, serverSetKey } from './mcp/serverRows.js'
+import { GLOBAL_SCOPE, projectServersFor, serverRows, serverSetKey } from './mcp/serverRows.js'
 import { connectionDraftOf } from './mcp/connection.js'
 import { toolsByServer } from './mcp/tools.js'
 import { installShadow, isMcpName, judge, liveToolNames } from './mcp/filter.js'
@@ -846,8 +846,21 @@ export function apply(ctx, config) {
         }
       }
     }
+    // Both tiers are rows now, and `readServers()` returns the whole list — so `rows` and
+    // `entries` are the *same* list, and a row's own `scope` is what says which tier it
+    // belongs to (see src/mcp/serverRows.js).
+    //
+    // Assuming `rows` = global and `entries` = project therefore published every server
+    // twice: once as `tier: 'global'` and once as `tier: 'project'`. The panel matches a
+    // card's status on tier **and** scope, so a project row could pick up the bogus global
+    // entry — a status line about a connection that does not exist. `GLOBAL_SCOPE` is
+    // where the truth lives, so the split is derived from `scope`, never assumed.
+    // `serverRows` normalises an absent scope to `GLOBAL_SCOPE`, so a plain comparison is
+    // enough here — no need to re-derive the default.
+    const byScope = (list) => list.filter((row) => String(row.scope) === GLOBAL_SCOPE)
+    const byProject = (list) => list.filter((row) => String(row.scope) !== GLOBAL_SCOPE)
     const targets = [
-      ...rows.map((row) => ({
+      ...byScope(rows).map((row) => ({
         tier: 'global', scope: '', serverName: String(row.serverName ?? ''),
         enabled: row.enabled !== false, expected: true, source: row,
         // The Loader's own verdict, which is what makes "activation failed" a fact
@@ -856,7 +869,7 @@ export function apply(ctx, config) {
         // The auth probe needs the connection parameters, which only the row carries.
         probeTarget: { transport: row.transport, url: row.target, headers: row.headersText },
       })),
-      ...entries.map((entry) => ({
+      ...byProject(entries).map((entry) => ({
         tier: 'project', scope: String(entry.scope ?? ''), serverName: String(entry.serverName ?? ''),
         enabled: entry.enabled !== false,
         expected: expected.has(entry.serverName),

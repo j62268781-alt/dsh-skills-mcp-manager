@@ -219,6 +219,19 @@ export async function bootPanel(doc = emptyDoc()) {
     node.props.onClick({})
     runtime.render()
   }
+  /**
+   * Click a card's `…` trigger and return the popup element, or null.
+   *
+   * 重连/编辑/删除 都收进了 popup，所以任何针对它们的断言都必须先开菜单。这个助手
+   * 存在的意义是别让每个测试各写一遍「找到第 N 个触发器」的位置式查找 —— 那种写法
+   * 在卡片顺序变化时会静默指向另一张卡片。
+   */
+  const openMenu = (index = 0) => {
+    const triggers = findAll((node) => String(node.props.className ?? '') === 'smp-moreTrigger')
+    if (triggers.length <= index) return null
+    click(triggers[index])
+    return find((node) => String(node.props.className ?? '') === 'smp-menu')
+  }
   const change = (node, value) => {
     assert.ok(node?.props?.onChange, '找不到可输入的节点')
     node.props.onChange({ target: { value } })
@@ -272,5 +285,5 @@ export async function bootPanel(doc = emptyDoc()) {
     delete globalThis.location
   }
 
-  return { doc, runtime, find, findAll, byClass, byText, byPlaceholder, click, change, toggle, text, restore }
+  return { doc, runtime, find, findAll, byClass, byText, byPlaceholder, click, change, toggle, text, openMenu, restore }
 }
