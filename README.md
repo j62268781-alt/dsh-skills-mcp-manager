@@ -145,6 +145,7 @@ npm run deploy     # 拷贝进 profile；部署前先跑加载冒烟，失败则
   | 表单里填的 | 落到 config 的 | 默认值 | 作用 |
   |---|---|---|---|
   | 连不上时拒绝激活 | `failOnStartupError` | `false` | 勾上后：首次连接或工具同步失败会让插件激活失败（不勾则照常启动，只是没有该服务器的工具） |
+  | 工具调用超时（ms） | `toolCallTimeoutMs` | `60000` | 单次 `tools/call` 的超时。导入/分析这类**分钟级**操作会被默认 60 秒打断（本机实测一次 Ghidra 导入+全量分析约 **158 秒**），按需调大 |
   | 重连首次延迟（ms） | `reconnect.initialDelayMs` | `500` | 第一次重连等待多久，之后逐次翻倍 |
   | 重连最大延迟（ms） | `reconnect.maxDelayMs` | `30000` | 退避延迟的上限 |
   | 重连最大次数 | `reconnect.maxAttempts` | `10` | 单次断线最多连续尝试几次，超出则放弃 |

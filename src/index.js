@@ -80,6 +80,8 @@ const Server = z.object({
   reconnectInitialDelayMs: z.string().default(''),
   reconnectMaxDelayMs: z.string().default(''),
   reconnectMaxAttempts: z.string().default(''),
+  /** Per-call tool timeout for this server ('' = the client's own default). */
+  toolCallTimeoutMs: z.string().default(''),
   enabled: z.boolean().default(true),
 })
 
@@ -118,6 +120,8 @@ const ProfileRow = z.object({
   reconnectInitialDelayMs: z.string().default(''),
   reconnectMaxDelayMs: z.string().default(''),
   reconnectMaxAttempts: z.string().default(''),
+  /** Per-call tool timeout for this server ('' = the client's own default). */
+  toolCallTimeoutMs: z.string().default(''),
   enabled: z.boolean().default(true),
   phase: z.string().default(''),
 })
@@ -142,6 +146,8 @@ const RowOp = z.object({
   reconnectInitialDelayMs: z.string().default(''),
   reconnectMaxDelayMs: z.string().default(''),
   reconnectMaxAttempts: z.string().default(''),
+  /** Per-call tool timeout for this server ('' = the client's own default). */
+  toolCallTimeoutMs: z.string().default(''),
   /**
    * update: whether the user actually edited the connection fields.
    *

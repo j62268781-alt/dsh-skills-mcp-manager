@@ -17,6 +17,7 @@ export const CONNECTION_BOUNDS = Object.freeze({
   initialDelayMs: Object.freeze({ min: 1, max: 2147483647 }),
   maxDelayMs: Object.freeze({ min: 1, max: 2147483647 }),
   maxAttempts: Object.freeze({ min: 1, max: Number.MAX_SAFE_INTEGER }),
+  toolCallTimeoutMs: Object.freeze({ min: 1, max: 2147483647 }),
 })
 
 /** What the client applies when a field is absent (the form shows these as hints). */
@@ -25,6 +26,7 @@ export const CONNECTION_DEFAULTS = Object.freeze({
   initialDelayMs: 500,
   maxDelayMs: 30000,
   maxAttempts: 10,
+  toolCallTimeoutMs: 60000,
 })
 
 /**
@@ -78,6 +80,19 @@ function reconnectNumber(value, field) {
  * `failOnStartupError` stays conditional: `false` is the client's default *and* the absence of
  * the key means the same thing, so writing it would only add noise to every row.
  */
+/** Parse one top-level config number: blank means "keep the client default". */
+function topLevelNumber(value, label) {
+  const text = typeof value === 'string' ? value.trim() : String(value ?? '').trim()
+  if (text === '') return undefined
+  if (!/^\d+$/.test(text)) throw new Error(`${label} 必须是整数（收到「${text}」）`)
+  const parsed = Number(text)
+  const { min, max } = CONNECTION_BOUNDS[label]
+  if (parsed < min || parsed > max) {
+    throw new Error(`${label} 必须在 ${min}–${max} 之间（收到「${text}」）`)
+  }
+  return parsed
+}
+
 export function connectionFields(source) {
   const out = {}
   if (source?.failOnStartupError === true) out.failOnStartupError = true
@@ -90,6 +105,16 @@ export function connectionFields(source) {
     reconnect[configField] = parsed
   }
   out.reconnect = reconnect
+  /**
+   * `toolCallTimeoutMs` is a **top-level** config key (not inside `reconnect`), and it follows
+   * the same rule as the reconnect numbers: a value the user set wins, otherwise the client's
+   * own default is written explicitly. See `CONNECTION_DRAFT_DEFAULTS` for the matching form
+   * prefill — the form and this function have to agree, or the input shows one number while
+   * another one is stored.
+   */
+  const toolCallTimeoutMs = topLevelNumber(source?.toolCallTimeoutMs, 'toolCallTimeoutMs')
+    ?? CONNECTION_DEFAULTS.toolCallTimeoutMs
+  out.toolCallTimeoutMs = toolCallTimeoutMs
   return out
 }
 
@@ -111,5 +136,11 @@ export function connectionDraftOf(config) {
       ? String(value)
       : String(CONNECTION_DEFAULTS[configField])
   }
+  // Same rule as the reconnect numbers above: a row that does not set it reads back as the
+  // client's default, so the form never shows an empty box for a value that is in force.
+  const timeout = config?.toolCallTimeoutMs
+  out.toolCallTimeoutMs = typeof timeout === 'number' && Number.isFinite(timeout)
+    ? String(timeout)
+    : String(CONNECTION_DEFAULTS.toolCallTimeoutMs)
   return out
 }
