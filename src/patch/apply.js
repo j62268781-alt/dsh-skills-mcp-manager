@@ -246,6 +246,8 @@ export async function applyRowOp(ctx, op) {
       if (op.connectionChanged === true) {
         changed = setRowConfigField(document, op.entryId, 'failOnStartupError', connection.failOnStartupError === true ? true : null) || changed
         changed = setRowConfigField(document, op.entryId, 'reconnect', connection.reconnect ?? null) || changed
+        // 顶层键，和上面两个一样只在「用户确实改过」时写；空值=清键回客户端默认。
+        changed = setRowConfigField(document, op.entryId, 'toolCallTimeoutMs', connection.toolCallTimeoutMs ?? null) || changed
       }
     }
     if (!changed) throw new Error(`row "${op.entryId}" not found in the profile patch`)
