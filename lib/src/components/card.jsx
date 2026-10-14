@@ -109,9 +109,23 @@ export function rowDetailPairs(row = {}) {
       url: transport === 'stdio' ? '' : (row.target || ''),
       headers: row.headersText ?? '',
     }),
-    ['范围', '全局（配置文件行）'],
+    // The scope *is* the tier now: `global` means the Loader connects this row and every
+    // agent sees it; an absolute path means this plugin mounts it for the agent whose
+    // working directory falls under it. One row, one list — so the card states which.
+    ['作用域', scopeLabelOf(row.scope)],
     ['状态', row.enabled === false ? '已停用' : '已启用'],
   ]
+}
+
+/**
+ * A row's scope as the card should read it.
+ *
+ * `global` (or a missing value) is the every-agent case; anything else is a project path.
+ */
+export function scopeLabelOf(scope) {
+  const value = typeof scope === 'string' ? scope : ''
+  if (value === '' || value === 'global') return '全局（所有工作区）'
+  return `工作区：${value}`
 }
 
 /** Detail pairs for a project-level entry (managed by the panel itself). */

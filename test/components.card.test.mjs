@@ -85,11 +85,20 @@ test('rowDetailPairs：http 行只给地址，不出现命令/参数/环境变�
   assert.equal(map['行 id'], 'mcp-context7')
   assert.equal(map['地址'], 'https://mcp.context7.com/mcp')
   assert.equal(map['状态'], '已启用')
-  assert.equal(map['范围'], '全局（配置文件行）')
+  // 「范围」改成「作用域」并带上真实值：两档统一成一个列表之后，卡片本身必须说清
+  // 这台服务器对谁可用（全局 / 某个工作区），否则用户无从分辨。
+  assert.equal(map['作用域'], '全局（所有工作区）')
   // 无关字段整条省略，而不是显示占位符
   assert.ok(!('命令' in map), 'http 行不该出现「命令」')
   assert.ok(!('参数' in map), 'http 行不该出现「参数」')
   assert.ok(!('环境变量' in map), 'http 行不该出现「环境变量」')
+})
+
+test('rowDetailPairs：带 scope 的行把作用域显示为工作区路径', () => {
+  const map = Object.fromEntries(rowDetailPairs({
+    entryId: 'mcp-gitnexus', transport: 'streamable-http', target: 'http://x/mcp', scope: '/p/tcl', enabled: true,
+  }))
+  assert.equal(map['作用域'], '工作区：/p/tcl')
 })
 
 test('rowDetailPairs：http 行有请求头才显示，且已打码', () => {

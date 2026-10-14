@@ -10,6 +10,9 @@ import { HINTS } from './form.js'
 export function filterRow({
   query, onQuery, project, projectChoices = [], customProject = false,
   onCustomProject, onProject, placeholder,
+  // The MCP tab hides the project switch (scope moved into the server form) and puts its
+  // own action in the freed space — that slot is where 「添加服务器」 lives now.
+  showProject = true, actions = null,
 }) {
   return (
     <div className="smp-filterRow" key="filter">
@@ -31,7 +34,9 @@ export function filterRow({
         />
       </div>
 
-      {customProject ? (
+      {actions}
+
+      {!showProject ? null : customProject ? (
         <input
           className="smp-projectInput"
           key="custom"
@@ -60,14 +65,14 @@ export function filterRow({
         </select>
       )}
 
-      {customProject ? (
+      {!showProject || !customProject ? null : (
         <button
           className="smp-button" data-variant="outline" key="back"
           onClick={() => onCustomProject(false)}
         >
           选工作区
         </button>
-      ) : null}
+      )}
     </div>
   )
 }
