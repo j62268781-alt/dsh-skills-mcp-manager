@@ -42,7 +42,9 @@ test('MCP：全局与项目级在同一个列表里，不再分两个区块', { 
   const panel = await boot()
   try {
     const t = shortTexts(panel)
-    assert.ok(t.some((x) => x.includes('MCP 服务器')), `没有统一的列表标题：${JSON.stringify(t.slice(0, 20))}`)
+    // No section heading any more: the list follows the import card directly, and the
+    // summary line lives above the search box.
+    assert.ok(!t.some((x) => x.includes('MCP 服务器')), `不该再有区块标题：${JSON.stringify(t.slice(0, 20))}`)
     assert.ok(!t.includes('全局 MCP'), '不该再有「全局 MCP」这个分区')
     assert.ok(!t.includes('项目级 MCP'), '不该再有「项目级 MCP」这个分区')
     // 两档都在同一列表里

@@ -27,17 +27,18 @@
 .smp-projectInput{box-sizing:border-box;flex:0 1 220px;min-width:150px;height:36px;font:inherit;font-size:13px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-md);padding:0 12px}
 .smp-projectSelect[data-placeholder=true]{color:var(--dsw-alias-label-tertiary)}
 .smp-projectSelect{box-sizing:border-box;flex:0 1 240px;min-width:170px;height:36px;font:inherit;font-size:13px;color:var(--dsw-alias-label-primary);background-color:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-md);appearance:none;-webkit-appearance:none;padding:0 30px 0 10px;background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M4 6.5 8 10.5 12 6.5' stroke='%238b8f99' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center;background-size:14px}
-.smp-group{flex-direction:column;gap:10px;display:flex;border-top:.5px solid var(--dsw-alias-border-l2);padding-top:14px}
+.smp-group{flex-direction:column;gap:10px;display:flex;border-top:.5px solid var(--dsw-alias-border-l2);padding-top:0}
 .smp-group:first-of-type{border-top:0;padding-top:0}
 .smp-groupTitleRow{align-items:center;gap:8px;min-height:36px;display:flex}
 .smp-groupToggle{color:inherit;font:inherit;text-align:left;cursor:pointer;background:none;border:0;flex:none;align-items:center;gap:8px;padding:0;display:flex}
 .smp-groupTitle{color:var(--dsw-alias-label-primary);font-size:14px;font-weight:400;line-height:22px}
 .smp-groupSub{color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums;flex-wrap:wrap;row-gap:4px;margin:-6px 0 0 20px;font-size:12px;line-height:18px;display:flex}
+.smp-summaryAbove{margin:0}
 .smp-chevron{color:var(--dsw-alias-label-tertiary);flex:none;transition:transform .14s ease-in-out}
 .smp-chevron[data-open=false]{transform:rotate(-90deg)}
 /* Rows follow the Models settings page: one column list, head row with the
    actions pinned right, and an open body that can hold arbitrarily long text. */
-.smp-cards{flex-direction:column;gap:8px;margin:12px 0 0;padding:0;list-style:none;display:flex}
+.smp-cards{flex-direction:column;gap:14px;margin:0;padding:0;list-style:none;display:flex}
 .smp-card{border:.5px solid var(--dsw-alias-settings-card-stroke);background:var(--dsw-alias-settings-card-fill);border-radius:var(--dsw-radius-xl);flex-direction:column;gap:4px;padding:12px 14px;min-width:0;display:flex}
 .smp-cardHead+.smp-cardDescription{margin-top:0}
 .smp-cardHead{align-items:center;gap:10px;min-width:0;display:flex}
