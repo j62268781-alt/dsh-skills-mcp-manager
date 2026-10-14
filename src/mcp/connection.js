@@ -17,6 +17,7 @@ export const CONNECTION_BOUNDS = Object.freeze({
   initialDelayMs: Object.freeze({ min: 1, max: 2147483647 }),
   maxDelayMs: Object.freeze({ min: 1, max: 2147483647 }),
   maxAttempts: Object.freeze({ min: 1, max: Number.MAX_SAFE_INTEGER }),
+  toolCallTimeoutMs: Object.freeze({ min: 1, max: 2147483647 }),
 })
 
 /** What the client applies when a field is absent (the form shows these as hints). */
@@ -25,6 +26,7 @@ export const CONNECTION_DEFAULTS = Object.freeze({
   initialDelayMs: 500,
   maxDelayMs: 30000,
   maxAttempts: 10,
+  toolCallTimeoutMs: 60000,
 })
 
 /**
@@ -59,6 +61,19 @@ function reconnectNumber(value, field) {
  * and the written YAML stays free of keys that only restate them. `reconnect` is
  * a set: a blank number is omitted, and all three blank omit the whole block.
  */
+/** Parse one top-level config number: blank means "keep the client default". */
+function topLevelNumber(value, label) {
+  const text = typeof value === 'string' ? value.trim() : String(value ?? '').trim()
+  if (text === '') return undefined
+  if (!/^\d+$/.test(text)) throw new Error(`${label} 必须是整数（收到「${text}」）`)
+  const parsed = Number(text)
+  const { min, max } = CONNECTION_BOUNDS[label]
+  if (parsed < min || parsed > max) {
+    throw new Error(`${label} 必须在 ${min}–${max} 之间（收到「${text}」）`)
+  }
+  return parsed
+}
+
 export function connectionFields(source) {
   const out = {}
   if (source?.failOnStartupError === true) out.failOnStartupError = true
@@ -68,6 +83,8 @@ export function connectionFields(source) {
     if (parsed !== undefined) reconnect[configField] = parsed
   }
   if (Object.keys(reconnect).length > 0) out.reconnect = reconnect
+  const toolCallTimeoutMs = topLevelNumber(source?.toolCallTimeoutMs, 'toolCallTimeoutMs')
+  if (toolCallTimeoutMs !== undefined) out.toolCallTimeoutMs = toolCallTimeoutMs
   return out
 }
 
@@ -79,5 +96,7 @@ export function connectionDraftOf(config) {
     const value = reconnect[configField]
     out[panelField] = typeof value === 'number' && Number.isFinite(value) ? String(value) : ''
   }
+  const timeout = config?.toolCallTimeoutMs
+  out.toolCallTimeoutMs = typeof timeout === 'number' && Number.isFinite(timeout) ? String(timeout) : ''
   return out
 }
