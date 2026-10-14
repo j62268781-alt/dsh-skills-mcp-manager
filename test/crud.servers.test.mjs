@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   addServerOp, connectionChanged, connectionDraft, deleteServerOp, draftFromRow, envChanged, headersChanged,
-  inflightKeyForRow, removeProjectEntry, replaceProjectEntry, rowEntryId, toggleServerOp, updateServerOp,
+  inflightKeyForRow, rowEntryId, toggleServerOp, updateServerOp,
 } from '../lib/src/crud/servers.js'
 
 test('rowEntryId / inflightKeyForRow：id 与投影 entryId 的对应', () => {
@@ -98,14 +98,6 @@ test('addServerOp / updateServerOp：带上连接策略字段', () => {
   const plain = addServerOp({ serverName: 'x' })
   assert.equal(plain.failOnStartupError, false)
   assert.equal(plain.reconnectMaxAttempts, '')
-})
-
-test('replaceProjectEntry / removeProjectEntry：按身份替换与删除', () => {
-  const a = { serverName: 'a' }
-  const b = { serverName: 'b' }
-  const servers = [a, b]
-  assert.deepEqual(replaceProjectEntry(servers, a, { serverName: 'a2' })[0], { serverName: 'a2' })
-  assert.deepEqual(removeProjectEntry(servers, a), [b])
 })
 
 test('draftFromRow：http 行回填请求头，否则一次「只改 URL」会删掉鉴权头', () => {

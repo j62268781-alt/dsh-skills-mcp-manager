@@ -12,11 +12,18 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { bootPanel, emptyDoc, skipWithoutBundle, textOf } from '../scripts/lib/client-harness.mjs'
 
+/**
+ * A project-scoped row, in the shape the Host now projects from `mcp-client` rows.
+ *
+ * This used to be a `config.servers` entry: project servers lived in a field the plugin
+ * owned, while global ones were rows in the profile patch. Both tiers are rows now, and
+ * `scope` is the only difference — so the fixture is a row, not a bespoke object.
+ */
 const project = (over = {}) => ({
-  scope: '/p/tcl', id: 'gitnexus', serverName: 'gitnexus', transport: 'streamable-http',
-  url: 'http://x/mcp/coding', command: '', args: [], env: '', runtime: 'auto', source: '',
-  headers: '', failOnStartupError: false, reconnectInitialDelayMs: '1000',
-  reconnectMaxDelayMs: '', reconnectMaxAttempts: '', enabled: true, ...over,
+  entryId: 'mcp-gitnexus', scope: '/p/tcl', serverName: 'gitnexus', transport: 'streamable-http',
+  target: 'http://x/mcp/coding', command: '', args: '', env: '', headersText: '',
+  failOnStartupError: false, reconnectInitialDelayMs: '1000',
+  reconnectMaxDelayMs: '', reconnectMaxAttempts: '', enabled: true, phase: 'active', ...over,
 })
 
 const statusEntry = (over = {}) => ({
@@ -29,7 +36,7 @@ const tagTexts = (panel) => panel.findAll((node) => String(node.props.className 
 
 test('状态标签：已放弃重试时给出显眼的 danger 标签', { skip: skipWithoutBundle() }, async () => {
   const panel = await bootPanel(emptyDoc({
-    servers: [project()], currentWorkspace: '/p/tcl', rowOpsReady: true, reconnectReady: true,
+    profileServers: [project()], currentWorkspace: '/p/tcl', rowOpsReady: true, reconnectReady: true,
     serverStatus: [statusEntry()],
   }))
   try {
@@ -44,7 +51,7 @@ test('状态标签：已放弃重试时给出显眼的 danger 标签', { skip: s
 
 test('状态标签：未连接但仍在重试时给警示色，并标出预计剩余', { skip: skipWithoutBundle() }, async () => {
   const panel = await bootPanel(emptyDoc({
-    servers: [project()], currentWorkspace: '/p/tcl', rowOpsReady: true, reconnectReady: true,
+    profileServers: [project()], currentWorkspace: '/p/tcl', rowOpsReady: true, reconnectReady: true,
     serverStatus: [statusEntry({ status: 'retrying', elapsedMs: 60000, remainingSeconds: 121 })],
   }))
   try {
@@ -61,7 +68,7 @@ test('状态标签：未连接但仍在重试时给警示色，并标出预计�
 
 test('状态标签：已连接显示工具数', { skip: skipWithoutBundle() }, async () => {
   const panel = await bootPanel(emptyDoc({
-    servers: [project()], currentWorkspace: '/p/tcl', rowOpsReady: true, reconnectReady: true,
+    profileServers: [project()], currentWorkspace: '/p/tcl', rowOpsReady: true, reconnectReady: true,
     serverStatus: [statusEntry({ status: 'connected', toolCount: 12, elapsedMs: 0 })],
   }))
   try {
@@ -75,7 +82,7 @@ test('状态标签：已连接显示工具数', { skip: skipWithoutBundle() }, a
 
 test('状态标签：停用的条目不显示连接状态', { skip: skipWithoutBundle() }, async () => {
   const panel = await bootPanel(emptyDoc({
-    servers: [project({ enabled: false })], currentWorkspace: '/p/tcl', rowOpsReady: true, reconnectReady: true,
+    profileServers: [project({ enabled: false })], currentWorkspace: '/p/tcl', rowOpsReady: true, reconnectReady: true,
     serverStatus: [statusEntry({ status: 'connected', toolCount: 3 })],
   }))
   try {
@@ -89,7 +96,7 @@ test('状态标签：停用的条目不显示连接状态', { skip: skipWithoutB
 
 test('重连按钮：点了会把请求写进设置（带 tier/scope/nonce）', { skip: skipWithoutBundle() }, async () => {
   const panel = await bootPanel(emptyDoc({
-    servers: [project()], currentWorkspace: '/p/tcl', rowOpsReady: true, reconnectReady: true,
+    profileServers: [project()], currentWorkspace: '/p/tcl', rowOpsReady: true, reconnectReady: true,
     serverStatus: [statusEntry()],
   }))
   const { doc } = panel
@@ -108,7 +115,7 @@ test('重连按钮：点了会把请求写进设置（带 tier/scope/nonce）', 
 
 test('重连按钮：已连接时不给（没什么可重连的）', { skip: skipWithoutBundle() }, async () => {
   const panel = await bootPanel(emptyDoc({
-    servers: [project()], currentWorkspace: '/p/tcl', rowOpsReady: true, reconnectReady: true,
+    profileServers: [project()], currentWorkspace: '/p/tcl', rowOpsReady: true, reconnectReady: true,
     serverStatus: [statusEntry({ status: 'connected', toolCount: 5 })],
   }))
   try {
@@ -120,7 +127,7 @@ test('重连按钮：已连接时不给（没什么可重连的）', { skip: ski
 
 test('重连按钮：Host 不支持时不给（避免点了没反应）', { skip: skipWithoutBundle() }, async () => {
   const panel = await bootPanel(emptyDoc({
-    servers: [project()], currentWorkspace: '/p/tcl', rowOpsReady: true,
+    profileServers: [project()], currentWorkspace: '/p/tcl', rowOpsReady: true,
     serverStatus: [statusEntry()],
   }))
   try {
@@ -132,7 +139,7 @@ test('重连按钮：Host 不支持时不给（避免点了没反应）', { skip
 
 test('状态标签：观测机制不可用时显示「状态未知」，而不是静默留白', { skip: skipWithoutBundle() }, async () => {
   const panel = await bootPanel(emptyDoc({
-    servers: [project()], currentWorkspace: '/p/tcl', rowOpsReady: true, reconnectReady: true,
+    profileServers: [project()], currentWorkspace: '/p/tcl', rowOpsReady: true, reconnectReady: true,
     serverStatus: [statusEntry({ status: 'unknown' })],
   }))
   try {

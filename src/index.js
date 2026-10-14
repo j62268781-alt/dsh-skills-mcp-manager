@@ -26,14 +26,15 @@ import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { commandEnv, parseEnv, resolveCommand, setHomeResolver, spawnEnv, splitArgs } from './runtime/env.js'
 import * as mcpClient from '@deepseek-ai/dsh-mcp-client'
 import { withFileLock, writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
-import { applyRowOp, setPatchIO } from './patch/apply.js'
+import { applyRowOp, migrateServerEntries, setPatchIO } from './patch/apply.js'
 import { IMPORT_SOURCES, adaptImportedEntry, envLines, headerLines, importFilePath, parseJsonLoose } from './import/sources.js'
 import { scanImportSource } from './import/scan.js'
 import { beat, beatFile } from './diagnostics/heartbeat.js'
 import { projectRootOf, reconcileSkills, scopeRoot } from './skills/reconcile.js'
 import { bodyOf, discoverSkills } from './skills/discover.js'
 import { createSkill, deleteSkill, renameSkill, updateSkill, writableRoots } from './skills/write.js'
-import { mountedKeyOf, projectServersFor, serverMountConfig, setMountClient, workingDirectoryOf } from './project/mount.js'
+import { serverMountConfig, setMountClient, workingDirectoryOf } from './project/mount.js'
+import { projectServersFor, serverRows, serverSetKey } from './mcp/serverRows.js'
 import { connectionDraftOf } from './mcp/connection.js'
 import { toolsByServer } from './mcp/tools.js'
 import { installShadow, isMcpName, judge, liveToolNames } from './mcp/filter.js'
@@ -139,6 +140,13 @@ const RowOp = z.object({
   connectionChanged: z.boolean().default(false),
   /** toggle: the desired enabled state of the row. */
   enabled: z.boolean().default(true),
+  /**
+   * add/update: the row's tier. `global` (or empty) leaves the key off, which is what a
+   * row without a `scope` already means — so existing rows stay valid untouched.
+   */
+  scope: z.string().default(''),
+  /** update: whether the user actually changed the tier (blank = leave it alone). */
+  scopeChanged: z.boolean().default(false),
 })
 
 setHomeResolver(resolveDshHome)
@@ -482,36 +490,37 @@ function loaderOf(ctx) {
   }
 }
 
+/**
+ * The panel's view of every configured server, in the form its forms need.
+ *
+ * Built on {@link serverRows} so there is exactly one projection from rows to servers —
+ * the panel used to receive a differently-shaped object than the mount path did, from a
+ * different source (rows for global, `config.servers` for project), which is how the two
+ * tiers drifted apart in the first place.
+ *
+ * `args`/`env`/`headersText` are the *form* shapes (one string, one `KEY=VALUE` per line);
+ * `scope` travels with the row so the panel can split one list into its two tabs instead of
+ * merging two arrays.
+ */
 function configuredMcpRows(ctx) {
   const loader = loaderOf(ctx)
   if (loader === null || typeof loader.entries !== 'function') return { loaderFound: false, rows: [] }
   try {
-    const rows = [...(loader.entries() ?? [])]
-      .filter((entry) => entry?.options?.name === '@deepseek-ai/dsh-mcp-client' && entry.options.group === undefined)
-      .map((entry) => {
-        const row = entry.options.config ?? {}
-        const args = Array.isArray(row.args) ? row.args.map((arg) => String(arg)) : []
-        const envMap = row.env !== null && typeof row.env === 'object' && !Array.isArray(row.env) ? row.env : {}
-        // http 行的鉴权头：面板要能回填，否则一次「只改 URL」的保存会把已配好的
-        // Authorization 静默删掉（与 env 同理）。按 KEY=VALUE 交给表单。
-        const headersMap = row.headers !== null && typeof row.headers === 'object' && !Array.isArray(row.headers) ? row.headers : {}
-        return {
-          entryId: String(entry.id),
-          serverName: typeof row.serverName === 'string' ? row.serverName : '',
-          transport: typeof row.transport === 'string' ? row.transport : 'streamable-http',
-          target: typeof row.url === 'string' && row.url !== ''
-            ? row.url
-            : [typeof row.command === 'string' ? row.command : '', ...args].filter((part) => part !== '').join(' '),
-          command: typeof row.command === 'string' ? row.command : '',
-          args: args.join(' '),
-          env: Object.entries(envMap).map(([key, value]) => `${key}=${String(value)}`).join('\n'),
-          headersText: Object.entries(headersMap).map(([key, value]) => `${key}=${String(value)}`).join('\n'),
-          // Connection policy travels with the row so 编辑 can show what is set.
-          ...connectionDraftOf(row),
-          enabled: !entry.disabled,
-          phase: phaseOf(entry),
-        }
-      })
+    const rows = serverRows([...(loader.entries() ?? [])]).map((server) => ({
+      entryId: server.entryId,
+      serverName: server.serverName,
+      scope: server.scope,
+      transport: server.transport,
+      target: server.target,
+      command: server.command,
+      args: server.args.join(' '),
+      env: Object.entries(server.env).map(([key, value]) => `${key}=${String(value)}`).join('\n'),
+      headersText: Object.entries(server.headers).map(([key, value]) => `${key}=${String(value)}`).join('\n'),
+      // Connection policy travels with the row so 编辑 can show what is set.
+      ...connectionDraftOf(server),
+      enabled: server.enabled,
+      phase: server.phase,
+    }))
     return { loaderFound: true, rows }
   } catch (error) {
     return { loaderFound: true, rows: [], error: String(error?.message ?? error) }
@@ -552,7 +561,20 @@ function configuredServerNames(ctx, memoryServers = []) {
  * at `agent/created`, which is how the shipped client scopes tools per agent.
  */
 export function apply(ctx, config) {
-  const readServers = () => config?.servers?.get?.() ?? config?.servers ?? []
+  /**
+   * Every configured MCP server, from the profile patch's `mcp-client` rows.
+   *
+   * Both tiers come from here now. This used to read `config.servers`, a field this plugin
+   * owned, while the global tier lived in rows — the same feature stored two ways, with the
+   * panel merging two arrays to render one list and a scope-less registry read unable to
+   * see project tools at all. Rows are the single source of truth; `scope` is the only
+   * difference between the tiers (see `src/mcp/serverRows.js`).
+   */
+  // `entries()` is a **generator**, not an array: passing it straight to `serverRows`
+  // (which requires an array) silently produced an empty list — every server looked
+  // unconfigured, while the projection right next to it, which spreads first, saw all of
+  // them. Spread here too, and never assume `Array.isArray` on a loader return value.
+  const readServers = () => serverRows([...(loaderOf(ctx)?.entries?.() ?? [])])
   const readSkills = () => config?.skills?.get?.() ?? config?.skills ?? []
   const readFilters = () => config?.toolFilters?.get?.() ?? config?.toolFilters ?? {}
 
@@ -580,6 +602,17 @@ export function apply(ctx, config) {
    * server. The set changes only when a row is added or removed, so it is refreshed
    * on the same slow tick that publishes the projection instead.
    */
+  /**
+   * The one-time server migration's outcome, published on the heartbeat.
+   *
+   * It has silently done nothing twice now — once because the field it reads looked empty,
+   * once because the timer never ran — and both times the only symptom was "nothing
+   * changed", which is indistinguishable from "nothing to do". So the outcome is a visible
+   * field, the same technique that made the route installation and the entry rename
+   * diagnosable.
+   */
+  const serverMigrationState = { status: 'pending', reason: '', migrated: 0, source: 0 }
+
   let filterServerNames = []
   const refreshFilterServers = (memoryServers) => {
     filterServerNames = configuredServerNames(ctx, memoryServers)
@@ -905,8 +938,6 @@ export function apply(ctx, config) {
   /** Nonce of the last skill write we executed (the panel polls by changing it). */
   let seenSkillNonce = ''
 
-  let stops = []
-  let mountedKey = null
   let committedServers = []
   let committedServersKey = null
   let skillsKey = null
@@ -945,20 +976,18 @@ export function apply(ctx, config) {
     sink.length = 0
   }
 
-  /** Global tier: the root scope, so every agent inherits the tools. */
-  const mountGlobal = (servers) => {
-    unmount(stops)
-    const root = ctx.root && ctx.root !== ctx ? ctx.root : ctx
-    for (const server of servers) {
-      if (server.scope !== 'global' || server.enabled === false) continue
-      mountInto(root, server, stops, 'root scope')
-    }
-  }
-
-  /** Project tier: one agent's scope, re-derived whenever that agent or the config changes. */
+  /**
+   * Project tier: one agent's scope, re-derived whenever that agent or the config changes.
+   *
+   * There is no `mountGlobal` any more. Global rows are ordinary `mcp-client` rows, so the
+   * Loader connects them itself; mounting them here as well would connect every server
+   * twice — two clients, two tool generations, one namespace. What remains is the part only
+   * this plugin can do: deciding which *project* rows belong to which agent, which no row
+   * can express (a row is loaded once, and `!!js` sees no working directory).
+   */
   const mountForAgent = (agent, entry) => {
     const desired = projectServersFor(committedServers, entry.cwd)
-    const key = JSON.stringify(desired)
+    const key = serverSetKey(desired)
     if (entry.key === key) return
     unmount(entry.stops)
     for (const server of desired) mountInto(agent.ctx, server, entry.stops, `agent scope ${entry.cwd}`)
@@ -1021,6 +1050,75 @@ export function apply(ctx, config) {
   }
 
   ctx.inject(['settings'], (inner) => {
+    /**
+     * One-time migration: this plugin's own `config.servers` entries become rows.
+     *
+     * Project servers used to live in a field this plugin owned while global ones were
+     * rows — the same feature stored two ways, which is why the panel had to merge two
+     * arrays into one list and a scope-less registry read could not see project tools at
+     * all. Both tiers are rows now; this moves the leftovers and then clears the field, so
+     * exactly one source remains.
+     *
+     * Runs after a short delay: the startup projection writes the same patch file, and the
+     * two would contend for its lock. Only a non-empty field triggers it, and it is a no-op
+     * once the field is cleared.
+     */
+    inner.effect(() => {
+      /**
+       * Checked on a recurring tick, **not** on a one-shot `setTimeout`.
+       *
+       * A one-shot timer here never survived: `publish()` writes the patch immediately on
+       * startup, `dsh-hmr` reacts by reloading the profile, and the reload disposes this
+       * plugin's effects — clearTimeout() removed the pending migration before it could
+       * fire. The disposal is invisible because the *other* effect in this inject uses
+       * `setInterval`, so a reload simply re-registers it and its side effects continue,
+       * while a one-shot job is lost for good.
+       *
+       * A recurring check has neither problem: it re-arms after every reload, and it is
+       * idempotent (`migrated === 0` once the field is empty, and `migrateServerEntries`
+       * never overwrites an existing row).
+       */
+      const attempt = () => {
+        const legacy = config?.servers?.get?.() ?? config?.servers
+        serverMigrationState.source = Array.isArray(legacy) ? legacy.length : -1
+        if (!Array.isArray(legacy) || legacy.length === 0) {
+          serverMigrationState.status = 'nothing-to-do'
+          return
+        }
+        if (serverMigrationState.status === 'running') return
+        serverMigrationState.status = 'running'
+        Promise.resolve(migrateServerEntries(ctx, legacy))
+          .then((result) => {
+            serverMigrationState.migrated = result.migrated
+            serverMigrationState.status = result.migrated === 0 ? 'already-present' : 'migrated'
+            // Clear the field whenever every entry is accounted for — including when the
+            // rows were already there (`migrated === 0`).
+            //
+            // Returning early on `migrated === 0` left a trap: if the rows landed but this
+            // very write failed (it did once — "timed out waiting for the writer lock"),
+            // the next attempt would find the rows present, report `already-present`, and
+            // never clear the field. The stale entries would then be re-checked on every
+            // tick forever, and the panel would keep showing servers twice (once from the
+            // field, once from the rows).
+            //
+            // Only clearing after the rows are safely on disk is still the rule: the write
+            // above has already succeeded by the time we get here.
+            return Promise.resolve(inner.settings.update(name, { servers: [] }))
+              .then(() => ctx.logger.info('dsh-skills-mcp-manager: %d panel server(s) moved into profile rows', result.migrated))
+          })
+          .catch((error) => {
+            serverMigrationState.status = 'failed'
+            serverMigrationState.reason = String(error?.message ?? error)
+            ctx.logger.warn('dsh-skills-mcp-manager: cannot migrate panel servers into rows: %s', serverMigrationState.reason)
+          })
+      }
+      // First attempt after a short delay (the startup projection holds the patch lock),
+      // then keep re-checking until the field is empty.
+      const timer = setTimeout(attempt, 3000)
+      const repeat = setInterval(attempt, 5000)
+      return () => { clearTimeout(timer); clearInterval(repeat) }
+    }, 'dsh-skills-mcp-manager.server-migration')
+
     // Seed from the value already stored in this namespace: a recomposition must
     // not re-write identical rows, or the write would trigger the next reload.
     const stored = config?.profileServers?.get?.() ?? config?.profileServers
@@ -1454,7 +1552,9 @@ export function apply(ctx, config) {
     // The debounce watches the WHOLE server list, while the global remount is
     // gated on its own key: a config holding only project servers still has to
     // commit, or agents would never receive them.
-    const observedServersKey = JSON.stringify(servers)
+    // The key deliberately ignores `phase`: the Loader updates it on its own schedule, and
+    // a phase change is not a reason to tear down a working connection and rebuild it.
+    const observedServersKey = serverSetKey(servers)
     let serversChanged = false
     if (observedServersKey === committedServersKey) {
       pendingServersKey = null
@@ -1463,11 +1563,9 @@ export function apply(ctx, config) {
       committedServersKey = observedServersKey
       pendingServersKey = null
       serversChanged = true
-      const globalKey = mountedKeyOf(servers)
-      if (globalKey !== mountedKey) {
-        mountGlobal(servers)
-        mountedKey = globalKey
-      }
+      // Global rows are connected by the Loader itself (they *are* `mcp-client` rows), so
+      // this plugin mounts only the project tier. Mounting a global row here too would
+      // double-connect it — two clients, two tool generations, one namespace.
       for (const [agent, entry] of agents) mountForAgent(agent, entry)
     } else {
       pendingServersKey = observedServersKey
@@ -1491,7 +1589,10 @@ export function apply(ctx, config) {
         at: new Date().toISOString(),
         observed: { servers: servers.map((s) => s.serverName), skills: skills.map((s) => `${s.scope}:${s.name}`) },
         changed: { servers: serversChanged, skills: skillsChanged },
-        mounted: stops.length,
+        // Only the project tier is mounted by this plugin now: global rows are connected by
+        // the Loader, so counting them here would double-count what the Loader already owns.
+        // `agents[].mounted` is the number that actually reflects this plugin's work.
+        mounted: [...agents.values()].reduce((total, entry) => total + entry.stops.length, 0),
         rootScope: Boolean(ctx.root && ctx.root !== ctx),
         agents: [...agents.values()].map((entry) => ({ cwd: entry.cwd, mounted: entry.stops.length })),
         projection,
@@ -1506,6 +1607,7 @@ export function apply(ctx, config) {
         discovery: discoveryInfo,
         lastOp,
         skillResult: config?.skillResult?.get?.() ?? config?.skillResult ?? null,
+        serverMigration: { ...serverMigrationState },
       }
       beat(lastBeat)
     }
@@ -1526,7 +1628,6 @@ export function apply(ctx, config) {
     const timer = setInterval(tick, 2000)
     return () => {
       clearInterval(timer)
-      unmount(stops)
       for (const entry of agents.values()) unmount(entry.stops)
       agents.clear()
     }

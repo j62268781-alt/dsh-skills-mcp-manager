@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
-import { applyRowOp, setPatchIO } from '../src/patch/apply.js'
+import { applyRowOp, migrateServerEntries, setPatchIO } from '../src/patch/apply.js'
 
 const PATCH = `- insert:
     - id: mcp-context7
@@ -314,3 +314,85 @@ async function findBackups(dir, depth = 0) {
   }
   return out
 }
+
+test('migrateServerEntries：把面板旧条目转成 mcp-client 行（含 scope），且不覆盖同名行', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'smp-migrate-servers-'))
+  const patch = `- insert:
+    - id: mcp-context7
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: context7
+        transport: streamable-http
+        url: https://mcp.context7.com/mcp
+`
+  await writeFile(join(dir, 'cordis.patch.yml'), patch)
+  const ctx = { get: (n) => (n === 'profileContext' ? { dir } : undefined), logger: { warn() {}, info() {}, error() {} } }
+
+  const legacy = [
+    { // 项目级：带 scope，行里必须体现出来
+      scope: '/p/tcl', id: 'gitnexus', serverName: 'gitnexus', transport: 'streamable-http',
+      url: 'http://x/mcp/coding', command: '', args: [], env: '', headers: '',
+      failOnStartupError: true, reconnectInitialDelayMs: '1000', reconnectMaxDelayMs: '60000', reconnectMaxAttempts: '60',
+    },
+    { // stdio：args 要变成数组，env 要变成 dict
+      scope: 'global', id: 'fs', serverName: 'fs-tools', transport: 'stdio',
+      url: '', command: 'npx', args: ['-y', 'server-filesystem', '/tmp'], env: 'TOKEN=abc\nDEBUG=1', headers: '',
+    },
+    { // 已经存在同 id 的行：不能被覆盖
+      scope: '/p/tcl', serverName: 'context7', transport: 'streamable-http', url: 'https://wrong/mcp',
+    },
+  ]
+  const result = await migrateServerEntries(ctx, legacy)
+  assert.equal(result.migrated, 2, '两条该迁，同 id 的那条要跳过')
+  assert.deepEqual(result.ids, ['mcp-gitnexus', 'mcp-fs-tools'])
+
+  const after = await readFile(join(dir, 'cordis.patch.yml'), 'utf8')
+  const parsed = (await import('yaml')).parse(after)
+  const rows = parsed.flatMap((r) => r?.insert ?? []).filter((r) => r?.name === '@deepseek-ai/dsh-mcp-client')
+  const byId = new Map(rows.map((r) => [r.id, r.config ?? {}]))
+
+  assert.equal(byId.get('mcp-gitnexus').scope, '/p/tcl', '项目级的 scope 必须写进行里')
+  assert.equal(byId.get('mcp-gitnexus').url, 'http://x/mcp/coding')
+  assert.equal(byId.get('mcp-gitnexus').failOnStartupError, true, '连接策略要一起搬过去')
+  assert.deepEqual(byId.get('mcp-gitnexus').reconnect, { initialDelayMs: 1000, maxDelayMs: 60000, maxAttempts: 60 })
+
+  // 项目级行必须 disabled：Loader 只看 disabled，不看 scope。不写它的话，同一台服务器
+  // 会被 Loader 连一次、又被本插件按 agent 挂载一次 —— 两个客户端、两代工具、一个命名空间。
+  const rawRows = parsed.flatMap((r) => r?.insert ?? [])
+  const gitnexusRow = rawRows.find((r) => r.id === 'mcp-gitnexus')
+  const fsRow = rawRows.find((r) => r.id === 'mcp-fs-tools')
+  assert.equal(gitnexusRow.disabled, true, '项目级行必须标记 disabled（跳过 Loader 实例化）')
+  assert.equal(fsRow.disabled, undefined, '全局行不该被标记 disabled')
+
+  assert.equal(byId.get('mcp-fs-tools').transport, 'stdio')
+  assert.deepEqual(byId.get('mcp-fs-tools').args, ['-y', 'server-filesystem', '/tmp'], 'args 要变成数组')
+  assert.equal(byId.get('mcp-fs-tools').env.TOKEN, 'abc', 'env 要变成 dict')
+  assert.equal('scope' in byId.get('mcp-fs-tools'), false, 'global 不写 scope 键（缺省即全局）')
+
+  assert.equal(byId.get('mcp-context7').url, 'https://mcp.context7.com/mcp', '同名行不能被覆盖')
+
+  // 幂等：再跑一次不应新增任何行
+  const again = await migrateServerEntries(ctx, legacy)
+  assert.equal(again.migrated, 0, '第二次运行必须是 no-op')
+})
+
+test('migrateServerEntries：行已存在时返回 0，调用方据此仍须清空旧字段', async () => {
+  // 这个用例钉住一个真实踩过的坑：行写成功、但「清空旧字段」那一步锁超时失败时，
+  // 下一次尝试会看到「行已存在」→ migrated=0。若调用方在 migrated===0 时直接返回，
+  // 旧字段就永远清不掉，而面板会把同一台服务器显示两次（字段一次、行一次）。
+  const dir = await mkdtemp(join(tmpdir(), 'smp-migrate-idem-'))
+  await writeFile(join(dir, 'cordis.patch.yml'), `- insert:
+    - id: mcp-gitnexus
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: gitnexus
+        transport: streamable-http
+        url: http://x/mcp
+`)
+  const ctx = { get: (n) => (n === 'profileContext' ? { dir } : undefined), logger: { warn() {}, info() {}, error() {} } }
+  const legacy = [{ scope: '/p/tcl', serverName: 'gitnexus', transport: 'streamable-http', url: 'http://x/mcp' }]
+
+  const result = await migrateServerEntries(ctx, legacy)
+  assert.deepEqual(result, { migrated: 0, ids: [] },
+    '行已在 → 不重复写（幂等），但调用方必须据此仍然清空旧字段')
+})

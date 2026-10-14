@@ -112,21 +112,30 @@ test('MCP 表单：编辑配置行时回填连接参数，且 command 不被 tar
   }
 })
 
-test('项目级编辑：回填连接字段 + 原地替换（不挪到列表最后）', { skip: skipWithoutBundle() }, async () => {
-  const gitnexus = { scope: '/p/tcl', id: 'gitnexus', serverName: 'gitnexus', transport: 'streamable-http',
-    url: 'http://x/mcp/coding', command: '', args: [], env: '', runtime: 'auto', source: '',
-    headers: '', failOnStartupError: true, reconnectInitialDelayMs: '1000', reconnectMaxDelayMs: '60000',
-    reconnectMaxAttempts: '60', enabled: true }
-  const figma = { scope: '/p/tcl', id: 'framelink-figma', serverName: 'framelink-figma', transport: 'streamable-http',
-    url: 'http://x/mcp/design', command: '', args: [], env: '', runtime: 'auto', source: '',
-    headers: '', failOnStartupError: false, reconnectInitialDelayMs: '', reconnectMaxDelayMs: '',
-    reconnectMaxAttempts: '', enabled: true }
+test('项目级编辑：回填连接字段，并作为**行操作**写入（不再改 config.servers）', { skip: skipWithoutBundle() }, async () => {
+  /**
+   * 项目级服务器现在也是 `mcp-client` 行，所以编辑走的是与全局完全相同的行操作管线。
+   *
+   * 这个用例以前断言「编辑后条目不会被挪到 config.servers 末尾」——那是数组原地替换的
+   * 顾虑。行操作按 entryId 定位，本来就不会重排，所以真正的契约变成了两条：
+   *   1. 表单要回填已配置的连接策略（空值会被当成「用户清空」而写坏）
+   *   2. 保存必须产出一条指向该行的 rowOp，而不是去动插件自己的字段
+   */
+  const projectRow = (entryId, serverName, over = {}) => ({
+    entryId, scope: '/p/tcl', serverName, transport: 'streamable-http',
+    target: `http://x/mcp/${serverName}`, command: '', args: '', env: '', headersText: '',
+    failOnStartupError: false, reconnectInitialDelayMs: '', reconnectMaxDelayMs: '',
+    reconnectMaxAttempts: '', enabled: true, phase: 'active', ...over,
+  })
+  const gitnexus = projectRow('mcp-gitnexus', 'gitnexus', {
+    failOnStartupError: true, reconnectInitialDelayMs: '1000', reconnectMaxDelayMs: '60000', reconnectMaxAttempts: '60',
+  })
+  const figma = projectRow('mcp-framelink-figma', 'framelink-figma')
   const panel = await bootPanel(emptyDoc({
-    servers: [gitnexus, figma], currentWorkspace: '/p/tcl', rowOpsReady: true,
+    profileServers: [gitnexus, figma], currentWorkspace: '/p/tcl', rowOpsReady: true,
   }))
   const { doc, findAll, find, byText, change, restore } = panel
   try {
-    // 打开列表里的第一条（gitnexus）编辑
     const editButtons = findAll((node) => String(node.props.className ?? '').includes('smp-button') && textOf(node).trim() === '编辑')
     assert.ok(editButtons.length >= 2, `项目级条目没渲染出编辑按钮：${editButtons.length}`)
     panel.click(editButtons[0])
@@ -135,19 +144,20 @@ test('项目级编辑：回填连接字段 + 原地替换（不挪到列表最�
     const numbers = findAll((node) => node.type === 'input' && node.props.type === 'number').map((n) => n.props.value)
     assert.deepEqual(numbers, ['1000', '60000', '60'], `连接字段没回填：${JSON.stringify(numbers)}`)
 
-    // 改成 2000，保存
     change(find((node) => node.type === 'input' && node.props.placeholder === '500（默认）'), '2000')
-    panel.click(byText('保存'))
+    // 编辑「行」的表单按钮文案是「保存到配置行」——与全局页签完全一致，因为两档同源
+    panel.click(byText('保存到配置行'))
 
-    // 顺序：gitnexus 必须还在第一位（原来是追加到末尾）
-    assert.equal(doc.servers[0].serverName, 'gitnexus', '编辑后条目被挪到了列表最后')
-    assert.equal(doc.servers[1].serverName, 'framelink-figma')
-    assert.equal(doc.servers.length, 2, '编辑不该增删条目')
-    // 值：写进去的是新值，且没把别的条目串味
-    assert.equal(doc.servers[0].reconnectInitialDelayMs, '2000')
-    assert.equal(doc.servers[0].reconnectMaxAttempts, '60', '没碰的字段被清空了')
-    assert.equal(doc.servers[0].failOnStartupError, true, '没碰的勾选框被清空了')
-    assert.equal(doc.servers[1].reconnectInitialDelayMs, '', '编辑 gitnexus 影响到了 figma')
+    // 契约：写出一条 rowOp，指向这一行
+    const ops = Array.isArray(doc.rowOps) ? doc.rowOps : []
+    assert.equal(ops.length, 1, `应恰好排出一条行操作：${JSON.stringify(ops)}`)
+    assert.equal(ops[0].op, 'update')
+    assert.equal(ops[0].entryId, 'mcp-gitnexus')
+    assert.equal(ops[0].reconnectInitialDelayMs, '2000')
+    assert.equal(ops[0].reconnectMaxAttempts, '60', '没碰的字段被清空了')
+    assert.equal(ops[0].failOnStartupError, true, '没碰的勾选框被清空了')
+    // 面板自己的配置字段不再是真相源：两档都只写行
+    assert.deepEqual(doc.servers ?? [], [], '不该再往 config.servers 写东西')
   } finally {
     restore()
   }

@@ -8,7 +8,7 @@
  */
 import { copyFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { parseDocument } from 'yaml'
+import { isMap, isSeq, parseDocument } from 'yaml'
 
 /** The directory holding this plugin's own backup artifacts. */
 export function backupDir() {
@@ -118,7 +118,18 @@ export async function applyRowOp(ctx, op) {
       // anything is written: an out-of-range number would make the row fail to
       // load, and keys left unset keep the client's own defaults.
       Object.assign(config, connectionFields(op))
-      changed = insertRow(document, op.entryId !== '' ? op.entryId : `mcp-${op.serverName}`, config)
+      // `scope` is a row's tier, and it lives *in* the row's config — the client's schema
+      // does not list it, but it does not strip unknown keys either (verified against the
+      // shipped schema: `Config({…, scope}).scope` survives), and this plugin reads the raw
+      // `options.config`. `global` is the default, so it is not written: a row without the
+      // key reads as global, which keeps every pre-existing row valid unchanged.
+      const projectScoped = typeof op.scope === 'string' && op.scope !== '' && op.scope !== 'global'
+      if (projectScoped) config.scope = op.scope
+      // A project row must not be instantiated by the Loader: this plugin mounts it into
+      // the agent whose cwd the scope covers, and an enabled row would connect the same
+      // server a second time. `disabled` skips instantiation while leaving the config
+      // readable in `loader.entries()` — which is where the mount path finds it.
+      changed = insertRow(document, op.entryId !== '' ? op.entryId : `mcp-${op.serverName}`, config, { disabled: projectScoped })
     } else if (op.op === 'toggle') {
       changed = setRowDisabled(document, op.entryId, op.enabled === false)
     } else if (op.op === 'delete') {
@@ -153,6 +164,12 @@ export async function applyRowOp(ctx, op) {
           fields.headers = parseEnv(op.headers)
         }
       }
+      // Scope is editable on an existing row too: moving a server between tiers is a normal
+      // edit, not a delete-and-recreate. `null` clears the key, which reads as global.
+      if (op.scopeChanged === true) {
+        const scope = op.scope === '' || op.scope === 'global' ? null : op.scope
+        fields.scope = scope
+      }
       for (const [field, value] of Object.entries(fields)) {
         changed = setRowConfigField(document, op.entryId, field, value) || changed
       }
@@ -173,5 +190,100 @@ export async function applyRowOp(ctx, op) {
     await io.writeFileAtomic(path, after, {})
     ctx.logger.info('skills-mcp-panel: %s profile row %s', op.op, op.entryId)
     return true
+  })
+}
+
+/**
+ * Turn this plugin's legacy `config.servers` entries into `mcp-client` rows.
+ *
+ * ## Why every entry becomes a row
+ *
+ * Project servers used to live in a field this plugin owned, while global ones were rows.
+ * Both tiers are rows now, and `scope` says which is which — so the migration converts
+ * *every* legacy entry, including the global ones, or the two sources would still coexist
+ * for exactly the servers the user sees first.
+ *
+ * ## Shape mapping
+ *
+ * The legacy entry is a panel-shaped object (`args` as a string, `env`/`headers` as
+ * `KEY=VALUE` lines); a row's config is the client's shape (an argv array, dicts). The
+ * conversion reuses the same helpers `applyRowOp` uses for the add path, so a migrated row
+ * is byte-for-byte what adding the same server by hand would produce.
+ *
+ * @returns `{ migrated, ids }` — the number of rows written and their entry ids.
+ */
+export async function migrateServerEntries(ctx, entries) {
+  const list = (Array.isArray(entries) ? entries : []).filter((entry) => (
+    entry !== null && typeof entry === 'object' && typeof entry.serverName === 'string' && entry.serverName !== ''
+  ))
+  if (list.length === 0) return { migrated: 0, ids: [] }
+  const profile = ctx.get?.('profileContext') ?? ctx.profileContext
+  const dir = profile?.dir
+  if (typeof dir !== 'string' || dir === '') throw new Error('profileContext unavailable')
+  const path = join(dir, 'cordis.patch.yml')
+  return io.withFileLock(join(dir, 'package.json'), async () => {
+    const before = await readFile(path, 'utf8')
+    const document = parseDocument(before, { customTags: [YAML_JS_TAG] })
+    if (document.errors[0] !== undefined) throw document.errors[0]
+    // Never clobber a row that is already there: a migration that runs twice, or that meets
+    // a row the user has since created by hand, must be a no-op rather than an overwrite.
+    const existing = new Set(
+      [...(document.contents?.items ?? [])]
+        .flatMap((item) => {
+          const out = []
+          if (isMap(item) && item.get('id') !== undefined) out.push(String(item.get('id')))
+          const insert = isMap(item) ? item.get('insert') : undefined
+          if (isSeq(insert)) for (const row of insert.items) if (isMap(row) && row.get('id') !== undefined) out.push(String(row.get('id')))
+          return out
+        }),
+    )
+    const ids = []
+    for (const entry of list) {
+      const id = `mcp-${String(entry.serverName).replace(/[^A-Za-z0-9_-]/g, '-')}`
+      if (existing.has(id)) continue
+      const transport = entry.transport === 'stdio' ? 'stdio' : 'streamable-http'
+      const config = { serverName: entry.serverName, transport }
+      if (transport === 'stdio') {
+        config.command = String(entry.command ?? '') === '' ? 'npx' : String(entry.command)
+        // The legacy entry keeps `args` as an **array**, while `splitArgs` parses the
+        // panel's space-separated *string*. Passing the array straight in produced one
+        // mangled argument (`["-y,server-filesystem,/tmp"]`) — which would have broken
+        // every migrated stdio server silently. Accept both shapes explicitly.
+        config.args = Array.isArray(entry.args)
+          ? entry.args.map((arg) => String(arg))
+          : splitArgs(entry.args)
+        const envLines = entry.env === null || entry.env === undefined
+          ? ''
+          : typeof entry.env === 'string'
+            ? entry.env
+            : Object.entries(entry.env).map(([key, value]) => `${key}=${String(value)}`).join('\n')
+        const env = parseEnv(envLines)
+        if (Object.keys(env).length > 0) config.env = spawnEnv(env)
+      } else {
+        config.url = String(entry.url ?? '')
+        const headerLines = entry.headers === null || entry.headers === undefined
+          ? ''
+          : typeof entry.headers === 'string'
+            ? entry.headers
+            : Object.entries(entry.headers).map(([key, value]) => `${key}=${String(value)}`).join('\n')
+        const headers = parseEnv(headerLines)
+        if (Object.keys(headers).length > 0) config.headers = headers
+      }
+      Object.assign(config, connectionFields(entry))
+      const projectScoped = typeof entry.scope === 'string' && entry.scope !== '' && entry.scope !== 'global'
+      if (projectScoped) config.scope = entry.scope
+      // Same reason as the add path: a project row is mounted by this plugin, so the
+      // Loader must not instantiate it, or the server is connected twice.
+      insertRow(document, id, config, { disabled: projectScoped })
+      existing.add(id)
+      ids.push(id)
+    }
+    if (ids.length === 0) return { migrated: 0, ids: [] }
+    const after = document.toString()
+    parseDocument(after, { customTags: [YAML_JS_TAG] })
+    await backupPatch(before)
+    await io.writeFileAtomic(path, after, {})
+    ctx.logger.info('dsh-skills-mcp-manager: migrated %d panel server(s) into profile rows', ids.length)
+    return { migrated: ids.length, ids }
   })
 }

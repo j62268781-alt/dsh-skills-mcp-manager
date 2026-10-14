@@ -63,9 +63,20 @@ export function setRowDisabled(document, entryId, disabled) {
   return true
 }
 
-/** Append a fresh mcp-client row to the patch's first `insert:` instruction. */
-export function insertRow(document, id, config) {
+/**
+ * Append a fresh mcp-client row to the patch's first `insert:` instruction.
+ *
+ * `disabled` is written for a **project-scoped** row: the Loader instantiates every row it
+ * is not told to skip, and a project row must not be connected by the Loader — this plugin
+ * mounts it into the agent whose working directory the row's `scope` covers. Leaving it
+ * enabled would connect the same server twice (two clients, two tool generations, one
+ * namespace). A disabled row still appears in `loader.entries()` with its config intact
+ * (`disabled` is an entry getter, not a filter on the store), which is exactly what the
+ * mount path needs to read.
+ */
+export function insertRow(document, id, config, options = {}) {
   const row = { id, name: MCP_MODULE, config }
+  if (options.disabled === true) row.disabled = true
   const contents = document.contents
   if (isSeq(contents)) {
     for (const item of contents.items) {
