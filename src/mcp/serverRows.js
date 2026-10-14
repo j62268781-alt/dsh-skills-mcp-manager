@@ -94,6 +94,8 @@ export function serverFromRow(entry) {
     target: url !== '' ? url : [command, ...args].filter((part) => part !== '').join(' '),
     failOnStartupError: row.failOnStartupError === true,
     reconnect: row.reconnect ?? null,
+    // 顶层键：与其它连接字段一样从行里带出来。少了它，读回与挂载两条路径都拿不到这个值。
+    toolCallTimeoutMs: row.toolCallTimeoutMs ?? null,
     enabled: userEnabled(row, entry, scope),
     phase: phaseOf(entry),
     /** True for rows the Loader connects itself (global scope). */
@@ -190,6 +192,7 @@ export function serverSetKey(servers) {
     headers: server.headers,
     failOnStartupError: server.failOnStartupError,
     reconnect: server.reconnect,
+    toolCallTimeoutMs: server.toolCallTimeoutMs,
     enabled: server.enabled,
   })))
 }
