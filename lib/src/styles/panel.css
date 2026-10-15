@@ -150,6 +150,8 @@
 .smp-formGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:10px}
 .smp-field{display:flex;flex-direction:column;gap:4px;min-width:0}
 .smp-field[data-wide=true]{grid-column:1 / -1}
+/* 技能对话框里「将写入 <路径>」那一行：它不属于任何字段，但要跨满两列。 */
+.smp-skillPath{grid-column:1 / -1}
 .smp-label{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}
 .smp-button{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;gap:4px;height:32px;padding:0 14px;border:.5px solid transparent;border-radius:var(--dsw-radius-md);background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;cursor:pointer;flex:none}
 .smp-button:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
