@@ -131,7 +131,14 @@ test('add：连接策略写进 config（failOnStartupError + reconnect）', asyn
   assert.match(out, /maxAttempts: 60/)
 })
 
-test('add：连接策略没填就不写键，交给客户端默认', async () => {
+test('add：没填连接策略时写入**显式默认值**（表单与文件说的是同一件事）', async () => {
+  /**
+   * 以前空着就省略 `reconnect`，由 MCP 客户端补默认值。但表单会显示这些数字（预填），
+   * 所以文件里也应当有：否则"表单显示 500"和"文件里没有"看起来是两回事，而真正生效的
+   * 值住在 `dsh-mcp-client` 里。
+   *
+   * `failOnStartupError` 仍是条件的：false 与"键不存在"完全等价，写它只是噪音。
+   */
   const { ctx, text } = await fresh()
   await applyRowOp(ctx, {
     op: 'add', entryId: 'mcp-plain', serverName: 'plain', transport: 'streamable-http',
@@ -139,7 +146,9 @@ test('add：连接策略没填就不写键，交给客户端默认', async () =>
   })
   const out = await text()
   assert.doesNotMatch(out, /failOnStartupError/)
-  assert.doesNotMatch(out, /reconnect/)
+  assert.match(out, /initialDelayMs: 500/)
+  assert.match(out, /maxDelayMs: 30000/)
+  assert.match(out, /maxAttempts: 10/)
 })
 
 test('update：连接策略可写入，留空则删键回到默认', async () => {
@@ -150,11 +159,13 @@ test('update：连接策略可写入，留空则删键回到默认', async () =>
   assert.match(out, /failOnStartupError: true/)
   assert.match(out, /maxAttempts: 60/)
 
-  // 再保存一次但全部清空：键应当被删除，而不是写回默认值
+  // 再保存一次但全部清空：回到**默认值**（显式写出），而不是留着上次的 60/1000
   await applyRowOp(ctx, { ...base })
   out = await text()
   assert.doesNotMatch(out, /failOnStartupError/)
-  assert.doesNotMatch(out, /reconnect/)
+  assert.match(out, /maxAttempts: 10/)
+  assert.match(out, /initialDelayMs: 500/)
+  assert.doesNotMatch(out, /maxAttempts: 60/)
 })
 
 test('update：没动过连接字段时，不碰已有的 reconnect（只改 URL 不能误删）', async () => {
@@ -181,11 +192,12 @@ test('update：标记了 connectionChanged 才按表单清空（回到默认）'
   await applyRowOp(ctx, { ...base, url: 'https://mcp.context7.com/mcp', connectionChanged: true, reconnectMaxAttempts: '60' })
   assert.match(await text(), /maxAttempts: 60/)
 
-  // 用户确实清空了输入框 → 整块删掉
+  // 用户确实清空了输入框 → 回到显式默认值（不再是"删掉整块"）
   await applyRowOp(ctx, { ...base, url: 'https://mcp.context7.com/mcp', connectionChanged: true })
   const out = await text()
-  assert.doesNotMatch(out, /reconnect/)
   assert.doesNotMatch(out, /failOnStartupError/)
+  assert.match(out, /maxAttempts: 10/)
+  assert.doesNotMatch(out, /maxAttempts: 60/)
 })
 
 test('update：越界的重连参数抛错且不写文件', async () => {
@@ -219,11 +231,26 @@ test('delete：移除该行且拒绝空结果', async () => {
   await applyRowOp(ctx2, { op: 'delete', entryId: 'mcp-context7' })
 })
 
-test('未知 entryId：抛错且不写文件（drain 会把它记进 rowOps.error）', async () => {
+test('delete：行本来就不在时**成功**且不写文件（重试不该报错）', async () => {
+  /**
+   * 删除的目标状态是「这一行不在 patch 里」，而它已经成立。
+   *
+   * 以前这里抛 "not found"，那在队列通道下基本碰不到（Host 写 patch 前先清空队列）。
+   * 但命令现在可以走 HTTP，请求会被重试、也会和周期投影赛跑 —— 若仍抛错，用户会为一次
+   * **已经成功**的删除看到一个吓人的失败，而且什么也不用修。
+   */
   const { ctx, text } = await fresh()
   const before = await text()
+  assert.equal(await applyRowOp(ctx, { op: 'delete', entryId: 'mcp-ghost' }), true)
+  assert.equal(await text(), before, '没有变化就不该动文件（也不该churn备份）')
+})
+
+test('未知 entryId 的其它操作仍然抛错且不写文件', async () => {
+  const { ctx, text } = await fresh()
+  const before = await text()
+  // toggle/update 指向不存在的行是真错误：请求本身没有意义，必须让调用方知道。
   await assert.rejects(
-    () => applyRowOp(ctx, { op: 'delete', entryId: 'mcp-ghost' }),
+    () => applyRowOp(ctx, { op: 'toggle', entryId: 'mcp-ghost', enabled: false }),
     /not found/,
   )
   assert.equal(await text(), before)

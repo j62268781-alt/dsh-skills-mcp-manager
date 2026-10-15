@@ -181,7 +181,7 @@ export function installShadow(ctx, decide, log) {
     try {
       verdict = decide(definition === null || definition === undefined ? undefined : definition.name)
     } catch (error) {
-      log?.warn?.(`skills-mcp-panel: could not judge a registration, forwarding it unchanged: ${String(error?.message ?? error)}`)
+      log?.warn?.(`dsh-skills-mcp-manager: could not judge a registration, forwarding it unchanged: ${String(error?.message ?? error)}`)
       verdict = { admit: true }
     }
     // The forwarded call is deliberately outside the catch above: a duplicate-name
@@ -211,7 +211,7 @@ export function installShadow(ctx, decide, log) {
       if (hadOwn) Reflect.set(underlying, 'register', original)
       else Reflect.deleteProperty(underlying, 'register')
     } catch (error) {
-      log?.warn?.(`skills-mcp-panel: could not restore the tools service: ${String(error?.message ?? error)}`)
+      log?.warn?.(`dsh-skills-mcp-manager: could not restore the tools service: ${String(error?.message ?? error)}`)
     }
   }
   return { installed: true, restore, reason: '' }

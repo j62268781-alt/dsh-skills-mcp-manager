@@ -6,17 +6,29 @@ import { field } from './field.jsx'
  * The 区域 (which root the skill is written to) is chosen when adding and shown
  * read-only when editing — moving a skill between roots is a different operation
  * that this panel deliberately does not do behind your back.
+ *
+ * There are **four** roots, two per scope, and the options show the *real path*: DSH's provider
+ * reads both `<dshHome>/skills` and `<agentsHome>/skills` (and the matching pair under a
+ * project), so "全局" alone does not say where the file lands. A project region also needs a
+ * workspace, which is why the workspace field appears only for one — asking for a path when
+ * the destination is a user-level root would be a field with no effect.
  */
 export function skillDialogView({
-  dialog, draft, roots = [], error = '', pending = false, primitives,
-  onRegion, onName, onDescription, onBody, onCancel, onSave,
+  dialog, draft, roots = [], workspaceChoices = [], error = '', pending = false, primitives,
+  onRegion, onProject, onName, onDescription, onBody, onCancel, onSave,
 }) {
   if (dialog === null || dialog === undefined) return null
   const Modal = primitives?.Modal
   if (Modal === undefined) return null
   const Button = primitives.Button ?? 'button'
   const isEdit = dialog.mode === 'edit'
-  const rootLabel = (root) => `${root.scope === 'global' ? '全局' : '项目级'} · ${root.id}`
+  /** The option label: the real directory, prefixed by whose it is. */
+  const rootLabel = (root) => `${root.scope === 'global' ? '全局' : '项目级'} · ${root.path}`
+  /**
+   * A project entry needs a workspace. Editing keeps the one it already has (the region is
+   * read-only there), so the field is only offered when creating.
+   */
+  const needsProject = !isEdit && String(dialog.regionKey ?? '').startsWith('project')
   return (
     <Modal
       open
@@ -37,7 +49,7 @@ export function skillDialogView({
     >
       <div className="smp-skillDialogBody" key="body">
       <div className="smp-formGrid" key="grid">
-        {field('区域', (
+        {field('区域（写入哪个目录）', (
           <select
             className="smp-select" value={dialog.regionKey} disabled={isEdit}
             onChange={(event) => onRegion(event.target.value)}
@@ -46,7 +58,21 @@ export function skillDialogView({
               <option value={`${root.scope}:${root.id}`} key={`${root.scope}:${root.id}`}>{rootLabel(root)}</option>
             ))}
           </select>
-        ))}
+        ), true)}
+        {!needsProject ? null : field('工作区（项目级写到这里）', (
+          <>
+            <input
+              className="smp-input" list="smp-skill-workspaces" placeholder="/绝对路径"
+              value={dialog.project ?? ''}
+              onChange={(event) => onProject(event.target.value)}
+            />
+            <datalist id="smp-skill-workspaces">
+              {workspaceChoices.map(([path, title]) => (
+                <option value={path} key={path}>{title}</option>
+              ))}
+            </datalist>
+          </>
+        ), true)}
         {field('名称（会成为目录名）', (
           <input className="smp-input" value={draft.name ?? ''} placeholder="例如 my-skill"
                  onChange={(event) => onName(event.target.value)} />

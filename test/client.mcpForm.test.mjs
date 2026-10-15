@@ -22,13 +22,26 @@ function openAddForm(panel) {
   return panel
 }
 
-test('MCP 表单：渲染「连接与重连」4 个输入并带默认值提示', { skip: skipWithoutBundle() }, async () => {
+/**
+ * 三个 reconnect 数字输入，按渲染顺序（首次延迟 / 最大延迟 / 最大次数）。
+ *
+ * 不再按 placeholder 找：输入框现在**预填真实默认值**，placeholder 只是同一个数字，
+ * 拿它当选择器会把"字段有值"和"字段是空的"混为一谈。
+ */
+const reconnectInputs = (panel) => panel.findAll((node) => node.type === 'input' && node.props.type === 'number')
+
+test('MCP 表单：连接与重连输入**预填真实默认值**，不是空框', { skip: skipWithoutBundle() }, async () => {
+  /**
+   * 以前这三个框是空的，默认值只写在 placeholder 里（「500（默认）」），落库时又省略键，
+   * 由 MCP 客户端补默认值 —— 于是表单显示"未设置"，而 500 其实在生效，且住在别人的包里。
+   * 现在表单预填、落库也写，用户看到的和实际生效的是同一组数字。
+   */
   const panel = await bootPanel(emptyDoc())
   try {
     openAddForm(panel)
-    assert.ok(panel.byPlaceholder('500（默认）') !== null, '缺少「重连首次延迟」输入')
-    assert.ok(panel.byPlaceholder('30000（默认）') !== null, '缺少「重连最大延迟」输入')
-    assert.ok(panel.byPlaceholder('10（默认）') !== null, '缺少「重连最大次数」输入')
+    const numbers = reconnectInputs(panel).map((node) => node.props.value)
+    assert.deepEqual(numbers, ['500', '30000', '10'], `三个重连输入应预填默认值：${JSON.stringify(numbers)}`)
+
     const checkbox = panel.find((node) => node.type === 'input' && node.props.type === 'checkbox')
     assert.ok(checkbox !== null, '缺少 failOnStartupError 勾选框')
     assert.equal(checkbox.props.checked, false, '默认应当是未勾选（DSH 默认 false）')
@@ -37,27 +50,81 @@ test('MCP 表单：渲染「连接与重连」4 个输入并带默认值提示',
   }
 })
 
-test('MCP 表单：填了连接参数后，保存写进 rowOps', { skip: skipWithoutBundle() }, async () => {
+test('MCP 表单：stdio 的「命令」预填 npx', { skip: skipWithoutBundle() }, async () => {
+  const panel = await bootPanel(emptyDoc())
+  try {
+    openAddForm(panel)
+    panel.change(panel.find((node) => node.type === 'select'), 'stdio')
+    const command = panel.find((node) => node.type === 'input' && node.value === undefined
+      && node.props.value === 'npx')
+    assert.ok(command !== null, '切到 stdio 后「命令」应预填 npx（Host 也会把空命令当 npx）')
+  } finally {
+    panel.restore()
+  }
+})
+
+test('MCP 表单：填了连接参数后，命令直接发给 Host（HTTP，不再排进 rowOps）', { skip: skipWithoutBundle() }, async () => {
+  /**
+   * 命令现在走 `POST /<ns>/rows`：写 patch 只要 1–5ms，而旧的 settings 队列要多等 2–4 秒
+   * （500ms 排空轮询 + 固定 1200ms + Loader 重载 + 面板自己 700/1500ms 轮询）。
+   *
+   * 字段仍逐个断言：换传输不该改变命令的含义。
+   */
   const panel = await bootPanel(emptyDoc())
   const { doc, change, byPlaceholder, byText } = panel
   try {
     openAddForm(panel)
     change(byPlaceholder('例如 test，最多 32 字符'), 'github')
     change(byPlaceholder('https://…/mcp'), 'https://example.com/mcp')
-    change(byPlaceholder('500（默认）'), '1000')
-    change(byPlaceholder('30000（默认）'), '60000')
-    change(byPlaceholder('10（默认）'), '60')
+    // 每次 change 都会重渲染，旧的节点引用随之失效 —— 所以逐个重新取。
+    change(reconnectInputs(panel)[0], '1000')
+    change(reconnectInputs(panel)[1], '60000')
+    change(reconnectInputs(panel)[2], '60')
     panel.toggle(panel.find((node) => node.type === 'input' && node.props.type === 'checkbox'), true)
     panel.click(byText('保存'))
+    await panel.settle()
 
-    const op = (doc.rowOps ?? [])[0]
-    assert.ok(op, '保存后没有排入 rowOps')
+    const op = (doc.rowCommands ?? [])[0]
+    assert.ok(op, '保存后没有把命令发给 Host')
     assert.equal(op.op, 'add')
     assert.equal(op.serverName, 'github')
     assert.equal(op.failOnStartupError, true)
     assert.equal(op.reconnectInitialDelayMs, '1000')
     assert.equal(op.reconnectMaxDelayMs, '60000')
     assert.equal(op.reconnectMaxAttempts, '60')
+    // 走通 HTTP 就**不该**再排队列，否则同一个命令会被执行两次
+    assert.deepEqual(doc.rowOps ?? [], [], 'HTTP 成功后不该再写 rowOps')
+  } finally {
+    panel.restore()
+  }
+})
+
+test('新增：Host 一确认就摘掉转圈，不等投影（写盘只要几毫秒）', { skip: skipWithoutBundle() }, async () => {
+  /**
+   * 命令经 HTTP 发出、Host 回 `{ok:true}` 时，写入就已经完成了。此时再显示
+   * 「正在写入配置文件…」是在误报"还在写"——它以前要等到**投影**回来（面板下一次
+   * 轮询，最长约 1.5 秒）才消失，而那段时间里用户看到的就是"转一会"。
+   *
+   * 卡片本身要留到投影列出该行为止（否则新增的卡片会先消失、再闪回来），所以这里同时
+   * 钉住两件事：转圈没了，卡片还在。
+   */
+  const panel = await bootPanel(emptyDoc({ profileServers: [], rowOpsReady: true }))
+  const cards = () => panel.findAll((node) => String(node.props?.className ?? '').split(/\s+/).includes('smp-card'))
+    .map((node) => textOf(node).replace(/\s+/g, ' ').trim()).filter((text) => text.includes('brand'))
+  try {
+    openAddForm(panel)
+    panel.change(panel.byPlaceholder('例如 test，最多 32 字符'), 'brand')
+    panel.change(panel.byPlaceholder('https://…/mcp'), 'https://brand/mcp')
+    panel.click(panel.byText('保存'))
+
+    // 命令还没回来：乐观卡片已在，带转圈（这是诚实的"还在写"）
+    assert.equal(cards().length, 1, '保存后应立刻出现乐观卡片')
+    assert.match(cards()[0], /正在写入配置文件/, '命令未回时应有转圈')
+
+    // Host 确认 → 转圈必须立刻消失，且卡片仍在
+    await panel.settle()
+    assert.equal(cards().length, 1, '确认后卡片不该消失（要等投影替换它）')
+    assert.doesNotMatch(cards()[0], /正在写入配置文件/, 'Host 已确认，转圈必须摘掉')
   } finally {
     panel.restore()
   }
@@ -81,11 +148,12 @@ test('MCP 表单：编辑配置行时回填连接参数，且 command 不被 tar
 
     // 没动过连接输入框 → op 里必须标记 connectionChanged: false（Host 会跳过它们）
     panel.click(byText('保存到配置行'))
-    let op = (doc.rowOps ?? [])[0]
-    assert.ok(op, '没有排入 rowOps')
+    await panel.settle()
+    let op = (doc.rowCommands ?? [])[0]
+    assert.ok(op, '没有把命令发给 Host')
     assert.equal(op.op, 'update')
     assert.equal(op.connectionChanged, false, '没改过连接字段却标记成改动，会误删已有配置')
-    doc.rowOps = []
+    doc.rowCommands = []
 
     assert.equal(op.command, 'npx', '保存时 command 被写成了拼好的 target')
     assert.equal(op.args, '-y pkg')
@@ -95,16 +163,16 @@ test('MCP 表单：编辑配置行时回填连接参数，且 command 不被 tar
     assert.equal(op.reconnectMaxDelayMs, '')
 
     // 真改了其中一个数字 → 标记成改动，Host 才会写。
-    // 保存后该行进入 in-flight（操作按钮被转圈替代），先让回执到达把它落定。
-    doc.rowOps = []
+    doc.rowCommands = []
     const settled = find((node) => String(node.props.className ?? '').includes('smp-card') && textOf(node).includes('existing'))
     assert.ok(settled !== null, '保存后找不到该行')
     runtime.render()
     panel.openMenu()
     panel.click(byText('编辑'))
-    panel.change(panel.byPlaceholder('10（默认）'), '30')
+    panel.change(reconnectInputs(panel)[2], '30')
     panel.click(byText('保存到配置行'))
-    op = (doc.rowOps ?? [])[0]
+    await panel.settle()
+    op = (doc.rowCommands ?? [])[0]
     assert.equal(op.connectionChanged, true, '改了连接字段却没标记，值不会生效')
     assert.equal(op.reconnectMaxAttempts, '30')
     runtime.render()
@@ -147,13 +215,14 @@ test('项目级编辑：回填连接字段，并作为**行操作**写入（不�
     const numbers = findAll((node) => node.type === 'input' && node.props.type === 'number').map((n) => n.props.value)
     assert.deepEqual(numbers, ['1000', '60000', '60'], `连接字段没回填：${JSON.stringify(numbers)}`)
 
-    change(find((node) => node.type === 'input' && node.props.placeholder === '500（默认）'), '2000')
+    change(reconnectInputs(panel)[0], '2000')
     // 编辑「行」的表单按钮文案是「保存到配置行」——与全局页签完全一致，因为两档同源
     panel.click(byText('保存到配置行'))
 
-    // 契约：写出一条 rowOp，指向这一行
-    const ops = Array.isArray(doc.rowOps) ? doc.rowOps : []
-    assert.equal(ops.length, 1, `应恰好排出一条行操作：${JSON.stringify(ops)}`)
+    // 契约：一条命令，指向这一行（走 HTTP，见文件头）
+    await panel.settle()
+    const ops = Array.isArray(doc.rowCommands) ? doc.rowCommands : []
+    assert.equal(ops.length, 1, `应恰好发出一条命令：${JSON.stringify(ops)}`)
     assert.equal(ops[0].op, 'update')
     assert.equal(ops[0].entryId, 'mcp-gitnexus')
     assert.equal(ops[0].reconnectInitialDelayMs, '2000')

@@ -24,9 +24,6 @@
 .smp-scopePick{display:flex;flex-direction:column;gap:6px;min-width:0}
 .smp-scopePick .smp-select{width:100%}
 .smp-scopePick .smp-input{width:100%}
-.smp-projectInput{box-sizing:border-box;flex:0 1 220px;min-width:150px;height:36px;font:inherit;font-size:13px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-md);padding:0 12px}
-.smp-projectSelect[data-placeholder=true]{color:var(--dsw-alias-label-tertiary)}
-.smp-projectSelect{box-sizing:border-box;flex:0 1 240px;min-width:170px;height:36px;font:inherit;font-size:13px;color:var(--dsw-alias-label-primary);background-color:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-md);appearance:none;-webkit-appearance:none;padding:0 30px 0 10px;background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M4 6.5 8 10.5 12 6.5' stroke='%238b8f99' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center;background-size:14px}
 .smp-group{flex-direction:column;gap:10px;display:flex;border-top:.5px solid var(--dsw-alias-border-l2);padding-top:0}
 .smp-group:first-of-type{border-top:0;padding-top:0}
 .smp-groupTitleRow{align-items:center;gap:8px;min-height:36px;display:flex}

@@ -34,12 +34,12 @@ const DEFAULT_AUTH_PROBE_TIMEOUT_MS = 6000
 function initializeBody() {
   return JSON.stringify({
     jsonrpc: '2.0',
-    id: 'skills-mcp-panel-auth-probe',
+    id: 'dsh-skills-mcp-manager-auth-probe',
     method: 'initialize',
     params: {
       protocolVersion: '2025-06-18',
       capabilities: {},
-      clientInfo: { name: 'skills-mcp-panel', version: '0' },
+      clientInfo: { name: 'dsh-skills-mcp-manager', version: '0' },
     },
   })
 }
@@ -106,7 +106,7 @@ export function createAuthProbe(log) {
         })
       } catch (error) {
         // 网络错误／超时／被中止：都没有状态码可判，如实收敛成「没观测到」。
-        log?.warn?.(`skills-mcp-panel: auth probe of ${String(server?.serverName ?? url)} failed: ${String(error?.message ?? error)}`)
+        log?.warn?.(`dsh-skills-mcp-manager: auth probe of ${String(server?.serverName ?? url)} failed: ${String(error?.message ?? error)}`)
         return null
       }
       const status = response?.status

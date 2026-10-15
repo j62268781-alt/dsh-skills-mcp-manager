@@ -19,24 +19,25 @@
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
-import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { commandEnv, parseEnv, resolveCommand, setHomeResolver, spawnEnv, splitArgs } from './runtime/env.js'
 import * as mcpClient from '@deepseek-ai/dsh-mcp-client'
 import { withFileLock, writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
-import { applyRowOp, migrateServerEntries, setPatchIO } from './patch/apply.js'
+import { applyRowOp, migrateServerEntries, migratePanelConfig, setPatchIO } from './patch/apply.js'
 import { IMPORT_SOURCES, adaptImportedEntry, envLines, headerLines, importFilePath, parseJsonLoose } from './import/sources.js'
 import { scanImportSource } from './import/scan.js'
 import { beat, beatFile } from './diagnostics/heartbeat.js'
-import { projectRootOf, reconcileSkills, scopeRoot } from './skills/reconcile.js'
+import { agentsHome, projectRootOf, reconcileSkills } from './skills/reconcile.js'
 import { bodyOf, discoverSkills } from './skills/discover.js'
 import { createSkill, deleteSkill, renameSkill, updateSkill, writableRoots } from './skills/write.js'
 import { serverMountConfig, setMountClient, workingDirectoryOf } from './project/mount.js'
 import { GLOBAL_SCOPE, projectServersFor, serverRows, serverSetKey } from './mcp/serverRows.js'
 import { connectionDraftOf } from './mcp/connection.js'
 import { toolsByServer } from './mcp/tools.js'
+import { registerRuntimeRoute } from './mcp/runtime.js'
+import { registerRowRoute } from './mcp/rows.js'
 import { installShadow, isMcpName, judge, liveToolNames } from './mcp/filter.js'
 import { PROBE_STATE, createConnectionProbe } from './mcp/probe.js'
 import { authDetailText } from './mcp/auth.js'
@@ -48,7 +49,8 @@ setMountClient(mcpClient)
 setPatchIO({ withFileLock, writeFileAtomic })
 import { isMap, isSeq, parseDocument } from 'yaml'
 
-export const name = 'skills-mcp-panel'
+import { NAME as name } from './identity.js'
+export { name }
 
 /** The Loader is core, so requiring it costs nothing and never blocks startup. */
 export const inject = ['loader']
@@ -84,6 +86,16 @@ const Server = z.object({
 /** One skill the panel writes to disk. */
 const Skill = z.object({
   scope: z.string().default('global'),
+  /**
+   * Which of the two roots under `scope` this entry belongs to: `dsh` or `agents`.
+   *
+   * Both roots are real and DSH's provider reads both, so the root has to travel with the
+   * entry — `reconcileSkills` rewrites disk from this list, and without it an entry written
+   * to `~/.agents/skills` would be moved under `~/.dsh/skills` on the next pass.
+   *
+   * Defaults to `dsh`: that is what every entry created before this field existed means.
+   */
+  id: z.string().default('dsh'),
   name: z.string().required(),
   description: z.string().default(''),
   body: z.string().default(''),
@@ -241,57 +253,6 @@ export const Config = z.object({
    * with, and the panel should show what the profile already configures.
    */
   profileServers: z.array(ProfileRow).default([]).volatile(),
-  /**
-   * 每个已配置 MCP 服务器当前注册到 harness 的工具清单。
-   *
-   * 数据源是 harness 自己的工具注册表（`ctx.tools.schemas()`）：MCP 客户端把工具
-   * 以 `mcp__<serverName>__<tool>` 的名字注册进去，所以这里按前缀归到各自的服务器。
-   * 面板只读展示，不参与任何写回。
-   */
-  serverTools: z.array(z.object({
-    serverName: z.string().default(''),
-    tools: z.array(z.object({
-      name: z.string().default(''),
-      description: z.string().default(''),
-    })).default([]),
-  })).default([]).volatile(),
-  /**
-   * 工具清单读不到时的原因（空串 = 读取正常）。
-   *
-   * 单独一个字段是必要的：「注册表读不到」与「该服务器没有工具」在界面上长得一样，
-   * 但前者可操作（重启 / 排查冲突），后者只是一个事实。只有列表的话两者无法区分。
-   */
-  serverToolsError: z.object({
-    reason: z.string().default(''),
-    detail: z.string().default(''),
-  }).default({ reason: '', detail: '' }).volatile(),
-  /**
-   * 每个 MCP 服务器的连接状态，供面板打告警标签。
-   *
-   * 为什么要发布这个：`dsh-mcp-client` 在重试预算用尽后会**永久放弃**
-   * （"giving up after N consecutive failed reconnect attempts — reload the plugin or
-   * restart the Host to reconnect"），而这件事在界面上原本**完全不可见** —— 用户只
-   * 看到工具没了，不知道是没连上、正在重试、还是已经放弃。实测一个启动时连不上的
-   * deepwiki 就是这样静默失效 15 分钟以上的。
-   *
-   * `status` 是**推导**值（客户端把重试计数关在闭包里，见 `src/mcp/status.js`），
-   * 所以带 `remainingMs` 这类预计量，界面措辞也必须说成「预计」。
-   */
-  serverStatus: z.array(z.object({
-    serverName: z.string().default(''),
-    /** `global`（Loader 行）或 `project`（本插件挂载）。 */
-    tier: z.string().default(''),
-    scope: z.string().default(''),
-    status: z.string().default(''),
-    toolCount: z.number().default(0),
-    /** 从首次观测到「未连接」起已过去多久。 */
-    elapsedMs: z.number().default(0),
-    /** 该服务器配置下的重试预算总长。 */
-    budgetMs: z.number().default(0),
-    /** 按预算预计还能重试多久（秒）；仅 `retrying` 有意义。 */
-    remainingSeconds: z.number().default(0),
-    detail: z.string().default(''),
-  })).default([]).volatile(),
   /**
    * 面板请求重连一台服务器。
    *
@@ -469,7 +430,7 @@ function configuredWorkspaces(ctx) {
     })).filter((workspace) => workspace.path !== '')))
   } catch (error) {
     // Distinguish "no workspaces" from "the registry blew up".
-    if (process.env.SMP_DEBUG) console.error('[skills-mcp-panel] workspace registry unavailable', error)
+    if (process.env.SMP_DEBUG) console.error('[dsh-skills-mcp-manager] workspace registry unavailable', error)
     return []
   }
 }
@@ -634,14 +595,14 @@ export function apply(ctx, config) {
   filterState.reason = shadow.reason
   if (shadow.installed) {
     filterState.preExisting = liveToolNames(ctx).filter(isMcpName)
-    ctx.logger.info('skills-mcp-panel: MCP tool filter installed (%d pre-existing MCP tool(s))', filterState.preExisting.length)
+    ctx.logger.info('dsh-skills-mcp-manager: MCP tool filter installed (%d pre-existing MCP tool(s))', filterState.preExisting.length)
   } else {
     // Reported, never swallowed: "filtering is off" and "filtering could not be
     // installed" look identical in the UI otherwise, and only one of them is the
     // user's configuration.
-    ctx.logger.warn('skills-mcp-panel: MCP tool filter not installed — %s', shadow.reason)
+    ctx.logger.warn('dsh-skills-mcp-manager: MCP tool filter not installed — %s', shadow.reason)
   }
-  ctx.effect(() => () => shadow.restore(), 'skills-mcp-panel.tool-filter')
+  ctx.effect(() => () => shadow.restore(), 'dsh-skills-mcp-manager.tool-filter')
 
   /**
    * Connection probe: asks `mcpResources` what each server's state is.
@@ -664,7 +625,7 @@ export function apply(ctx, config) {
     // the same, or the status tag would show a confident lie. The service can also appear
     // later (the profile composes rows after this plugin), so this is not fatal — the
     // availability check is re-run on every publish.
-    ctx.logger.warn('skills-mcp-panel: MCP connection probe unavailable — %s', probe.reason())
+    ctx.logger.warn('dsh-skills-mcp-manager: MCP connection probe unavailable — %s', probe.reason())
   }
 
   /**
@@ -961,17 +922,17 @@ export function apply(ctx, config) {
   const mountInto = (host, server, sink, where) => {
     const mountConfig = serverMountConfig(server)
     if (mountConfig === null) {
-      ctx.logger.warn('skills-mcp-panel: server %s has no name/%s, skipped', server.id, server.transport === 'stdio' ? 'command' : 'url')
+      ctx.logger.warn('dsh-skills-mcp-manager: server %s has no name/%s, skipped', server.id, server.transport === 'stdio' ? 'command' : 'url')
       return false
     }
     try {
       const fiber = host.plugin(mcpPlugin, mountConfig)
       recordMount(server.serverName, fiber)
       sink.push(typeof fiber === 'function' ? fiber : () => fiber?.dispose?.())
-      ctx.logger.info('skills-mcp-panel: mounted mcp server %s (%s) in %s', server.serverName, mountConfig.transport, where)
+      ctx.logger.info('dsh-skills-mcp-manager: mounted mcp server %s (%s) in %s', server.serverName, mountConfig.transport, where)
       return true
     } catch (error) {
-      ctx.logger.error('skills-mcp-panel: cannot mount mcp server %s in %s', server.serverName, where)
+      ctx.logger.error('dsh-skills-mcp-manager: cannot mount mcp server %s in %s', server.serverName, where)
       ctx.logger.error(error)
       return false
     }
@@ -982,7 +943,7 @@ export function apply(ctx, config) {
       try {
         stop()
       } catch (error) {
-        ctx.logger.warn('skills-mcp-panel: unmount failed')
+        ctx.logger.warn('dsh-skills-mcp-manager: unmount failed')
         ctx.logger.warn(error)
       }
     }
@@ -1025,6 +986,39 @@ export function apply(ctx, config) {
   ctx.on('agent/disposed', ({ agent }) => detachAgent(agent))
 
   /**
+   * Pick up agents that were already live before this plugin loaded.
+   *
+   * Subscribing to `agent/created` alone is not enough, and the gap is invisible: an event
+   * only reaches a listener that was already registered, so a session that existed when this
+   * plugin (re)loaded never fires one *here*. Its `agents` entry then never appears, which
+   * means `mountForAgent` is never called for it — and a project server the user *did*
+   * configure correctly is simply never mounted. The panel reports `unmounted`, which is
+   * literally true and reads as "your config is wrong" while the config is fine.
+   *
+   * `ctx.agents.list()` is the registry itself, so this closes the gap regardless of how the
+   * plugin's context relates to the one that created the agent. Called on every tick, it is
+   * idempotent: `attachAgent` returns early for an agent it already tracks.
+   */
+  const adoptLiveAgents = () => {
+    let registry = null
+    try {
+      registry = ctx.get?.('agents') ?? null
+    } catch {
+      // A bare service access throws in cordis before the service is injected.
+      registry = null
+    }
+    if (registry === null || typeof registry.list !== 'function') return
+    let live = []
+    try {
+      live = registry.list() ?? []
+    } catch (error) {
+      ctx.logger.warn('dsh-skills-mcp-manager: cannot list live agents: %s', String(error?.message ?? error))
+      return
+    }
+    for (const agent of live) attachAgent(agent)
+  }
+
+  /**
    * Publish the profile's own MCP rows into this namespace so the panel can show
    * them. Settings is the only client-facing channel a third-party bundle
    * reaches (no custom remote namespace), so it doubles as the read model.
@@ -1046,7 +1040,7 @@ export function apply(ctx, config) {
       discoveredSkills = await discoverSkills({
         projectRoots: roots,
         dshHome: resolveDshHome(),
-        agentsHome: process.env.DSH_AGENTS_HOME ?? join(homedir(), '.agents'),
+        agentsHome: agentsHome(),
       })
       discoveryInfo = { at: new Date().toISOString(), roots, count: discoveredSkills.length, error: '' }
       // The periodic heartbeat only fires on change, and the first one happens
@@ -1057,10 +1051,75 @@ export function apply(ctx, config) {
       // reason must survive into the published diagnostics.
       discoveryInfo = { at: new Date().toISOString(), roots, count: 0, error: String(error?.message ?? error) }
       beat({ ...lastBeat, at: new Date().toISOString(), publishedAt, discovery: discoveryInfo })
-      if (process.env.SMP_DEBUG) console.error('[skills-mcp-panel] skill scan failed', error)
+      if (process.env.SMP_DEBUG) console.error('[dsh-skills-mcp-manager] skill scan failed', error)
       discoveredSkills = []
     }
   }
+
+  /**
+   * The agent a project server is mounted into, per server name.
+   *
+   * A project row's tools are registered in the *agent's* scope, so reading them needs that
+   * exact agent[object] as the scope key — the same object `createScope` was minted with.
+   * The first matching live agent wins, mirroring `computeServerStatus`'s `expected` map so
+   * the tool list and the status label always describe the same agent.
+   */
+  const agentForServer = () => {
+    const found = new Map()
+    for (const [agent, entry] of agents) {
+      if (typeof entry.cwd !== 'string' || entry.cwd === '') continue
+      for (const server of projectServersFor(committedServers, entry.cwd)) {
+        if (server.enabled !== false && typeof server.serverName === 'string' && !found.has(server.serverName)) {
+          found.set(server.serverName, agent)
+        }
+      }
+    }
+    return found
+  }
+
+  const readRuntime = () => {
+    const { rows } = configuredMcpRows(ctx)
+    const plain = JSON.parse(JSON.stringify(rows))
+    const names = plain.map((row) => row.serverName)
+    // Global rows are instantiated by the Loader at the root, so the unscoped view is
+    // exactly where their tools are. Everything else lives in an agent's scope and is
+    // invisible to an unscoped read — which is why every project server used to report zero
+    // tools while the card still said it was configured.
+    const globalNames = plain.filter((row) => String(row.scope) === GLOBAL_SCOPE).map((row) => row.serverName)
+    const projectNames = plain.filter((row) => String(row.scope) !== GLOBAL_SCOPE).map((row) => row.serverName)
+
+    const byName = new Map()
+    const globalInventory = toolsByServer(ctx, globalNames)
+    if (globalInventory.ok) for (const entry of globalInventory.servers) byName.set(entry.serverName, entry)
+
+    const scopes = agentForServer()
+    for (const name of projectNames) {
+      const agent = scopes.get(name)
+      // No live agent for this scope means the server is genuinely not mounted right now
+      // (`computeServerStatus` reports the same situation as `unmounted`). Leaving it out of
+      // `byName` is the honest answer: an empty list, not a fabricated one.
+      if (agent === undefined) continue
+      const scoped = toolsByServer(ctx, [name], agent)
+      if (!scoped.ok) continue
+      for (const entry of scoped.servers) byName.set(entry.serverName, entry)
+    }
+
+    // A failed registry read is reported as a whole, exactly as before: "the registry is
+    // unreadable" is a different fact from "this server exposes nothing".
+    const inventory = globalInventory.ok
+      ? { ok: true, servers: names.map((serverName) => byName.get(serverName) ?? { serverName, tools: [] }) }
+      : globalInventory
+    const serverTools = inventory.ok ? inventory.servers : []
+    const serverToolsError = inventory.ok
+      ? { reason: '', detail: '' }
+      : { reason: String(inventory.reason ?? ''), detail: String(inventory.detail ?? '') }
+    projection.toolsError = inventory.ok ? null : `${serverToolsError.reason}: ${serverToolsError.detail}`
+    const toolCounts = new Map(serverTools.map((entry) => [entry.serverName, entry.tools.length]))
+    const serverStatus = computeServerStatus({ rows: plain, entries: readServers(), toolCounts })
+    return { serverTools, serverToolsError, serverStatus }
+  }
+  // Optional injection keeps non-web profiles usable; never fall back to writing tools.
+  ctx.inject(['webServer', 'connection'], (inner) => registerRuntimeRoute(inner, readRuntime))
 
   ctx.inject(['settings'], (inner) => {
     /**
@@ -1157,7 +1216,21 @@ export function apply(ctx, config) {
       return () => clearInterval(timer)
     })
 
+    let runtimeCleaned = false
+    let runtimeCleanupPending = false
+    let projectionAlive = true
+    inner.effect(() => () => { projectionAlive = false })
     const publish = () => {
+      if (!projectionAlive) return
+      if (!runtimeCleaned) {
+        if (runtimeCleanupPending) return
+        runtimeCleanupPending = true
+        Promise.resolve(migratePanelConfig(ctx))
+          .then(() => { runtimeCleaned = true; publish() })
+          .catch((error) => ctx.logger.warn('dsh-skills-mcp-manager: runtime cleanup failed: %s', String(error?.message ?? error)))
+          .finally(() => { runtimeCleanupPending = false })
+        return
+      }
       const { loaderFound, rows, error } = configuredMcpRows(ctx)
       projection.loaderFound = loaderFound
       projection.rows = rows.length
@@ -1175,25 +1248,10 @@ export function apply(ctx, config) {
       if (error !== undefined) projection.error = error
       const skillDirs = {
         userDsh: join(resolveDshHome(), 'skills'),
-        userAgents: join(process.env.DSH_AGENTS_HOME ?? join(homedir(), '.agents'), 'skills'),
+        userAgents: join(agentsHome(), 'skills'),
       }
-      // Live tool inventory, keyed by serverName. A failure carries its reason so
-      // the panel can say *why* it is unknown instead of showing a bare "unreadable"
-      // — "the registry is missing" is actionable, "this server has no tools" is not
-      // a failure at all, and the two must never look the same.
-      const entries = readServers()
-      const inventory = toolsByServer(ctx, plain.map((row) => row.serverName))
-      const serverTools = inventory.ok ? inventory.servers : []
-      const serverToolsError = inventory.ok
-        ? { reason: '', detail: '' }
-        : { reason: String(inventory.reason ?? ''), detail: String(inventory.detail ?? '') }
-      if (!inventory.ok) {
-        projection.toolsError = `${serverToolsError.reason}${serverToolsError.detail === '' ? '' : `: ${serverToolsError.detail}`}`
-      } else {
-        projection.toolsError = null
-      }
-      const toolCounts = new Map(serverTools.map((entry) => [entry.serverName, entry.tools.length]))
-      const serverStatus = computeServerStatus({ rows: plain, entries, toolCounts })
+      // Keep background probes warm even when no panel is open.
+      readRuntime()
       // The filter may only judge servers the panel can see, so its cached name set
       // is refreshed on the same slow tick that publishes everything else.
       refreshFilterServers(readServers())
@@ -1215,15 +1273,16 @@ export function apply(ctx, config) {
           detail: String(cached?.detail ?? ''),
         })),
       }
-      const key = JSON.stringify([plain, serverTools, serverToolsError, serverStatus, filterStateOut, probeStateOut, spaces, currentWorkspace, discoveredSkills, skillDirs, discoveryInfo])
+      const { at: scanAt, ...discoveryState } = discoveryInfo
+      const key = JSON.stringify([plain, filterStateOut, probeStateOut, spaces, currentWorkspace, discoveredSkills, skillDirs, discoveryState])
       if (key === published) return
       // Never erase a good projection because the Loader read came back empty.
       if (plain.length === 0 && !loaderFound) {
         projection.error = projection.error ?? 'loader unavailable'
         return
       }
-      Promise.resolve(inner.settings.update('skills-mcp-panel', {
-          profileServers: plain, serverTools, serverToolsError, serverStatus, filterState: filterStateOut, probeState: probeStateOut, workspaces: spaces, currentWorkspace, discoveredSkills, skillDirs, discoveryInfo,
+      Promise.resolve(inner.settings.update(name, {
+          profileServers: plain, filterState: filterStateOut, probeState: probeStateOut, workspaces: spaces, currentWorkspace, discoveredSkills, skillDirs, discoveryInfo,
           // Re-assert every publish: this marker has been lost by a later rewrite
           // before, and losing it hides the row actions in the panel.
           rowOpsReady: true,
@@ -1237,14 +1296,10 @@ export function apply(ctx, config) {
         })
         .catch((writeError) => {
           projection.error = String(writeError?.message ?? writeError)
-          ctx.logger.warn('skills-mcp-panel: cannot publish profile rows: %s', projection.error)
+          ctx.logger.warn('dsh-skills-mcp-manager: cannot publish profile rows: %s', projection.error)
         })
     }
     publish()
-    // Announce the capability once per load, independently of the projection diff.
-    if ((config?.rowOpsReady?.get?.() ?? config?.rowOpsReady) !== true) {
-      Promise.resolve(inner.settings.update('skills-mcp-panel', { rowOpsReady: true })).catch(() => {})
-    }
     const timer = setInterval(publish, 5000)
     inner.effect(() => () => clearInterval(timer))
 
@@ -1259,7 +1314,7 @@ export function apply(ctx, config) {
       // Clear the queue BEFORE writing the patch: the clear is itself a settings
       // write, and writing the patch first nests HMR transactions ("HMR
       // transactions cannot be nested"), which left the queue replaying forever.
-      Promise.resolve(inner.settings.update('skills-mcp-panel', { rowOps: [] }))
+      Promise.resolve(inner.settings.update(name, { rowOps: [] }))
         .then(() => new Promise((resolve) => setTimeout(resolve, 1200)))
         .then(async () => {
           for (const op of queue) {
@@ -1268,7 +1323,7 @@ export function apply(ctx, config) {
               rowOps.applied += 1
             } catch (error) {
               rowOps.error = String(error?.message ?? error)
-              ctx.logger.warn('skills-mcp-panel: row %s failed: %s', op.op, rowOps.error)
+              ctx.logger.warn('dsh-skills-mcp-manager: row %s failed: %s', op.op, rowOps.error)
             }
           }
         })
@@ -1280,7 +1335,7 @@ export function apply(ctx, config) {
           // Row ops change the profile; recompute and publish at once instead of
           // waiting for the 2s tick plus the 5s publish timer (that pair made the first
           // create look slow while the write itself had long finished).
-          try { tick(); publish() } catch (error) { console.error('[skills-mcp-panel] post-drain refresh failed:', error) }
+          try { tick(); publish() } catch (error) { console.error('[dsh-skills-mcp-manager] post-drain refresh failed:', error) }
           applying = false
           beat({ ...lastBeat, at: new Date().toISOString(), rowOps })
           // The Loader hot-reloads the patch a moment after the write; republish
@@ -1291,6 +1346,34 @@ export function apply(ctx, config) {
     drain()
     const opTimer = setInterval(drain, 500)
     inner.effect(() => () => clearInterval(opTimer))
+
+    /**
+     * Row commands over HTTP — the short path, beside the queue above.
+     *
+     * The write takes ~1–5 ms (measured). The queue route wrapped 2–4 s of *waiting* around it:
+     * a 500 ms drain poll, a fixed 1200 ms pause (see the comment above `drain`), the Loader's
+     * reload of the patch, and then the panel's own poll before it saw anything. During all of
+     * that the panel could only show a spinner. Same service DSH's own plugins use for their
+     * routes, same trust check as the runtime read route, and the **same `RowOp` schema** the
+     * queue validated with — so the two channels cannot disagree about what a command means.
+     *
+     * The queue keeps draining: a panel that only knows that channel still works, and it stays
+     * the fallback when this route is unavailable (an older Host, or a profile with no web
+     * server).
+     */
+    ctx.inject(['webServer', 'connection'], (routeCtx) => registerRowRoute(routeCtx, {
+      schema: (payload) => RowOp(payload),
+      apply: async (op) => {
+        await applyRowOp(routeCtx, op)
+        // The patch changed outside the settings channel, so refresh the projection now rather
+        // than waiting for the 2 s tick: the list is built from it, and a short round-trip is
+        // the whole point of this route.
+        try { tick(); publish() } catch (error) {
+          routeCtx.logger.warn('dsh-skills-mcp-manager: post-command refresh failed: %s', String(error?.message ?? error))
+        }
+        return { ok: true, reason: '' }
+      },
+    }))
 
     /**
      * Panel requests to reconnect one MCP server.
@@ -1314,14 +1397,14 @@ export function apply(ctx, config) {
     /** How long to wait for the Loader to reflect a disable before giving up on it. */
     const RECONNECT_STEP_TIMEOUT_MS = 25000
 
-    const clearReconnectRequest = () => Promise.resolve(inner.settings.update('skills-mcp-panel', {
+    const clearReconnectRequest = () => Promise.resolve(inner.settings.update(name, {
       reconnectRequest: { tier: '', serverName: '', scope: '', nonce: '', at: '' },
       reconnectResult: { ...reconnectResult },
     }))
 
     const finishReconnect = (nonce, error) => {
       reconnectResult = { nonce, ok: error === undefined, error: error === undefined ? '' : String(error) }
-      if (error !== undefined) ctx.logger.warn('skills-mcp-panel: reconnect failed: %s', reconnectResult.error)
+      if (error !== undefined) ctx.logger.warn('dsh-skills-mcp-manager: reconnect failed: %s', reconnectResult.error)
       reconnectTask = null
       // Refresh first so the tag moves immediately, then clear the request so the panel
       // stops showing it as in flight. A leftover `disabled: true` is never acceptable,
@@ -1332,11 +1415,11 @@ export function apply(ctx, config) {
             tick()
             publish()
           } catch (refreshError) {
-            ctx.logger.warn('skills-mcp-panel: post-reconnect refresh failed: %s', String(refreshError?.message ?? refreshError))
+            ctx.logger.warn('dsh-skills-mcp-manager: post-reconnect refresh failed: %s', String(refreshError?.message ?? refreshError))
           }
         })
         .catch((writeError) => {
-          ctx.logger.warn('skills-mcp-panel: cannot clear the reconnect request: %s', String(writeError?.message ?? writeError))
+          ctx.logger.warn('dsh-skills-mcp-manager: cannot clear the reconnect request: %s', String(writeError?.message ?? writeError))
         })
     }
 
@@ -1427,7 +1510,7 @@ export function apply(ctx, config) {
           const op = String(skillReq?.op ?? '')
           const roots = writableRoots({
             dshHome: resolveDshHome(),
-            agentsHome: process.env.DSH_AGENTS_HOME ?? join(homedir(), '.agents'),
+            agentsHome: agentsHome(),
             projectRoot: skillReq?.project === '' ? '' : projectRootOf(String(skillReq.project)),
           })
           const target = roots.find((entry) => entry.scope === skillReq?.scope && entry.id === skillReq?.id)
@@ -1451,7 +1534,7 @@ export function apply(ctx, config) {
                     .filter((root) => typeof root === 'string' && root !== '')
                   await refreshDiscovered(nextRoots)
                 } catch (error) {
-                  if (process.env.SMP_DEBUG) console.error('[skills-mcp-panel] read rescan failed', error)
+                  if (process.env.SMP_DEBUG) console.error('[dsh-skills-mcp-manager] read rescan failed', error)
                 }
               }
               if (!isKnown()) {
@@ -1495,7 +1578,7 @@ export function apply(ctx, config) {
             // the plugin load and DSH exited with "fatal load failure", taking the
             // whole app (and every other plugin) down with it.
             try {
-              await Promise.resolve(inner.settings.update('skills-mcp-panel', {
+              await Promise.resolve(inner.settings.update(name, {
                 skillResult: result,
                 // Clear the request in the same write so a restart cannot replay it.
                 skillRequest: { op: '', scope: '', id: '', project: '', path: '', name: '', prevName: '', description: '', body: '', nonce: '' },
@@ -1519,12 +1602,12 @@ export function apply(ctx, config) {
               }
               // Publish immediately: waiting for the 5s publish interval was the
               // entire reason a save took ~4.6s to show up in the panel.
-              try { publish() } catch (error) { console.error('[skills-mcp-panel] immediate publish failed:', error) }
+              try { publish() } catch (error) { console.error('[dsh-skills-mcp-manager] immediate publish failed:', error) }
             } catch (error) {
-              console.error('[skills-mcp-panel] skill op failed:', error)
+              console.error('[dsh-skills-mcp-manager] skill op failed:', error)
             }
            } catch (error) {
-            console.error('[skills-mcp-panel] skill request failed:', error)
+            console.error('[dsh-skills-mcp-manager] skill request failed:', error)
            }
           })()
         }
@@ -1543,8 +1626,8 @@ export function apply(ctx, config) {
       } catch (error) {
         payload = { nonce, source, scope, project, at: new Date().toISOString(), files: [], servers: [], error: String(error?.message ?? error) }
       }
-      Promise.resolve(inner.settings.update('skills-mcp-panel', { importResult: payload }))
-        .catch((error) => ctx.logger.warn('skills-mcp-panel: import scan failed: %s', String(error?.message ?? error)))
+      Promise.resolve(inner.settings.update(name, { importResult: payload }))
+        .catch((error) => ctx.logger.warn('dsh-skills-mcp-manager: import scan failed: %s', String(error?.message ?? error)))
     }, 600)
     inner.effect(() => () => clearInterval(importTimer))
   })
@@ -1555,6 +1638,10 @@ export function apply(ctx, config) {
   let firstTick = true
 
   const tick = () => {
+    // Before anything is decided: make sure every live agent is tracked. An agent that
+    // predates this plugin's subscription never fires `agent/created` here, and an untracked
+    // agent is an unmounted project server (see `adoptLiveAgents`).
+    adoptLiveAgents()
     const servers = readServers()
     const skills = readSkills()
 
@@ -1630,7 +1717,7 @@ export function apply(ctx, config) {
         .then((result) => { lastReconcile = result })
         .catch((error) => {
           lastReconcile = { error: String(error?.message ?? error) }
-          ctx.logger.error('skills-mcp-panel: skill reconciliation failed')
+          ctx.logger.error('dsh-skills-mcp-manager: skill reconciliation failed')
           ctx.logger.error(error)
         })
     }

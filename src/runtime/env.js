@@ -70,7 +70,7 @@ export function loginPath() {
     found = out === '' ? '' : out.split('\n').pop().trim()
   } catch (error) {
     // An empty login PATH silently changes how stdio MCP servers resolve npx.
-    if (process.env.SMP_DEBUG) console.error('[skills-mcp-panel] login PATH lookup failed', error)
+    if (process.env.SMP_DEBUG) console.error('[dsh-skills-mcp-manager] login PATH lookup failed', error)
   }
   // 查不到登录 PATH（Linux 上没有 zsh、`-l` 失败等）时退回本进程的 PATH：
   // 完全不给 PATH 会让 `#!/usr/bin/env node` 的子进程直接死掉，比继承一份不完整的更糟。

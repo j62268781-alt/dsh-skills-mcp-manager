@@ -13,7 +13,8 @@ import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parse } from 'yaml'
-import { applyRowOp, setPatchIO } from '../src/patch/apply.js'
+import { NAME, LEGACY_NAME } from '../src/identity.js'
+import { applyRowOp, migratePanelConfig, setPatchIO } from '../src/patch/apply.js'
 
 const YAML_JS_TAG = { tag: 'tag:yaml.org,2002:js', resolve: (value) => value }
 const readPatch = (path) => parse(readFileSync(path, 'utf8'), { customTags: [YAML_JS_TAG] })
@@ -192,6 +193,46 @@ test('改动不存在的行必须抛错且不写文件', async () => {
   const original = readFileSync(path, 'utf8')
   await assert.rejects(() => applyRowOp(ctxFor(dir), { op: 'toggle', entryId: 'mcp-nope', enabled: false }), /not found/)
   assert.equal(readFileSync(path, 'utf8'), original, '失败时文件必须一字未改')
+})
+
+test('运行时字段清理及旧标识迁移兼容顶层和 insert 行，保留规则并且只写一次', async () => {
+  for (const [nested, entryId] of [[false, NAME], [true, NAME], [false, LEGACY_NAME], [true, LEGACY_NAME]]) {
+    usePlainIO()
+    const row = `- id: ${entryId}
+  config:
+    # keep filter rules
+    toolFilters:
+      deepwiki: { mode: deny, tools: [private] }
+    serverTools: [{ serverName: deepwiki, tools: [] }]
+    serverToolsError: { reason: '', detail: '' }
+    serverStatus: []
+`
+    const content = HAZARDOUS + (nested ? `- insert:\n${row.split('\n').filter(Boolean).map((line) => '    ' + line).join('\n')}\n` : row)
+    const dir = makeProfile(content)
+    const path = join(dir, 'cordis.patch.yml')
+    const before = readPatch(path)
+    assert.equal(await migratePanelConfig(ctxFor(dir)), entryId === LEGACY_NAME ? 4 : 3)
+    const after = readPatch(path)
+    const panel = findRowDeep(after, (item) => item.id === 'dsh-skills-mcp-manager')
+    assert.deepEqual(panel.config, { toolFilters: { deepwiki: { mode: 'deny', tools: ['private'] } } })
+    assert.deepEqual(dropById(after, NAME), dropById(before, entryId))
+    const cleaned = readFileSync(path, 'utf8')
+    assert.match(cleaned, /# keep filter rules/)
+    assert.match(cleaned, /!!js process.env.LOCAL_URL/)
+    assert.equal(await migratePanelConfig(ctxFor(dir)), 0)
+    assert.equal(readFileSync(path, 'utf8'), cleaned)
+  }
+})
+
+test('没有旧运行时字段的配置也会迁移，完整保留用户配置', async () => {
+  usePlainIO()
+  const config = { skills: [{ name: 'demo', enabled: true }], servers: [{ serverName: 'demo', command: 'node', args: 'server.js' }], toolFilters: { demo: { mode: 'deny', tools: ['private'] } } }
+  const dir = makeProfile(HAZARDOUS + `- id: ${LEGACY_NAME} # keep row comment\n  config: ${JSON.stringify(config)}\n`)
+  const path = join(dir, 'cordis.patch.yml')
+  assert.equal(await migratePanelConfig(ctxFor(dir)), 1)
+  assert.deepEqual(findRowDeep(readPatch(path), (row) => row.id === NAME).config, config)
+  assert.match(readFileSync(path, 'utf8'), /# keep row comment/)
+  assert.equal(await migratePanelConfig(ctxFor(dir)), 0)
 })
 
 // 可选：SMP_REAL_PATCH=/path/to/cordis.patch.yml 时，在真实配置的副本上跑同样的无损检查

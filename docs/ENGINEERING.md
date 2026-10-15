@@ -16,8 +16,8 @@ Harness Client 包，也没有第三方依赖。
 
 | | 状态存哪 | 谁去落地 |
 |---|---|---|
-| 面板 UI | 本插件自己的 settings 命名空间（= 行 id `skills-mcp-panel`），经官方 settings remote 读写，落在 profile 的 `cordis.patch.yml` 的 `config.servers` / `config.skills` | Client 半 |
-| Skills | 同上 | Host 半把每个启用的条目写成 `<root>/<name>/SKILL.md`：全局 → `$DSH_HOME/skills/`，项目 → `<项目根>/.agents/skills/`；删条目时删除自己写过的文件（清单在 `$DSH_HOME/skills-mcp-panel.state.json`） |
+| 面板 UI | 本插件自己的 settings 命名空间（= 行 id `dsh-skills-mcp-manager`），经官方 settings remote 读写，落在 profile 的 `cordis.patch.yml` 的 `config.servers` / `config.skills` | Client 半 |
+| Skills | 同上 | Host 半把每个启用的条目写成 `<root>/<name>/SKILL.md`：全局 → `$DSH_HOME/skills/`，项目 → `<项目根>/.agents/skills/`；删条目时删除自己写过的文件（清单在 `$DSH_HOME/dsh-skills-mcp-manager.state.json`） |
 | MCP（全局） | 同上 | Host 半为每个启用的 server 挂一个官方 `@deepseek-ai/dsh-mcp-client` 实例，**挂在根 scope**（`ctx.root`）——工具命名、发现、重连、图片处理与配置行完全一致，且不用改写 profile patch。挂在自己的 fiber 里会让工具被 scope 隔离、agent 看不到，这是真机测出来的 |
 | MCP（项目） | 同上 | 监听 `agent/created`：会话工作目录落在某个项目 scope 之内（含子目录）时，把该项目的 server 挂进**这个 agent 自己的 scope**——只有该项目里的 agent 看得到这些工具；`agent/disposed` 时自动卸载 |
 
@@ -26,14 +26,14 @@ Harness Client 包，也没有第三方依赖。
 ## 安装（当前是手工装的最小步骤）
 
 > **这一节是历史记录，包名已过期**：0.4.0 起包名是 `@j62268781-alt/dsh-skills-mcp-manager`
-> （不再是 `@local/dsh-skills-mcp-panel`）。当前的安装方式看
+> （已停用本地开发包名）。当前的安装方式看
 > [`README.md` 的安装一节](../README.md#安装)。
 
 ```bash
 PROFILE=~/.dsh/profiles/desktop
-mkdir -p "$PROFILE/node_modules/@local"
-cp -R . "$PROFILE/node_modules/@local/dsh-skills-mcp-panel"
-# 把 '@local/dsh-skills-mcp-panel' 追加进 package.json 的 dsh.profile.bundles
+mkdir -p "$PROFILE/node_modules/@j62268781-alt"
+cp -R . "$PROFILE/node_modules/@j62268781-alt/dsh-skills-mcp-manager"
+# 把 '@j62268781-alt/dsh-skills-mcp-manager' 追加进 package.json 的 dsh.profile.bundles
 ```
 
 然后用 Creator 模式的 `plugin_manager` 重装一次，让它成为正式安装（写依赖 + 锁文件）。
@@ -71,7 +71,7 @@ cp -R . "$PROFILE/node_modules/@local/dsh-skills-mcp-panel"
 用 headless Chrome 截图后人工比对——改动都是这样迭代出来的。
 
 对运行中的 app 做端到端校验（需要会话 cookie，脚本见本目录 `verify-served.mjs`）：
-首页 boot 数据的 combo 列表里应出现 `@local/dsh-skills-mcp-panel/client.js`，
+首页 boot 数据的 combo 列表里应出现 `@j62268781-alt/dsh-skills-mcp-manager/client.js`，
 拉取该 combo 应包含 `.smp-page` / `settings.section` / `添加服务器` 等当前版本标记。
 
 ## 运行机制（都是真机测出来才对的）
@@ -89,8 +89,8 @@ cp -R . "$PROFILE/node_modules/@local/dsh-skills-mcp-panel"
 
 | 文件 | 用途 |
 |---|---|
-| `$DSH_HOME/skills-mcp-panel.heartbeat.json` | 每次变化时记录：观测到的 servers/skills、是否变化、挂载数、是否根 scope、上次 reconcile 的写入/删除结果 |
-| `$DSH_HOME/skills-mcp-panel.state.json` | 本插件写出的技能文件清单（删条目时据此回收文件） |
+| `$DSH_HOME/dsh-skills-mcp-manager.heartbeat.json` | 每次变化时记录：观测到的 servers/skills、是否变化、挂载数、是否根 scope、上次 reconcile 的写入/删除结果 |
+| `$DSH_HOME/dsh-skills-mcp-manager.state.json` | 本插件写出的技能文件清单（删条目时据此回收文件） |
 
 两个文件都可以随时删除，会自动重建。
 
@@ -147,27 +147,40 @@ MCP 行的 Config 没有 `.volatile()` 字段，`pluginInventory.list()` 也不�
 
 诊断：面板 URL 加 `?smp=debug` 会多出一个 "Loader 诊断" 分组，列出 Loader 里所有 mcp 相关行。
 
-## 界面结构（v0.3：两层折叠 + 同行筛选栏）
+## 界面结构（v0.5：一份列表 + 同行筛选栏）
 
-每个 tab 的结构与「内置插件」页一致：
+两个 tab 现在是**同一套布局**（MCP 先统一，Skills 随后跟上），不再有可折叠的分区块：
 
 ```
 [Skills & MCP 页头]
 [MCP（n）  Skills（n）]                            ← 标签栏
-[🔍 搜索…（占满剩余）      ][项目路径（项目级层）]      ← 同一行的联合筛选
-▾ 全局 MCP                        [添加服务器]
-    全局 · 面板管理 N 个 · 配置文件 M 个
-    [面板管理的卡片] [配置文件行的只读卡片]
-▾ 项目级 MCP                      [添加服务器]
-    <项目路径> · N 个 · 只挂载到该项目内运行的 agent
-    [该项目的卡片]
+共 N 个 · 作用域见卡片上的标签 · …                    ← summary（搜索框上方）
+[🔍 搜索…（占满剩余）  ][添加服务器/添加技能]            ← 搜索 + 该页签的主操作
+[导入 MCP 卡片]
+[表单（点了「添加」才出现，紧贴它要追加的列表）]
+[卡片：全局的排前面，然后按工作区顺序]
 ```
 
-- **两层折叠**：全局 / 项目级各一层，各自可折叠、各有自己的「添加」按钮。
-- **联合筛选**：搜索框与项目路径同一行；搜索对当前视图（两层 + 配置文件行）同时生效，
-  匹配名称 / 地址 / 描述 / 行 id；项目路径决定「项目级」层显示哪个项目的条目，
-  并带 datalist 补全已出现过的项目路径。
-- Skills tab 完全同样的布局（全局技能 / 项目级技能 + 同一行筛选）。
+- **一份列表，没有分区标题**：两档只差一个 `scope`，卡片上的作用域标签已经说明了归属，
+  再加一层标题只是重复。顺序为 **全局 → 工作区（按注册表顺序）→ 注册表之外的作用域**，
+  组内保持创建顺序（新条目追加在末尾）。这条规则的实现是纯函数
+  `lib/src/components/scopeOrder.js`，两个 tab 共用。
+- **summary 在搜索框上方**，报的是「列表里现在有几个」，跟着筛选取值。
+- **「添加」按钮与搜索框同一行**，表单紧贴列表上方：按钮与它会追加到的列表在同一屏，
+  否则点完像没反应（表单在列表底部时就是这样）。
+- **卡片两列**：左列「标题 + 作用域标签 + 描述」，右列「启用开关 + `…` 菜单」，
+  整行垂直居中（`.smp-cardRow`）。操作收进 `…` 菜单而不是平铺三个按钮——平铺的操作区
+  比它所属的名字还宽。展开后是同一套 `.smp-details` 两列网格。
+- **只有搜索，没有项目筛选器**。两个 tab 都不再有项目选择器：MCP 的作用域在服务器自己的
+  表单里选，Skills 的列表跨工作区展示、新条目的工作区在添加对话框里选。留一个筛选器就是留一个
+  筛不到东西的控件。
+- **卡片标签统一为「全局 / 工作区名」**。以前 skills 按**根名**打标签（`dsh` / `agents`），
+  而 MCP 的全局行干脆不打标签 —— 两个页签读起来是两套语言，而且"属于哪个工作区"这个问题
+  在 skills 那边根本没被回答。「文件落在两个根中的哪一个」是展开后「落盘」那一行的事。
+- **每档两个可写根**：全局 = `~/.agents/skills`、`~/.dsh/skills`；项目级 =
+  `<工作区>/.agents/skills`、`<工作区>/.dsh/skills`。DSH 的 provider 四个都读，所以
+  `config.skills[]` 的条目必须记住自己在哪个根（`id`）——否则 `reconcileSkills` 会用默认根
+  覆盖它，把用户刚写到 `~/.agents/skills` 的文件搬走（见下）。添加对话框显示四个**绝对路径**。
 
 ## 完整 CRUD（v0.4）
 
@@ -178,15 +191,41 @@ MCP 行的 Config 没有 `.volatile()` 字段，`pluginInventory.list()` 也不�
 | 面板添加的条目 | ✓ 层里「添加服务器 / 添加技能」 | ✓ 卡片展开 → 编辑 | ✓ | ✓ MCP 可停用 |
 | 配置文件里的行（`mcp-*`） | —（用面板添加替代） | ✓ 写回 profile patch | ✓ 两步确认 | — |
 
-配置行的编辑/删除走 `rowOps` 队列：客户端把 `{op:'delete'|'update', entryId, ...}` 写进本插件的 settings 命名空间
-（第三方 bundle 唯一能触达 Host 的通道），Host 半每 2 秒取一次、执行完把队列清空。
+配置行的编辑/删除走 **HTTP 命令通道**：`POST /dsh-skills-mcp-manager/rows`，body 就是一条
+`{op:'delete'|'update', entryId, ...}`，与 Host 的 `RowOp` schema 完全同构（`src/mcp/rows.js`）。
+
+**为什么从 settings 队列改过来。** 写 patch 实测只要 **1–5ms**，而队列通道要 2–4 秒才让面板看到结果：
+500ms 排空轮询 → 固定 1200ms 死等（`src/index.js` 里那句 `setTimeout(resolve, 1200)`，目的是把
+"清队列"和"写 patch"两次 HMR 写入岔开）→ 写完等 Loader 重载 → 面板自己 700/1500ms 轮询。
+用户点完只看到转圈，删除的卡片还留在屏幕上，读起来就是"点了没反应"。DSH 官方插件
+（`dsh-host-open-in-app`、`dsh-deepseek-account-platform`）都用同一个 `webServer` 服务注册自己的路由，
+本插件的只读 `GET /<ns>/runtime` 也是这么做的，所以命令也走同一条路。
+
+安全边界（写端点比只读端点风险高，所以逐条约束）：
+
+- 先 `connection.requestRejection(req)`：与只读路由同一套信任检查（Host 头须为 loopback/可信、
+  拒绝 `sec-fetch-site: cross-site`、Origin 须同源，外加 browser-auth cookie）。面板同源发请求、天然带 cookie。
+- **只接受 POST**，且必须 `content-type: application/json`——跨站 HTML 表单发不出这个类型，
+  所以这条把"同源脚本"变成了写路径的前置条件。
+- body 由**同一个 `RowOp` schema** 校验：两个通道不可能对"一条命令是什么意思"产生分歧，
+  未知字段也进不了写盘逻辑。
+- 命令**串行**执行（模块内一条 promise 链），两次点击不会交错成两次 read-modify-write。
+- 不返回凭据；失败只回一句 `reason`，不带堆栈或用户机器上的路径。
+
+**幂等**：HTTP 会被重试、也会和周期投影赛跑，所以写路径自己保证安全——
+`add` 遇到已存在的行 id 是**改写那一行**而不是追加第二行（`insertRow` 本来无条件追加，重复会留下两行
+同 id 的 mcp-client 行，被 Loader 连两次）；`delete` 遇到本来就不在的行**返回成功**（目标状态已成立，
+报错只会让用户为一次已经成功的操作看到一个吓人的失败）。
+
+队列仍然保留并继续排空：它现在是**回退通道**（旧 Host、没有 webServer 的 profile、或请求失败时），
+所以面板在两种 Host 上都能用。
 
 写盘安全性（照抄官方 config-editor 的做法）：
 
 - 与 config-editor 共用同一把锁：`withFileLock(join(profileDir,'package.json'))`
 - 原子写：`writeFileAtomic`（来自 `@deepseek-ai/dsh-atomic-write`）
 - **写前重新解析**：改完先 `parseDocument` 校验一次，YAML 不合法就拒绝写入
-- **每次改写前自动备份**：`$DSH_HOME/skills-mcp-panel.backups/cordis.patch.yml.<时间戳>.bak`
+- **每次改写前自动备份**：`$DSH_HOME/dsh-skills-mcp-manager.backups/cordis.patch.yml.<时间戳>.bak`
 - 能定位 `insert:` 列表里的行（你的 4 条就在 `insert:` 里），删空后连空指令一起清掉
 
 **能力门控**：Host 半启动时会写一个 `rowOpsReady: true` 标记；面板只有在看到它时才显示配置行的
@@ -439,7 +478,7 @@ npm run deploy  # 安装进 desktop profile（旧版自动备份）
 - **测试**：21 个 `test/*.test.mjs`，94 项断言全绿（`npm test`）
 - **安装脚本**：`npm run deploy`（拷贝式安装 + 旧版自动备份 + 回滚只需改名）
 - **仓库**：https://github.com/j62268781-alt/dsh-skills-mcp-manager （tag `v0.3.0` 起）
-  > 当时仓库名还叫 `dsh-skills-mcp-panel`，0.4.0 改名后旧地址 301 到这里。当前名字是 manager。
+  > 0.4.0 完成仓库改名，旧地址重定向到当前仓库。
 
 已知未尽事项：
 
@@ -478,12 +517,12 @@ Client 半已全部改为 JSX：`lib/src/**` 的渲染模块都是 `.jsx`，`lib
 |---|---|
 | `lib/src/components/head.jsx` | 页头（样板，确立了全局 jsxFactory 方案）|
 | `lib/src/components/tabs.jsx` | tab 条 |
-| `lib/src/components/filterRow.jsx` | 搜索框 + 项目选择器 + 自定义路径 |
-| `lib/src/components/group.jsx` | 分组标题行 + 副标题 |
+| `lib/src/components/filterRow.jsx` | 搜索框 + 该页签的主操作 |
+| `lib/src/components/scopeOrder.js` | 两个 tab 共用的展示顺序（全局 → 工作区 → 其他）|
 | `lib/src/components/dialog.jsx` | 官方 Modal 删除确认 |
 | `lib/src/components/card.jsx` | 详情字段表（`detailNodes`）|
 | `lib/src/components/chevron.jsx` · `field.jsx` | 小组件 |
-| `lib/src/client.js` | `card()` / `profileCard()` / `serverForm()` / `skillForm()` / `importCard()` / `tierSection()` / 四个列表 / 页面根 return / 调试块 —— 全部就地 JSX 化 |
+| `lib/src/client.js` | `card()` / `profileCard()` / `serverForm()` / `skillForm()` / `importCard()` / 两份列表 / 页面根 return / 调试块 —— 全部就地 JSX 化 |
 | `lib/src/config.js` · `importSources.js` | 纯逻辑/纯数据（无渲染，无需 JSX）|
 
 无需迁移（纯逻辑，不含渲染）：`components/form.js` · `components/sections.js` · `components/filters.js`。
@@ -537,9 +576,9 @@ function sanitizeProfile(binName, profileDir, bundles) {
 1. 别慌：数据没丢。找 `~/.dsh/profiles/<profile>/cordis.patch.yml.bak-<毫秒>`（DSH 隔离时留下的原始文件）
 2. 先把**当前**文件另存一份（`cp cordis.patch.yml cordis.patch.yml.after-crash-<时间>`），不要覆盖任何东西
 3. 用备份恢复：`cp cordis.patch.yml.bak-<毫秒> cordis.patch.yml`
-4. 检查是否残留会重放的一次性请求：`grep -n "nonce" cordis.patch.yml`，把 `skills-mcp-panel` 段落里的
+4. 检查是否残留会重放的一次性请求：`grep -n "nonce" cordis.patch.yml`，把 `dsh-skills-mcp-manager` 段落里的
    `skillRequest` 的 `nonce` 清成 `""`（否则重启会重放同一条请求）
-5. 本插件自己的写前备份在 `~/.dsh/skills-mcp-panel.backups/cordis.patch.yml.<ISO 时间戳>.bak`
+5. 本插件自己的写前备份在 `~/.dsh/dsh-skills-mcp-manager.backups/cordis.patch.yml.<ISO 时间戳>.bak`
 ### 部署闸门（2026-10-03 新增）
 
 `npm run deploy` 在**拷贝之前**先执行一次 `scripts/host-smoke.mjs`（真实加载 + 三通道请求）。
@@ -553,7 +592,7 @@ function sanitizeProfile(binName, profileDir, bundles) {
 printf '\nthrow new Error("boom")\n' >> src/index.js
 mkdir -p /tmp/smp-fake-profile
 DSH_PROFILE_DIR=/tmp/smp-fake-profile node scripts/deploy.mjs   # 期望：退出码 1 + 「已中止部署」
-ls /tmp/smp-fake-profile/node_modules/@local/dsh-skills-mcp-panel # 期望：不存在
+ls /tmp/smp-fake-profile/node_modules/@j62268781-alt/dsh-skills-mcp-manager # 期望：不存在
 git checkout -- src/index.js
 
 # ② 正常构建应成功

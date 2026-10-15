@@ -1,34 +1,39 @@
-/** components/sections 接口测试：分组副标题与空态文案。 */
+/**
+ * components/sections 接口测试：空态文案。
+ *
+ * 分组副标题随分组一起移除了（两个页签现在都是一份列表 + 一行 summary），所以这里只钉
+ * 空态。空态最容易出的错是「标签为空时留下一个前导空格」，那看起来像渲染坏了。
+ */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import {
-  emptyMcpText, emptySearchText, emptySkillText, globalMcpSubtitle,
-  globalSkillSubtitle, projectMcpSubtitle, projectSkillSubtitle,
-} from '../lib/src/components/sections.js'
+import { emptyMcpText, emptySearchText, emptySkillText } from '../lib/src/components/sections.js'
 
-test('全局 MCP 副标题：带配置文件数量与备份说明', () => {
-  const text = globalMcpSubtitle(5)
-  assert.match(text, /全局 · 配置文件 5 个/)
-  assert.match(text, /cordis\.patch\.yml/)
-  assert.match(text, /自动备份/)
+test('技能空态：无标签时自成一句，不留前导空格', () => {
+  const text = emptySkillText('')
+  assert.equal(text, '还没有技能 —— 点上面「添加技能」，保存后写入磁盘。')
+  assert.ok(!text.startsWith(' '), '文案不能以空格开头（旧实现在标签为空时会）')
+  assert.match(text, /「添加技能」/)
 })
 
-test('项目级 MCP 副标题：未选择项目时给出提示，选中时带工作区名', () => {
-  assert.equal(projectMcpSubtitle('', 0), '未选择项目 · 面板添加的条目只挂载到该项目内运行的 agent')
-  assert.equal(projectMcpSubtitle('tcl_jiguang', 2), 'tcl_jiguang · 面板添加 2 个 · 只挂载到该项目内运行的 agent')
+test('技能空态：带工作区名时点名该工作区', () => {
+  const text = emptySkillText('tcl_jiguang')
+  assert.match(text, /^tcl_jiguang 还没有技能/)
+  assert.match(text, /「添加技能」/)
+  // 空白标签与未传值走同一分支，不能产生 " 还没有…"
+  assert.equal(emptySkillText('   '), emptySkillText(undefined))
 })
 
-test('技能副标题：全局写 $DSH_HOME/skills，项目级写 <项目>/.agents/skills', () => {
-  assert.match(globalSkillSubtitle(3), /\$DSH_HOME\/skills\//)
-  assert.equal(projectSkillSubtitle('tcl_jiguang', 1), 'tcl_jiguang · 面板添加 1 个 · 写入 <项目>/.agents/skills/')
-  assert.equal(projectSkillSubtitle('', 0), '未选择项目')
+test('MCP 空态：无标签与带标签都不留前导空格', () => {
+  const bare = emptyMcpText('')
+  assert.equal(bare, '还没有 MCP 服务器 —— 可以点「添加服务器」，或用「导入 MCP」从其他工具导入。')
+  assert.ok(!bare.startsWith(' '), '文案不能以空格开头')
+  const named = emptyMcpText('tcl_jiguang')
+  assert.match(named, /^tcl_jiguang 还没有 MCP 服务器/)
+  assert.match(named, /「添加服务器」/)
+  assert.match(named, /「导入 MCP」/)
+  assert.equal(emptyMcpText(undefined), bare)
 })
 
-test('空态文案：用工作区短名而不是全路径', () => {
-  const text = emptyMcpText('tcl_jiguang')
-  assert.match(text, /^tcl_jiguang 还没有项目级 MCP/)
-  assert.match(text, /「添加服务器」/)
-  assert.match(text, /「导入 MCP」/)
-  assert.equal(emptySkillText('tcl_jiguang'), 'tcl_jiguang 还没有项目级技能。')
+test('搜索空态：带上查询词', () => {
   assert.equal(emptySearchText('github'), '没有匹配「github」的条目')
 })

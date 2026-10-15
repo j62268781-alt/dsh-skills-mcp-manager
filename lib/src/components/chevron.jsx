@@ -1,8 +1,9 @@
 /**
- * The disclosure chevron used by cards and group headings.
+ * The disclosure chevron used by the cards on both tabs.
  *
- * JSX version of the inline component; the name is unchanged so call sites and
- * the `Chevron` prop passed into groupHead keep working as-is.
+ * JSX version of the inline component; the name is unchanged so call sites keep working.
+ * (Group headings used to pass it through `groupHead`; both tabs are one plain list now, so
+ * the only call sites are the cards.)
  */
 export function Chevron({ open }) {
   return (

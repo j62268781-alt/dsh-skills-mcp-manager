@@ -10,7 +10,7 @@ const home = await mkdtemp(join(tmpdir(), 'smp-beat-'))
 process.env.DSH_HOME = home
 
 test('beatFile：指向 $DSH_HOME 下的心跳文件', () => {
-  assert.equal(beatFile(), join(home, 'skills-mcp-panel.heartbeat.json'))
+  assert.equal(beatFile(), join(home, 'dsh-skills-mcp-manager.heartbeat.json'))
 })
 
 test('beat：写入可解析的 JSON，保留我们关心的字段', async () => {

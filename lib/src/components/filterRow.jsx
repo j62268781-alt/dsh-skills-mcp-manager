@@ -1,19 +1,17 @@
 /**
- * The filter row: search box plus the project switch.
+ * The filter row: the search box plus the tab's primary action.
  *
- * One row: search on the left, project selector on the right. A hand-typed path
- * is a separate mode, entered from the dropdown and left via "选工作区".
+ * One row, one meaning: search on the left, the action on the same line — so the trigger and
+ * the list it appends to stay on one screen.
+ *
+ * There used to be a project selector here. **Neither tab has one now**: a server's scope is
+ * chosen in its own form, and the skills list shows every workspace at once (a skill's
+ * workspace is chosen in the add dialog). Keeping the selector would have meant a control that
+ * filters nothing.
  */
-import { HINTS } from './form.js'
 
 /** Build the filter row. */
-export function filterRow({
-  query, onQuery, project, projectChoices = [], customProject = false,
-  onCustomProject, onProject, placeholder,
-  // The MCP tab hides the project switch (scope moved into the server form) and puts its
-  // own action in the freed space — that slot is where 「添加服务器」 lives now.
-  showProject = true, actions = null,
-}) {
+export function filterRow({ query, onQuery, placeholder, actions = null }) {
   return (
     <div className="smp-filterRow" key="filter">
       <div className="smp-search" key="search">
@@ -35,44 +33,6 @@ export function filterRow({
       </div>
 
       {actions}
-
-      {!showProject ? null : customProject ? (
-        <input
-          className="smp-projectInput"
-          key="custom"
-          placeholder="项目绝对路径"
-          title="项目级层显示这个路径下的条目"
-          value={project}
-          onChange={(event) => onProject(event.target.value)}
-        />
-      ) : (
-        <select
-          className="smp-projectSelect"
-          key="project"
-          data-placeholder={project === ''}
-          title="选择项目（来自 DSH 的工作区）"
-          value={projectChoices.some(([path]) => path === project) ? project : ''}
-          onChange={(event) => {
-            const value = event.target.value
-            if (value === '__custom__') { onCustomProject(true); return }
-            onCustomProject(false)
-            onProject(value)
-          }}
-        >
-          <option value="" key="none">{HINTS.project}</option>
-          {projectChoices.map(([path, title]) => <option value={path} key={path}>{title}</option>)}
-          <option value="__custom__" key="custom">自定义路径…</option>
-        </select>
-      )}
-
-      {!showProject || !customProject ? null : (
-        <button
-          className="smp-button" data-variant="outline" key="back"
-          onClick={() => onCustomProject(false)}
-        >
-          选工作区
-        </button>
-      )}
     </div>
   )
 }

@@ -1,8 +1,8 @@
 /**
  * The tool inventory shown under an expanded MCP card.
  *
- * Data comes from the Host's projection of the harness tool registry (see
- * `toolsByServer` in `src/index.js`), keyed by serverName. Three states matter and
+ * Data comes from the Host runtime endpoint's view of the harness tool registry,
+ * keyed by serverName. Three states matter and
  * are deliberately distinct:
  *
  *   unknown  → the Host could not read the registry at all

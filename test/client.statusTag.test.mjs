@@ -123,7 +123,7 @@ test('停用的条目：开关显示为关，且不显示状态圆点', { skip: 
   }
 })
 
-test('开关：点一下会把 toggle 行操作写进队列（乐观显示为关）', { skip: skipWithoutBundle() }, async () => {
+test('开关：点一下把 toggle 命令发给 Host（乐观显示为关，无需等待）', { skip: skipWithoutBundle() }, async () => {
   const panel = await bootPanel(emptyDoc({
     profileServers: [project()], currentWorkspace: '/p/tcl', rowOpsReady: true, reconnectReady: true,
     serverStatus: [statusEntry()],
@@ -133,10 +133,34 @@ test('开关：点一下会把 toggle 行操作写进队列（乐观显示为关
     const sw = findSwitch(panel)
     assert.equal(sw.props['aria-checked'], true, '启用的条目开关应为开')
     panel.click(sw)
-    const op = (doc.rowOps ?? []).find((o) => o.op === 'toggle')
-    assert.ok(op, '点击开关后没有写 toggle 行操作')
+    // 乐观：点完立刻显示为关，不等 Host 回来（这正是这次改动的目的）
+    assert.equal(findSwitch(panel).props['aria-checked'], false, '点完应立刻显示为关')
+
+    await panel.settle()
+    const op = (doc.rowCommands ?? []).find((o) => o.op === 'toggle')
+    assert.ok(op, '点击开关后没有把 toggle 命令发给 Host')
     assert.equal(op.entryId, 'mcp-gitnexus')
     assert.equal(op.enabled, false, '从「开」点一下应变「关」')
+  } finally {
+    panel.restore()
+  }
+})
+
+test('开关：Host 拒绝时回滚乐观状态并说明原因', { skip: skipWithoutBundle() }, async () => {
+  /**
+   * 乐观 UI 只有在**失败可见**时才诚实。卡片/开关在点击瞬间就动了，所以被拒绝的命令必须
+   * 把它放回去 —— 否则用户看到的是一个配置文件里并不存在的状态，比原来的等待更糟。
+   */
+  const panel = await bootPanel(emptyDoc({
+    profileServers: [project()], currentWorkspace: '/p/tcl', rowOpsReady: true, reconnectReady: true,
+    serverStatus: [statusEntry()],
+    rowCommandResult: { ok: false, reason: 'row "mcp-gitnexus" not found in the profile patch' },
+  }))
+  try {
+    panel.click(findSwitch(panel))
+    await panel.settle()
+    assert.equal(findSwitch(panel).props['aria-checked'], true, '命令失败后开关应回到原状态')
+    assert.match(panel.text(), /not found in the profile patch/, '失败原因要显示出来')
   } finally {
     panel.restore()
   }

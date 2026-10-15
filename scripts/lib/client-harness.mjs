@@ -101,6 +101,9 @@ export function createRuntime() {
       if (guard >= 100) throw new Error('面板渲染没有收敛（effect 里在无限 setState）')
       return tree
     },
+    dispose() {
+      for (const slot of hooks) if (typeof slot.cleanup === 'function') slot.cleanup()
+    },
     get tree() { return tree },
   }
   return runtime
@@ -146,10 +149,39 @@ export function emptyDoc(overrides = {}) {
  * Returns query/act helpers plus `restore()`, which the caller must run in a
  * `finally` block (the panel schedules intervals and reads `window`/`location`).
  */
-export async function bootPanel(doc = emptyDoc()) {
+export async function bootPanel(doc = emptyDoc(), options = {}) {
+  const realFetch = globalThis.fetch
+  const realClearInterval = globalThis.clearInterval
+  const realClearTimeout = globalThis.clearTimeout
+  /**
+   * Default fetch: answers **both** panel endpoints.
+   *
+   * `/runtime` is the read route and `/rows` is the command route, and they have different
+   * payloads — one blanket stub would hand the command route a runtime body, so every command
+   * would look rejected. `options.fetch` still replaces the whole thing.
+   */
+  globalThis.fetch = options.fetch ?? (async (url, init) => {
+    if (String(url).endsWith('/rows')) {
+      // Record the command so a test can assert the HTTP path was taken, and echo the Host's
+      // success shape. Rejections are driven by `options.fetch` or by pre-seeding `rowCommands`.
+      const body = init?.body === undefined ? {} : JSON.parse(String(init.body))
+      const commands = doc.rowCommands ?? []
+      commands.push(body)
+      doc.rowCommands = commands
+      if (doc.rowCommandResult !== undefined) return { ok: true, status: 200, json: async () => doc.rowCommandResult }
+      return { ok: true, status: 200, json: async () => ({ ok: true, reason: '' }) }
+    }
+    return {
+      ok: true, status: 200,
+      json: async () => ({
+        serverTools: doc.serverTools ?? [], serverStatus: doc.serverStatus ?? [],
+        serverToolsError: doc.serverToolsError ?? { reason: '', detail: '' },
+      }),
+    }
+  })
   const realInterval = globalThis.setInterval
   const realTimeout = globalThis.setTimeout
-  globalThis.setInterval = () => 0
+  globalThis.setInterval = (fn, ms) => { options.onInterval?.(fn, ms); return 0 }
   globalThis.setTimeout = () => 0
   globalThis.clearInterval = () => {}
   globalThis.clearTimeout = () => {}
@@ -292,13 +324,22 @@ export async function bootPanel(doc = emptyDoc()) {
     configForms: { get: () => form },
   })
   runtime.render()
+  const settle = async () => {
+    for (let i = 0; i < 8; i += 1) await Promise.resolve()
+    runtime.render()
+  }
+  await settle()
 
   const restore = () => {
+    runtime.dispose()
+    globalThis.fetch = realFetch
+    globalThis.clearInterval = realClearInterval
+    globalThis.clearTimeout = realClearTimeout
     globalThis.setInterval = realInterval
     globalThis.setTimeout = realTimeout
     delete globalThis.window
     delete globalThis.location
   }
 
-  return { doc, runtime, find, findAll, byClass, byText, byPlaceholder, click, change, toggle, text, openMenu, restore }
+  return { doc, runtime, settle, find, findAll, byClass, byText, byPlaceholder, click, change, toggle, text, openMenu, restore }
 }

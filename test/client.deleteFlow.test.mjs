@@ -37,8 +37,11 @@ test('客户端删除流程：删除中不出现按钮边框，回执到达后�
     runtime.render()
 
     // 2) Delete it: while in flight the card must show a plain status, not a button.
-    click(find((node) => String(node.props.className ?? '').includes('smp-button')
-      && String(node.props['data-variant']) === 'danger' && textOf(node).trim() === '删除'))
+    //
+    // 删除 lives in the card's `…` menu now — the same interaction the MCP rows use — so the
+    // menu is opened first instead of clicking a bare danger button.
+    panel.openMenu()
+    click(byText('删除'))
     click(byText('删除'))
     assert.equal(doc.skillRequest.op, 'delete', '删除请求没有写进设置文档')
     const actions = find((node) => String(node.props.className ?? '').includes('smp-cardActions') && textOf(node).includes('删除中…'))

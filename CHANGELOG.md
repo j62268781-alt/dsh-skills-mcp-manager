@@ -1,5 +1,136 @@
 # Changelog
 
+## 未发布 — 连接与重连默认值改为显式
+
+### 变更
+
+- **表单预填真实默认值**：`重连首次延迟 / 最大延迟 / 最大次数` 三个输入框打开就是
+  `500 / 30000 / 10`，不再是空框配一个「（默认）」占位。以前表单显示"未设置"，而 500 其实
+  在生效——那个值住在 `dsh-mcp-client` 里，用户要读别人的源码才知道这一行会怎么重连。
+- **落库也写显式默认值**：没填的 `reconnect.*` 现在写成 `{initialDelayMs: 500, maxDelayMs: 30000,
+  maxAttempts: 10}`，而不是省略键让客户端补。配置文件长一点，但一眼能看出行为，也不会因为
+  上游改了默认值而让"当初没填"的行行为突变。
+- **stdio 的「命令」预填 `npx`**（新增表单，以及把传输切成 stdio 时；**只在字段为空时**，
+  不会覆盖已填的值或正在编辑的行）。Host 本来就把空命令当 `npx`，现在两端一致。
+- `failOnStartupError` 仍只在勾选时写入：`false` 与"键不存在"完全等价，写它只是给每一行加噪音。
+
+### 实现
+
+- `CONNECTION_DEFAULTS` 是唯一来源：`CONNECTION_DRAFT_DEFAULTS` 由它派生（表单预填），
+  `connectionFields` 与 `connectionDraftOf` 都读它，所以表单、磁盘、挂载三条路径说的是同一组数字。
+- 客户端直接 `import` `src/mcp/connection.js`（它没有任何 import，可安全进浏览器 bundle），
+  而不是在两边各抄一份常量——那样迟早漂移。
+- 默认值取自**真实的** `dsh-mcp-client`（`lib/index.js:434-439` `RECONNECT_DEFAULTS`），
+  不是照抄注释。
+
+## 未发布 — MCP 行操作改走 HTTP：新增/删除不再等 2–4 秒
+
+### 修复
+
+- **新增或删除一台 MCP 服务器后，面板要等 2–4 秒才刷新**，看起来像"必须手动改 yml 才行"。
+  这不是写盘慢：`applyRowOp` 写 `cordis.patch.yml` 实测只要 **1–5ms**。等待全在传话链上——
+  500ms 排空轮询 + 固定 1200ms 死等 + 写完等 Loader 重载 + 面板自己 700/1500ms 轮询。
+  现在命令走 `POST /dsh-skills-mcp-manager/rows`（DSH 官方插件注册路由用的同一个 `webServer` 服务，
+  本插件的只读 `/runtime` 也是这么做的），一次请求就落盘并刷新投影。
+
+### 变更
+
+- **点击立刻看到结果**：删除的卡片在点击瞬间消失，新增的卡片在保存瞬间就以**真实卡片**出现
+  （数据取自已提交的表单，不再是「正在写入配置文件…」占位）。真实的投影到达时原地替换。
+- **失败可见且会回滚**：Host 拒绝的命令会把乐观状态放回去并显示原因。乐观 UI 只有在失败可见时
+  才诚实——否则会给用户看一个配置文件里并不存在的状态。
+- settings 的 `rowOps` 队列**保留为回退通道**：旧 Host、没有 webServer 的 profile、或请求失败时
+  仍然可用，所以两种 Host 上面板都能工作。
+
+### 修复（写路径的幂等性）
+
+HTTP 会被重试、也会和周期投影赛跑，所以写路径自己保证安全：
+
+- **`add` 现在是幂等的**：行 id 已存在时**改写那一行**，而不是追加第二行。`insertRow` 原本无条件追加，
+  重复的命令会留下两行同 id 的 mcp-client 行，被 Loader 连接两次（两个客户端、两代工具、一个命名空间）。
+  这在队列通道下基本碰不到（Host 写 patch 前先清空队列），换 HTTP 后双击/重试就能触发。
+- **`delete` 幂等**：行本来就不在时返回成功（目标状态已成立）。以前抛 "not found"，会让用户为一次
+  **已经成功**的删除看到一个吓人的失败。
+- 命令串行执行，两次点击不会交错成两次 read-modify-write 而丢掉其中一次改动。
+
+### 安全
+
+写端点比只读端点风险高，因此逐条约束：先过 `connection.requestRejection`（与只读路由同一套信任检查）；
+只接受 `POST` 且必须 `content-type: application/json`（跨站 HTML 表单发不出这个类型）；
+body 由**同一个 `RowOp` schema** 校验，两个通道不能产生分歧；不返回凭据，失败只回一句原因。
+
+## 未发布 — Skills：去掉项目筛选器、统一标签、四个落盘根
+
+### 变更
+
+- **Skills 列表跨工作区展示**，工具栏的「项目选择器」删除。它以前会把除当前项目外的所有
+  项目级技能都藏起来——刚在别的工作区添加的技能根本不在屏幕上。现在全局在前、然后按工作区
+  注册表顺序，与 MCP 完全一致；卡片上的标签说明归属。（MCP 也从没有这个选择器。）
+- **卡片标签统一为「全局 / 工作区名」**。以前 skills 按*根名*打标签（`dsh` / `agents`），
+  而 MCP 的全局行不打标签——两个页签两套语言，而且「属于哪个工作区」在 skills 那边没被回答。
+  哪个根现在写在展开后的「落盘」一行里。
+- **新增技能的「区域」显示四个真实绝对路径**：`~/.agents/skills`、`~/.dsh/skills`、
+  `<工作区>/.agents/skills`、`<工作区>/.dsh/skills`。DSH 的 provider 四个都读，所以「全局」
+  不是一个目录而是两个。选中项目级区域时才出现「工作区」字段（默认当前会话的工作区）——
+  用户级根问工作区是个没有效果的字段。
+
+### 修复
+
+- **写进非默认根的技能会被静默搬走**。`config.skills[]` 的条目以前不记录自己在哪个根，而
+  `reconcileSkills` 的 `scopeRoot` 把全局写死成 `~/.dsh/skills`、项目级写死成
+  `<root>/.agents/skills`；而 reconcile 每个周期都按配置重写磁盘。于是写到
+  `~/.agents/skills` 的文件会在下一轮被删除并在默认根重写，**没有任何报错**——用户会看到
+  自己刚建的技能"不见了"或"跑到别的地方"。
+  修法：条目增加 `id`（`dsh` | `agents`），`scopeRoot(scope, id)` 按它解析，reconcile 逐条
+  使用自己的根。`id` 缺省为 `dsh`，所以旧条目语义不变；编辑条目时若草稿没带 `id`，从原条目
+  继承——改文字不该搬动文件。回归测试断言两个根各自只出现自己的文件、重复 reconcile 幂等。
+- `upsertSkillByName` 继承落盘根（同上），并补了对应测试。
+
+## 未发布 — Skills 与 MCP 布局统一
+
+### 变更
+
+- **Skills 页签改用 MCP 的布局**：一份列表，不再有「全局技能 / 项目级技能」两个可折叠
+  区块。排序、summary 位置、卡片结构、间距与 MCP 完全一致。
+  - **顺序**：全局在前，然后按工作区注册表顺序，注册表之外的作用域按首次出现排在最后；
+    组内保持创建顺序。规则抽成两个页签共用的纯函数 `lib/src/components/scopeOrder.js`。
+  - **summary** 移到搜索框上方，报「列表里现在有几个」，与 MCP 同一位置同一写法。
+  - **「添加技能」移到搜索行**（与「添加服务器」同一个槽位），不再挂在区块标题上。
+  - **卡片改为两列**（`.smp-cardRow`）：左列标题 + 作用域标签 + 描述，右列启用开关 +
+    `…` 菜单，整行垂直居中。原先三个操作按钮平铺在标题行里，在双行卡片上会偏上。
+  - **操作收进 `…` 菜单**（预览 / 编辑 / 删除），与 MCP 行一致。
+
+### 修复
+
+- **编辑受管技能会静默丢改动**。受管条目（在 `config.skills[]` 里）此前走的是「只写磁盘」
+  的对话框，而 Host 每个周期都会按配置条目重写磁盘（`src/skills/reconcile.js`）——
+  用户改完几秒后文件被改回去，且没有任何报错。受管条目改为**原地编辑**（卡片变成表单，
+  保存写配置条目），磁盘发现（不在配置里）的条目才走对话框，与 MCP 行的编辑方式一致。
+  回归测试断言保存后 `config.skills[]` 确实变化。
+- **编辑已停用的技能会把它悄悄改回启用**。`skillEntryOf` 把缺失的 `enabled` 当作启用，
+  所以原地编辑的草稿必须带上原状态。已补测试。
+- **空态文案以空格开头**。`emptySkillText('')` / `emptyMcpText('')` 在无标签时生成
+  `" 还没有项目级技能。"`，读起来像渲染坏了；无标签现在是独立的一句。
+
+### 移除
+
+- `lib/src/components/group.jsx`（分组标题行 + 副标题）与其测试：两个页签都不再有分区标题。
+- `globalMcpSubtitle` / `projectMcpSubtitle` / `globalSkillSubtitle` / `projectSkillSubtitle`
+  四个副标题函数：数字现在由 summary 行统一给出。
+
+## 未发布 — 插件标识统一
+
+- Host 行 id、settings 命名空间、运行时接口、日志及诊断文件统一使用 `dsh-skills-mcp-manager`。
+- 启动时迁移旧配置行，保留连接参数、技能和过滤规则；首次读取时导入旧技能归属清单，之后以新清单为准。
+- 旧标识仅保留在数据迁移常量及对应测试中。
+
+## 未发布 — MCP 运行时数据脱离 YAML
+
+- 工具清单、描述和连接状态改从只读 `GET /dsh-skills-mcp-manager/runtime` 获取，沿用 Host 连接鉴权，禁用响应缓存；移除三个运行时字段的配置 schema 和 settings 发布。
+- 面板在 MCP 页签打开、卡片展开、页面恢复可见时读取，可见期间每 5 秒刷新。读取失败展示原因并清除过期状态；不回退到旧 YAML 清单。
+- 启动时通过配置文件锁、备份和原子写删除旧 `serverTools`、`serverToolsError`、`serverStatus`，保留连接参数、过滤规则及其他配置。
+- 投影去重排除扫描时间戳，连接倒计时也不再进入 settings，避免仅运行时变化造成周期性写盘。
+
 ## 未发布 — MCP 卡片改版：状态圆点、作用域跟随、开关 + 操作菜单
 
 ### 修复
@@ -117,10 +248,9 @@ SDK 的 401 分支（`if (response.status === 401 && this._authProvider)`）永�
   （**调研，未决策**）。含独立复核发现的三个前置问题，其中最关键的一条是**插件目前
   根本 import 不到 MCP SDK**（未声明依赖 + 真实 profile 里没有
   `@modelcontextprotocol` + DSH 只路由 `@deepseek-ai/dsh-*`）。
-- 修正 `docs/ENGINEERING.md` 里过期的仓库名与安装步骤（旧名 `dsh-skills-mcp-panel`），
+- 修正 `docs/ENGINEERING.md` 里过期的仓库名与安装步骤（移除过期名称），
   并删掉 `scripts/deploy.mjs` 里一个从未存在于本仓库历史的 `.scaffold-panel` 过滤项。
-- `docs/PUBLISHING.md` 补上「不要改成 `dsh-skills-mcp-panel`」的具体依据（该名字在 npm
-  上被 KyattoCat 占用）。
+- `docs/PUBLISHING.md` 补上使用当前 scoped npm 包名的依据。
 
 ## 0.5.4 — 连接状态标签 + 一键重连（含 0.6.x 撤回后的修复）
 
@@ -221,7 +351,7 @@ SDK 的 401 分支（`if (response.status === 401 && this._authProvider)`）永�
   一天下来堆了 **135 个文件、却只有 5 种不同内容**（其中 130 个是逐字节重复，同一份内容
   被备份了 99 次）。备份的用途是**撤销上一次操作**，它只需要保存「当前状态之前的那一份」，
   第 2、第 3、第 100 份同样的字节买不到任何东西。现在固定写在
-  `$DSH_HOME/skills-mcp-panel.backups/cordis.patch.yml.bak`，每次覆盖。
+  `$DSH_HOME/dsh-skills-mcp-manager.backups/cordis.patch.yml.bak`，每次覆盖。
 
   代价说明白：滚动文件只能回退一步——如果某次改写写坏了、而你在发现前又保存了一次，
   好的状态就会被覆盖。要长期历史应该交给版本控制，而不是让配置目录里躺满副本。
@@ -365,10 +495,9 @@ SDK 的 401 分支（`if (response.status === 401 && this._authProvider)`）永�
   （`zebbkira/dsh-skills-mcp-manager`），所以用 scope 把 npm 名固定在自己账号下。
   同步改了 `cordis.patch.yml` 行名、客户端 bundle id、部署路径与文档里的每条命令；
   GitHub 仓库名与市场条目名保持不变（仍是 `dsh-skills-mcp-manager`）
-- **包名**：`@local/dsh-skills-mcp-panel` → **`dsh-skills-mcp-manager`**（npm / 仓库 / 面板 id 同名）。
+- **包名**：本地开发包 → **`dsh-skills-mcp-manager`**（npm / 仓库 / 面板 id 同名）。
   同步改了 `cordis.patch.yml` 的行名、客户端 bundle 的 `__ModuleLoader__.load({ id })`、
   部署目标目录与 `verify-served.mjs` 的匹配串
-  > `dsh-skills-mcp-panel` 这个名字在 npm 上已被他人占用（KyattoCat 的同类插件），故不用它
 - **可发布字段**：`license` / `repository` / `homepage` / `bugs` / `author` / `keywords` /
   `main` / `engines.dsh` / `publishConfig.access=public` / `icon.svg`，并加了 `prepack`（发布前自动 build）
 - **发布清单**：`files` 白名单收紧成 `dist` + `lib/client.js`（不再把 `lib/src/**` 源码打进包里）
@@ -397,13 +526,13 @@ SDK 的 401 分支（`if (response.status === 401 && this._authProvider)`）永�
   退回 `/bin/sh`，PATH 查询改成 POSIX 的 `printf %s "$PATH"`，查不到时回退到本进程的 PATH
 - 修复：`npm test` 不再把目录当参数传给 `node --test`（Node 24 会报
   `ERR_UNSUPPORTED_DIR_IMPORT`），改用 test runner 的默认发现，18/20/22/24/26 都一致
-- 设置命名空间仍是 `skills-mcp-panel`：**已有配置不迁移、不丢**（它只与行 id 有关，与包名无关）
+- 当时保留原设置命名空间，避免已有配置丢失；当前版本已统一命名并自动迁移。
 
 ## 0.3.2 — README 重写为面向用户的插件说明（含两张面板截图）+ 三处小修
 
 - **README**：从 556 行的开发日志改成用户向的插件说明（亮点 / 界面预览 / 安装 / 使用 /
   工作原理 / 开发与自测 / 诊断与恢复 / 已知边界）；产品名定为 **dsh-skills-mcp-manager**
-  （安装进 profile 的包 id 仍是 `@local/dsh-skills-mcp-panel`，改名需要单独迁移 profile 配置）
+  （当时仍使用本地开发包，升级需要迁移 profile 配置）
 - **文档**：原 README 全文搬进 `docs/ENGINEERING.md` 留档（真机验证记录 / 事故复盘 / 踩坑清单）
 - **截图**：新增 `scripts/screenshots.mjs`，用真实构建产物离线渲染 `docs/images/mcp-panel.png`
   与 `docs/images/skills-panel.png`（示例数据全是编造的，不带作者的服务器地址与路径）
@@ -421,7 +550,7 @@ SDK 的 401 分支（`if (response.status === 401 && this._authProvider)`）永�
   全局读用户级配置、项目级读选中工作区，跳过同名不覆盖
 - 界面：行卡片对齐模型页、标题/间距/滚动条对齐内置插件页、官方 Modal 做删除确认、
   在途操作 loading（删除/切换/保存/新增）、全局限定行内展开与停用
-- 诊断：心跳文件 `$DSH_HOME/skills-mcp-panel.heartbeat.json`，patch 写入前自动备份
+- 诊断：心跳文件 `$DSH_HOME/dsh-skills-mcp-manager.heartbeat.json`，patch 写入前自动备份
 
 ## 0.3.0 — 按 create-dsh-plugin(panel) 规范完成模块化重构
 

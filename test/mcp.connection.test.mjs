@@ -4,30 +4,42 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { CONNECTION_DEFAULTS, connectionDraftOf, connectionFields } from '../src/mcp/connection.js'
+import { CONNECTION_DEFAULTS, CONNECTION_DRAFT_DEFAULTS, connectionDraftOf, connectionFields } from '../src/mcp/connection.js'
 
-test('connectionFields：全空时不写任何键（留给客户端的默认值）', () => {
-  assert.deepEqual(connectionFields({}), {})
-  assert.deepEqual(connectionFields(undefined), {})
+test('connectionFields：没填的 reconnect 写**显式默认值**，不再省略', () => {
+  /**
+   * 以前留空就省略键、由 MCP 客户端补默认值。问题是表单显示"未设置"而实际有值在生效，
+   * 而那个值住在别人的包里 —— 用户要读 `dsh-mcp-client` 的源码才知道这一行到底怎么重连。
+   * 现在两端都把它写出来：这是同一件事（500/30000/10），只是不再隐式。
+   */
+  const defaults = { reconnect: { initialDelayMs: 500, maxDelayMs: 30000, maxAttempts: 10 } }
+  assert.deepEqual(connectionFields({}), defaults)
+  assert.deepEqual(connectionFields(undefined), defaults)
   assert.deepEqual(connectionFields({
     failOnStartupError: false,
     reconnectInitialDelayMs: '',
     reconnectMaxDelayMs: '',
     reconnectMaxAttempts: '',
-  }), {})
+  }), defaults)
 })
 
-test('connectionFields：只写填了的键，reconnect 只含填了的数字', () => {
-  assert.deepEqual(connectionFields({ reconnectMaxAttempts: '60' }), { reconnect: { maxAttempts: 60 } })
+test('connectionFields：填了的键覆盖默认值，未填的仍是默认', () => {
+  assert.deepEqual(
+    connectionFields({ reconnectMaxAttempts: '60' }),
+    { reconnect: { initialDelayMs: 500, maxDelayMs: 30000, maxAttempts: 60 } },
+  )
   assert.deepEqual(
     connectionFields({ reconnectInitialDelayMs: '1000', reconnectMaxDelayMs: '60000' }),
-    { reconnect: { initialDelayMs: 1000, maxDelayMs: 60000 } },
+    { reconnect: { initialDelayMs: 1000, maxDelayMs: 60000, maxAttempts: 10 } },
   )
 })
 
 test('connectionFields：failOnStartupError 只在 true 时写入', () => {
-  assert.deepEqual(connectionFields({ failOnStartupError: true }), { failOnStartupError: true })
-  assert.deepEqual(connectionFields({ failOnStartupError: false }), {})
+  // 与 reconnect 不同：false 是客户端的默认值，「键不存在」与「false」完全等价，
+  // 所以写它只是给每一行加噪音。
+  const defaults = { reconnect: { initialDelayMs: 500, maxDelayMs: 30000, maxAttempts: 10 } }
+  assert.deepEqual(connectionFields({ failOnStartupError: true }), { failOnStartupError: true, ...defaults })
+  assert.deepEqual(connectionFields({ failOnStartupError: false }), defaults)
 })
 
 test('connectionFields：非整数与越界都拒绝（写进去会让整行加载失败）', () => {
@@ -36,25 +48,38 @@ test('connectionFields：非整数与越界都拒绝（写进去会让整行加�
   assert.throws(() => connectionFields({ reconnectInitialDelayMs: '0' }), /必须在 1–/)
   // 2147483647 是客户端的上限（MAX_TIMER_DELAY_MS），再大一个就拒
   assert.throws(() => connectionFields({ reconnectMaxDelayMs: '2147483648' }), /必须在 1–/)
-  assert.deepEqual(connectionFields({ reconnectMaxDelayMs: '2147483647' }), { reconnect: { maxDelayMs: 2147483647 } })
+  assert.deepEqual(connectionFields({ reconnectMaxDelayMs: '2147483647' }), {
+    reconnect: { initialDelayMs: 500, maxDelayMs: 2147483647, maxAttempts: 10 },
+  })
 })
 
-test('connectionDraftOf：把行配置回填成表单草稿，缺省是空串', () => {
+test('connectionDraftOf：回填表单草稿，行里没写的用客户端默认值（不是空串）', () => {
+  /**
+   * 空串会显示成"未设置"，而实际生效的是 500 —— 表单必须显示真正会用到的值。
+   * 与 `connectionFields` 写出去的是同一组数字，所以表单和文件不会各说各话。
+   */
   assert.deepEqual(
     connectionDraftOf({ failOnStartupError: true, reconnect: { initialDelayMs: 1000, maxAttempts: 60 } }),
     {
       failOnStartupError: true,
       reconnectInitialDelayMs: '1000',
-      reconnectMaxDelayMs: '',
+      reconnectMaxDelayMs: '30000',
       reconnectMaxAttempts: '60',
     },
   )
-  const empty = connectionDraftOf(undefined)
-  assert.deepEqual(empty, {
+  assert.deepEqual(connectionDraftOf(undefined), {
     failOnStartupError: false,
-    reconnectInitialDelayMs: '',
-    reconnectMaxDelayMs: '',
-    reconnectMaxAttempts: '',
+    reconnectInitialDelayMs: '500',
+    reconnectMaxDelayMs: '30000',
+    reconnectMaxAttempts: '10',
+  })
+})
+
+test('表单默认值与写入默认值同源（避免两处各写一遍然后漂移）', () => {
+  assert.deepEqual(CONNECTION_DRAFT_DEFAULTS, {
+    reconnectInitialDelayMs: String(CONNECTION_DEFAULTS.initialDelayMs),
+    reconnectMaxDelayMs: String(CONNECTION_DEFAULTS.maxDelayMs),
+    reconnectMaxAttempts: String(CONNECTION_DEFAULTS.maxAttempts),
   })
 })
 

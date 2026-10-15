@@ -16,6 +16,8 @@ import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { RUNTIME_PATH } from '../src/mcp/runtime.js'
+import { ROWS_PATH } from '../src/mcp/rows.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const root = resolve(here, '..')
@@ -151,6 +153,46 @@ try {
   // has something to install onto and its effect can be observed.
   /** Tools the registry actually accepted (i.e. what the model would be offered). */
   const registered = []
+  /**
+   * The live agent the project row is mounted into.
+   *
+   * Deliberately created BEFORE `apply`, and deliberately never announced through
+   * `ctx.on('agent/created')` (which is a no-op in this harness). That is the exact shape
+   * of the bug this covers: an agent that already existed when the plugin loaded never
+   * delivers a creation event to it, so the plugin's own `agents` map stays empty and a
+   * correctly-scoped project server is never mounted. `agents.list()` is the only way to
+   * discover it.
+   *
+   * `ctx.plugin` is the seam the mount path uses (it instantiates the MCP client in the
+   * agent's scope), so it is recorded here rather than stubbed away: the smoke asserts the
+   * mount actually happened in the right scope.
+   */
+  const mountCalls = []
+  const liveAgent = {
+    id: 'smoke-agent',
+    session: { cwd: '/p/smoke' },
+    ctx: {
+      plugin(plugin, config) {
+        mountCalls.push({ serverName: config?.serverName, cwd: '/p/smoke' })
+        return { dispose: noop }
+      },
+    },
+  }
+  const agentsService = { list: () => [liveAgent] }
+  /**
+   * The tool registry, scoped like the real one.
+   *
+   * `tools.register()` files a definition under the **registering context's scope**, and
+   * `schemas()` without a scope reads the **global** view. A project server is mounted into
+   * an agent's scope, so its tools exist only in that scope's view — an unscoped read cannot
+   * see them, which is why every project server used to show an empty tool list while the
+   * card looked configured. This mock reproduces that split so the smoke proves the Host
+   * asks per scope instead of only asking globally.
+   */
+  const projectTools = [
+    { name: 'mcp__smoke-project__search', description: 'Project-scoped tool' },
+    { name: 'mcp__smoke-project__get_file', description: 'Another project tool' },
+  ]
   const toolsService = {
     register(definition) {
       registered.push(definition.name)
@@ -159,10 +201,12 @@ try {
         if (at >= 0) registered.splice(at, 1)
       }
     },
-    schemas: () => [
+    schemas: (scope) => [
       { name: 'mcp__smoke-server__echo', description: 'Echo back' },
       { name: 'mcp__smoke-server__ping', description: '' },
       { name: 'read_file', description: 'built-in, not from MCP' },
+      // Only visible to the agent whose scope the project row was mounted into.
+      ...(scope === liveAgent ? projectTools : []),
     ],
   }
   /**
@@ -260,12 +304,22 @@ try {
     },
     fiber: { state: 2 },
   }]
+  let runtimeRoute
+  let rowsRoute
+  const readRuntime = async () => {
+    let body = ''
+    const res = { setHeader: noop, end: (value = '') => { body = value }, statusCode: 0 }
+    await runtimeRoute.handler({ method: 'GET' }, res)
+    if (res.statusCode !== 200) throw new Error(`runtime HTTP ${res.statusCode}`)
+    return JSON.parse(body)
+  }
   const ctx = {
     logger: { info: noop, warn: noop, error: (...args) => problems.push('host logger.error: ' + args.map(String).join(' ')) },
     get: (name) => {
       if (name === 'workspaceRegistry') return { list: () => [] }
       if (name === 'tools') return toolsService
       if (name === 'mcpResources') return mcpResourcesService
+      if (name === 'agents') return agentsService
       return undefined
     },
     loader: {
@@ -281,8 +335,27 @@ try {
     effect: (fn) => { fn(); return noop },
     plugin: () => ({ dispose: noop }),
     on: () => noop,
-    inject: (names, cb) => cb({
-      settings: { update: async (ns, patch) => { live.__updates = (live.__updates ?? 0) + 1; Object.assign(live, patch); return true } },
+    inject: (names, cb) => cb(names.includes('webServer') ? {
+      // The real webServer keeps one route per (kind, path), so the stub must too: the Host now
+      // registers **two** (`/runtime` and `/rows`), and a single slot would let the second
+      // overwrite the first — which is what made the smoke run fail with "runtime HTTP 405".
+      webServer: {
+        register: (route) => {
+          if (route.path === RUNTIME_PATH) runtimeRoute = route
+          if (route.path === ROWS_PATH) rowsRoute = route
+          return noop
+        },
+      },
+      connection: { requestRejection: () => undefined },
+      logger: { warn: noop },
+      effect: (fn) => { fn(); return noop },
+    } : {
+      settings: { update: async (ns, patch) => {
+        live.__updates = (live.__updates ?? 0) + 1
+        live.__changes = [...(live.__changes ?? []), Object.keys(patch).filter((key) => JSON.stringify(live[key]) !== JSON.stringify(patch[key])).map((key) => key === 'discoveryInfo' ? { key, before: live[key], after: patch[key] } : key)]
+        Object.assign(live, patch)
+        return true
+      } },
       effect: (fn) => { fn(); return noop },
     }),
   }
@@ -359,6 +432,18 @@ try {
   await new Promise((resolveWait) => setTimeout(resolveWait, 1500))
   note(Array.isArray(live.rowOps) && live.rowOps.length === 0, 'rowOps 被排空（失败被记录而非逃逸）')
 
+  // Channel 3c: the HTTP command route — the short path the panel uses now. It must be
+  // registered beside the read route (a single-slot webServer stub let the second
+  // registration overwrite the first), and it must refuse anything but a POST.
+  note(rowsRoute !== undefined, '命令路由已注册（POST /<name>/rows）')
+  if (rowsRoute !== undefined) {
+    let rowsBody = ''
+    const rowsRes = { setHeader: noop, end: (value = '') => { rowsBody = value }, statusCode: 0 }
+    await rowsRoute.handler({ method: 'GET', headers: {} }, rowsRes)
+    note(rowsRes.statusCode === 405, `命令路由只接受 POST（GET 得到 ${rowsRes.statusCode}）`)
+    note(rowsBody === '', '被拒绝的请求没有产生响应体')
+  }
+
   // Channel 3b: the reconnect request. A server the profile does not configure cannot
   // be reconnected, so the request must still be consumed — and the failure must come
   // back as a reason. Silently swallowing it would leave the panel showing "重连中…"
@@ -379,7 +464,9 @@ try {
   // registry — filtered by the `mcp__<serverName>__` prefix, with built-ins excluded.
   const rows = Array.isArray(live.profileServers) ? live.profileServers : []
   note(rows.some((row) => row.serverName === 'smoke-server'), '配置文件行投影发布了 loader 里的 MCP 行')
-  const inventory = Array.isArray(live.serverTools) ? live.serverTools : []
+  const runtime = await readRuntime()
+  note(!('serverTools' in live) && !('serverToolsError' in live) && !('serverStatus' in live), '工具清单与连接状态不写入 settings')
+  const inventory = runtime.serverTools
   const entry = inventory.find((item) => item.serverName === 'smoke-server')
   note(entry !== undefined, '工具清单为已配置的服务器发布了条目')
   if (entry !== undefined) {
@@ -393,8 +480,8 @@ try {
   // The error field must be present-and-empty when the read succeeded. If the Host
   // silently omitted it, the panel would report "restart DSH" for a healthy
   // registry — so publishing the *absence* of an error is itself the contract.
-  note(live.serverToolsError !== undefined, '读了错误字段本身（缺失会让面板误判为旧 Host）')
-  note(live.serverToolsError?.reason === '', '读取正常时原因字段为空串（不是缺字段）')
+  note(runtime.serverToolsError !== undefined, '运行时接口携带工具读取结果')
+  note(runtime.serverToolsError?.reason === '', '读取正常时原因字段为空串')
 
   // Channel 5b: the row phase. It used to read `entry.fiberPhase`, which does not
   // exist on a raw Loader entry (it is derived by dsh-host-plugin-inventory), so the
@@ -405,7 +492,7 @@ try {
   // Channel 5c: per-server connection status. This is the channel that makes a
   // silently dead MCP visible, so the smoke proves it publishes for a configured
   // server rather than trusting the unit tests alone.
-  const statuses = Array.isArray(live.serverStatus) ? live.serverStatus : []
+  const statuses = runtime.serverStatus
   const smokeStatus = statuses.find((item) => item.serverName === 'smoke-server')
   note(smokeStatus !== undefined, '连接状态为已配置的服务器发布了条目')
   // The registry is the cheap positive signal for a global row: two tools are
@@ -439,6 +526,39 @@ try {
     '全局行不会同时被当成项目级发布',
   )
 
+  // Channel 5c-ter: an agent that already existed when the plugin loaded still gets its
+  // project servers mounted.
+  //
+  // `ctx.on('agent/created')` only reaches a listener that was already registered, so a
+  // session older than this plugin never fires one *here*. Trusting the event alone left the
+  // plugin's agent map empty forever — and an untracked agent is an unmounted project server,
+  // reported as 「未挂载」 while the user's scope was configured correctly. `agents.list()` is
+  // the registry itself, so the fixture announces nothing and relies on the lookup.
+  const projectMounted = statuses.find((item) => item.serverName === 'smoke-project')?.status !== 'unmounted'
+  note(
+    projectMounted,
+    `插件加载前已存在的会话也会被补挂（smoke-project 状态「${statuses.find((i) => i.serverName === 'smoke-project')?.status}」）`,
+  )
+
+  // Channel 5c-quater: a project server's tools are read from **its agent's scope**.
+  //
+  // `tools.register()` files under the registering context's scope and `schemas()` without a
+  // scope reads the global view, where a scoped registration does not exist. Reading only
+  // globally reported every project server as having no tools — an empty list for a server
+  // that was mounted and connected. The mock above hides `smoke-project`'s tools from the
+  // global view, so this fails if the Host ever goes back to a single unscoped read.
+  const projectToolsEntry = inventory.find((item) => item.serverName === 'smoke-project')
+  const projectToolNames = (projectToolsEntry?.tools ?? []).map((tool) => tool.name)
+  note(
+    projectToolNames.includes('mcp__smoke-project__search'),
+    `项目级工具按作用域读取（收到 ${JSON.stringify(projectToolNames)}）`,
+  )
+  // …and the scoped read must not leak the project tools into the global row's list.
+  note(
+    !(entry?.tools ?? []).some((tool) => tool.name.startsWith('mcp__smoke-project__')),
+    '全局行的工具清单不会混入项目级工具',
+  )
+
   // Channel 5d: the probe's own health plus its per-server answers. "No server is down"
   // and "we cannot tell" must never render the same, and the recorded answers are the
   // evidence that separates a genuinely absent instance from a refused connection.
@@ -465,7 +585,7 @@ try {
   // remote round trip), so this waits for the verdict to land on a later tick.
   let authStatus = null
   for (let tick = 0; tick < 40; tick += 1) {
-    authStatus = (Array.isArray(live.serverStatus) ? live.serverStatus : [])
+    authStatus = (await readRuntime()).serverStatus
       .find((item) => item.serverName === 'smoke-auth')
     if (authStatus?.status === 'needs-auth') break
     await new Promise((resolveWait) => setTimeout(resolveWait, 250))
@@ -494,7 +614,7 @@ try {
 
   // A provider that exists but refuses the connection is "not connected", NOT "activation
   // failed" — the two have different fixes and must not be collapsed.
-  const deadStatus = (Array.isArray(live.serverStatus) ? live.serverStatus : [])
+  const deadStatus = (await readRuntime()).serverStatus
     .find((item) => item.serverName === 'smoke-dead')
   note(
     deadStatus?.status === 'retrying' || deadStatus?.status === 'gave-up',
@@ -515,7 +635,7 @@ try {
   const idleRow = ctx.loader.entries().find((entry) => entry.id === 'mcp-smoke-idle')
   note(idleRow !== undefined, '冒烟夹具里有第二行（无工具、用于验证加载中不误报）')
   await new Promise((resolveWait) => setTimeout(resolveWait, 16000))
-  const idleLoading = (Array.isArray(live.serverStatus) ? live.serverStatus : [])
+  const idleLoading = (await readRuntime()).serverStatus
     .find((item) => item.serverName === 'smoke-idle')
   note(idleLoading !== undefined, '无工具的服务器也发布了状态条目')
   note(
@@ -524,7 +644,7 @@ try {
   )
   if (idleRow !== undefined) idleRow.fiber = { state: 3 }
   await new Promise((resolveWait) => setTimeout(resolveWait, 6500))
-  const idleFailed = (Array.isArray(live.serverStatus) ? live.serverStatus : [])
+  const idleFailed = (await readRuntime()).serverStatus
     .find((item) => item.serverName === 'smoke-idle')
   note(
     idleFailed?.status === 'failed',
@@ -677,6 +797,13 @@ try {
   const afterRead = Array.isArray(live.discoveredSkills) ? live.discoveredSkills.length : -1
   note(beforeRead > 0 && afterRead === beforeRead, `预览(read)不会让列表缩水（${beforeRead} → ${afterRead}）`)
   note(typeof live.discoveryInfo?.at === 'string' && live.discoveryInfo.at !== '', 'discoveryInfo 记录了扫描时间（诊断通道可用）')
+
+  // Operation scans use their project root; periodic scans then restore configured roots.
+  // Cross both scan and publish cycles before measuring an unchanged idle cycle.
+  await new Promise((resolve) => setTimeout(resolve, 10500))
+  const idleUpdates = live.__updates
+  await new Promise((resolve) => setTimeout(resolve, 5500))
+  note(live.__updates === idleUpdates, '空闲扫描与连接倒计时不触发 settings 写盘：' + JSON.stringify(live.__changes.slice(idleUpdates)))
 } catch (error) {
   note(false, '冒烟脚本自身出错：' + error.message)
 } finally {

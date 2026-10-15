@@ -86,7 +86,7 @@ export function createConnectionProbe(ctx, log) {
         if (detail.includes(DISCONNECTED_MARKER)) return { state: PROBE_STATE.down, detail }
         // 任何别的回答（方法不支持、超时、协议错误）都说明 provider 存在且请求发出去了
         // —— 客户端未连接时根本走不到这一步。
-        log?.warn?.(`skills-mcp-panel: probe of ${serverName} returned an unexpected error, treating it as connected: ${detail}`)
+        log?.warn?.(`dsh-skills-mcp-manager: probe of ${serverName} returned an unexpected error, treating it as connected: ${detail}`)
         return { state: PROBE_STATE.connected, detail }
       }
     },

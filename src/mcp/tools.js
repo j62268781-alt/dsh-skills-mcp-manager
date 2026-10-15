@@ -46,13 +46,28 @@ export function toolReasonText(reason) {
 /**
  * Tools currently registered for each given server.
  *
+ * ## Why a scope is needed
+ *
+ * `tools.register()` files a definition under **the registering context's scope**, and
+ * `schemas()` reads the **global** view when called without one. A `mcp-client` row the
+ * Loader mounts at the root registers globally, so the unscoped read sees it. A *project*
+ * server is mounted by this plugin into an agent's scope (see `src/project/mount.js`), so
+ * its tools live in that agent's layer and are simply **absent** from the global view.
+ *
+ * Reading unscoped for both tiers therefore reports every project server as having no tools
+ * — and because "no tools" and "not mounted" look the same in a list, the panel showed an
+ * empty tool list for a server that was mounted and connected. Passing the agent's own scope
+ * (`scopeKey`, the very object the scope was minted with) asks the registry the question the
+ * user is actually asking: what does the model see in *that* workspace.
+ *
  * @param ctx - cordis context; `ctx.get('tools')` is the harness tool registry.
  * @param serverNames - the server names to report on, in order.
+ * @param scope - optional scope key (an agent) selecting the view; omitted = global view.
  * @returns `{ ok: true, servers: [{ serverName, tools }] }` when the registry was
  *   read, or `{ ok: false, reason, detail }` when it was not. The two are never
  *   conflated: `ok: true` with an empty `tools` array is a real answer.
  */
-export function toolsByServer(ctx, serverNames) {
+export function toolsByServer(ctx, serverNames, scope = undefined) {
   let registry = null
   try {
     registry = ctx.get?.('tools') ?? null
@@ -68,11 +83,14 @@ export function toolsByServer(ctx, serverNames) {
   }
   let schemas = null
   try {
-    schemas = registry.schemas()
+    // One argument either way: `schemas(undefined)` and `schemas()` are the same call, and
+    // keeping the shape uniform means the scoped form cannot silently degrade to the global
+    // one through a forgotten branch.
+    schemas = registry.schemas(scope)
   } catch (error) {
     // `schemas()` throws when any visible tool's parameters are not lossless JSON.
     const detail = String(error?.message ?? error)
-    ctx.logger?.warn?.('skills-mcp-panel: cannot read the tool registry: %s', detail)
+    ctx.logger?.warn?.('dsh-skills-mcp-manager: cannot read the tool registry: %s', detail)
     return { ok: false, reason: TOOL_READ_REASONS.readFailed, detail }
   }
   if (!Array.isArray(schemas)) {

@@ -45,10 +45,6 @@ cpSync(source, target, {
   // Build inputs and dev-only files stay out of the profile: the deployed copy is loaded
   // through `exports["."] -> ./dist/index.js`, so `src/` would be dead weight and stale
   // TypeScript next to a compiled `dist/` invites reading the wrong one.
-  //
-  // `.scaffold-panel` used to be listed here; it has never existed in this repository's
-  // history (checked with `git log --all`), so the entry was a leftover from the package's
-  // old `dsh-skills-mcp-panel` name and only made the filter harder to read.
   filter: (src) => !/^(node_modules|\.git|test|scripts|lib\/src|src)(\/|$)|^(esbuild\.config\.mjs|tsconfig\.json|test-.*\.mjs|verify-.*\.mjs)$/.test(src.slice(source.length + 1)),
 })
 console.log(`  ✓ 已部署到 ${target}`)

@@ -1,7 +1,10 @@
 # 工具清单为什么不该落盘（可行性分析）
 
-> 状态：**调研 + 实测，未决策。** 结论是「落盘这件事本身是个 bug，修法有两条路」。
-> 本文的每个数字都在本机复现过，命令附在对应小节里。
+> 状态：**已实施路线 A，待发布。** MCP 工具清单、描述、连接状态通过带 Host 连接鉴权的 `GET /dsh-skills-mcp-manager/runtime` 读取，不再写入 settings。旧的三个字段在启动时通过文件锁、备份及原子写清理；仅扫描时间戳变化不会再触发投影写盘。
+>
+> 面板在 MCP 页签可见时每 5 秒刷新，展开卡片及页面恢复可见时立即读取。接口失败显示明确原因，并撤下旧的连接状态；未提供旧 Host 的 settings 回退，也未增加最后成功清单缓存。工具列表表示当前注册表，断线或未挂载时可能为空。
+>
+> **以下为实施前的历史调研**，字节数和源码行号反映当时快照，不能视为当前配置的测量值；缓存等建议不代表已经实现。
 >
 > 相关：[`docs/oauth-feasibility.md`](oauth-feasibility.md)（「需要授权」与点击授权的可行性）。
 
@@ -23,7 +26,7 @@
 ```powershell
 # 复现：逐字段量化（脚本见 §7）
 patch 全文           9176 字节 / 285 行
-skills-mcp-panel 段  6361 字节 / 182 行
+dsh-skills-mcp-manager 段  6361 字节 / 182 行
 ```
 
 各字段占全文比例（降序）：
@@ -224,7 +227,7 @@ ctx.effect(() => ctx.webServer.register({
 
 1. `npm run gate`（含真实 Host 装配的 `host-smoke.mjs`）。
 2. **新增冒烟断言**：patch 文件在 30 秒内 mtime 不变（现在是每 5 秒变）。
-3. **新增断言**：`serverTools` 不再出现在 patch 的 `skills-mcp-panel` 段里。
+3. **新增断言**：`serverTools` 不再出现在 patch 的 `dsh-skills-mcp-manager` 段里。
 4. **新增断言**：断开某台服务器后，面板仍能拿到它的工具清单且带 `stale` 标记。
 5. 手动：`Get-Item cordis.patch.yml | % LastWriteTime` 观察 30 秒。
 
@@ -246,7 +249,7 @@ import YAML from "yaml"
 const p = "<profile>/cordis.patch.yml"
 const text = readFileSync(p, "utf8")
 const doc = YAML.parse(text)
-const cfg = doc.find((r) => r && r.id === "skills-mcp-panel").config
+const cfg = doc.find((r) => r && r.id === "dsh-skills-mcp-manager").config
 const sizes = Object.keys(cfg)
   .map((k) => [k, Buffer.byteLength(JSON.stringify(cfg[k]))])
   .sort((a, b) => b[1] - a[1])

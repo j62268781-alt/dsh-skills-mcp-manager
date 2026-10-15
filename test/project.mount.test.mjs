@@ -50,8 +50,10 @@ test('serverMountConfig：stdio 与 http 各自产出正确的挂载配置形状
 test('serverMountConfig：连接策略跟着挂载配置走，留空则不写', () => {
   const base = { serverName: 'z', transport: 'streamable-http', url: 'https://z/mcp' }
   const plain = serverMountConfig(base)
+  // failOnStartupError=false 与"键不存在"等价，所以不写；reconnect 现在写显式默认值，
+  // 让挂载出来的客户端重连策略与配置行一致，而不是依赖客户端的隐式默认。
   assert.equal('failOnStartupError' in plain, false)
-  assert.equal('reconnect' in plain, false)
+  assert.deepEqual(plain.reconnect, { initialDelayMs: 500, maxDelayMs: 30000, maxAttempts: 10 })
 
   const tuned = serverMountConfig({
     ...base,

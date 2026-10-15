@@ -41,9 +41,9 @@ CI 上 `smoke` 与预览基线会跳过（找不到本机 DSH 与夹具），这
 
 | 文件 | 用途 |
 |---|---|
-| `$DSH_HOME/skills-mcp-panel.heartbeat.json` | 每次状态变化写一份：观测到的 servers/skills、挂载数、是否根 scope、上次对账的增删结果、最后一次技能操作的回执 |
-| `$DSH_HOME/skills-mcp-panel.state.json` | 插件写出的技能文件清单（据此回收） |
-| `$DSH_HOME/skills-mcp-panel.backups/` | 每次改写 `cordis.patch.yml` 前的自动备份 |
+| `$DSH_HOME/dsh-skills-mcp-manager.heartbeat.json` | 每次状态变化写一份：观测到的 servers/skills、挂载数、是否根 scope、上次对账的增删结果、最后一次技能操作的回执 |
+| `$DSH_HOME/dsh-skills-mcp-manager.state.json` | 插件写出的技能文件清单（据此回收） |
+| `$DSH_HOME/dsh-skills-mcp-manager.backups/` | 每次改写 `cordis.patch.yml` 前的自动备份 |
 | 面板 URL 加 `?smp=debug` | 多出一个「Loader 诊断」分组，列出 Loader 里所有 mcp 相关行 |
 
 两个 `.json` 随时可删，会自动重建。

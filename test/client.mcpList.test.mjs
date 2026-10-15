@@ -5,8 +5,10 @@
  * 后续维护里被无意恢复：
  *   · 只有一份列表，卡片自己说明作用域（全局 / 某个工作区）
  *   · 工具栏不再有「筛选项目」——作用域是服务器的属性，在添加/编辑表单里选
- *   · 「添加服务器」就放在原筛选项目的位置
+ *   · 「添加服务器」在**导入卡片下方**，不在工具栏、也不在列表末尾
+ *     （工具栏按钮配上列表底部的表单，会让「点了没反应，还要往下滚」）
  *   · 列表同时含全局与项目级，且不重复
+ *   · 顺序为 全局 → 工作区（按工作区顺序），组内保持创建顺序
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -80,15 +82,84 @@ test('MCP：工具栏不再有项目筛选，位置让给「添加服务器」',
     const t = shortTexts(panel)
     assert.ok(t.includes('添加服务器'), `工具栏没有添加按钮：${JSON.stringify(t.slice(0, 24))}`)
 
-    // 只应有一个添加按钮：工具栏那个（分段标题里不再重复一个）
+    // 只应有一个添加按钮：搜索行那个（列表附近不再重复一个）
     const addButtons = panel.findAll((node) => (
       String(node.props?.className ?? '').includes('smp-button') && textOf(node).trim() === '添加服务器'))
     assert.equal(addButtons.length, 1, `「添加服务器」应只有 1 个，实际 ${addButtons.length}`)
+
+    // 它与搜索框同一行（`smp-filterRow`），不是一个独立的一行按钮。
+    const toolbar = panel.find((node) => String(node.props?.className ?? '') === 'smp-filterRow')
+    assert.ok(toolbar !== null, '找不到工具栏')
+    assert.ok(textOf(toolbar).includes('添加服务器'), '添加按钮应与搜索框同一行')
 
     // MCP 页签的筛选行里不该出现工作区下拉（技能页签仍保留）
     const scopeLikeSelects = panel.findAll((node) => node.type === 'select'
       && (node.children ?? []).flat(4).some((o) => o?.props?.value === '__custom__'))
     assert.equal(scopeLikeSelects.length, 0, 'MCP 工具栏不该再有项目选择器（它已搬进表单）')
+  } finally {
+    panel.restore()
+  }
+})
+
+test('MCP：添加表单位于导入卡片下方、列表上方（不是列表末尾）', { skip: skipWithoutBundle() }, async () => {
+  const panel = await boot()
+  try {
+    // 渲染顺序：导入卡片 → 服务器列表。
+    const dump = []
+    const walk = (node) => {
+      if (Array.isArray(node)) { node.forEach(walk); return }
+      if (node === null || node === undefined || typeof node !== 'object' || node.element !== true) return
+      const tokens = String(node.props?.className ?? '').split(/\s+/)
+      if (tokens.includes('smp-cards')) dump.push(node.key)
+      if (typeof node.type === 'function') { walk(node.type({ ...node.props, children: node.children })); return }
+      walk(node.children)
+    }
+    walk(panel.runtime.tree)
+    assert.deepEqual(dump, ['import', 'cards'], `未打开表单时顺序不对：${JSON.stringify(dump)}`)
+
+    const add = panel.findAll((node) => (
+      String(node.props?.className ?? '').includes('smp-button') && textOf(node).trim() === '添加服务器'))
+    panel.click(add[0])
+
+    const after = []
+    const walk2 = (node) => {
+      if (Array.isArray(node)) { node.forEach(walk2); return }
+      if (node === null || node === undefined || typeof node !== 'object' || node.element !== true) return
+      const tokens = String(node.props?.className ?? '').split(/\s+/)
+      if (tokens.includes('smp-cards')) after.push(node.key)
+      if (typeof node.type === 'function') { walk2(node.type({ ...node.props, children: node.children })); return }
+      walk2(node.children)
+    }
+    walk2(panel.runtime.tree)
+    assert.deepEqual(after, ['import', 'formWrap', 'cards'],
+      `表单应夹在导入卡片与列表之间，而不是列表末尾：${JSON.stringify(after)}`)
+  } finally {
+    panel.restore()
+  }
+})
+
+test('MCP：列表顺序为 全局 → 工作区（按工作区顺序），组内保持创建顺序', { skip: skipWithoutBundle() }, async () => {
+  const panel = await bootPanel(emptyDoc({
+    profileServers: [
+      row('mcp-context7', 'context7', ''),
+      // 配置文件里 other 排在 gitnexus 之前，但工作区顺序是 tcl 在前
+      row('mcp-other', 'other', '/p/other'),
+      row('mcp-gitnexus', 'gitnexus', '/p/tcl'),
+      row('mcp-newest', 'newest', '/p/tcl'),
+    ],
+    workspaces: [{ path: '/p/tcl', title: 'TCL' }, { path: '/p/other', title: 'OTHER' }],
+    currentWorkspace: '/p/tcl',
+    rowOpsReady: true,
+    reconnectReady: true,
+  }))
+  try {
+    const order = panel.findAll((node) => String(node.props?.className ?? '').split(/\s+/).includes('smp-cardToggle'))
+      .map((node) => textOf(node).replace(/\s+/g, ' ').trim())
+    // 全局第一；tcl 组在 other 组之前；组内 newest 在 gitnexus 之后（= 新增排最后）
+    const seen = order.join(' | ')
+    assert.ok(seen.startsWith('context7'), `全局应排第一：${seen}`)
+    assert.ok(seen.indexOf('gitnexus') < seen.indexOf('other'), `tcl 组应在 other 组之前：${seen}`)
+    assert.ok(seen.indexOf('gitnexus') < seen.indexOf('newest'), `组内应保持创建顺序：${seen}`)
   } finally {
     panel.restore()
   }
@@ -130,9 +201,10 @@ test('MCP：表单里选项目作用域后保存，rowOp 带上该 scope', { ski
     panel.change(scopeSelect, '/p/tcl')
     panel.click(byText('保存'))
 
-    const ops = doc.rowOps ?? []
-    assert.equal(ops.length, 1, `应排出一条 rowOp：${JSON.stringify(ops)}`)
-    assert.equal(ops[0].scope, '/p/tcl', '作用域必须写进行操作（Host 据此写成 disabled 的项目行）')
+    await panel.settle()
+    const ops = doc.rowCommands ?? []
+    assert.equal(ops.length, 1, `应发出一条命令：${JSON.stringify(ops)}`)
+    assert.equal(ops[0].scope, '/p/tcl', '作用域必须写进命令（Host 据此写成 disabled 的项目行）')
     assert.equal(ops[0].scopeChanged, true)
   } finally {
     restore()

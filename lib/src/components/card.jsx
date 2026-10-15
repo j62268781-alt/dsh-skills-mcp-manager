@@ -180,6 +180,8 @@ export const TOOL_ERROR_REASONS = {
 
 /** Human text for a Host-reported reason code (kept in step with the Host table). */
 const REASON_TEXT = {
+  'loading': '正在读取当前工具清单',
+  'runtime-unavailable': '无法读取 Host 运行时数据（请确认 Host 已更新且连接正常）',
   'lookup-failed': '无法访问工具服务（cordis 服务尚未注入）',
   'service-missing': '当前配置里没有工具注册表（dsh-tools 未挂载）',
   'api-missing': '工具注册表版本过旧，没有 schemas() 接口',

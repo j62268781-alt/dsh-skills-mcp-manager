@@ -43,9 +43,10 @@ export function backupPath() {
  * needs to show.
  */
 const YAML_JS_TAG = { tag: 'tag:yaml.org,2002:js', resolve: (value) => value }
-import { insertRow, removeRow, setRowConfigField, setRowDisabled } from './rows.js'
+import { insertRow, locateRow, removeRow, setRowConfigField, setRowDisabled } from './rows.js'
 import { dshHome, parseEnv, spawnEnv, splitArgs } from '../runtime/env.js'
 import { connectionFields } from '../mcp/connection.js'
+import { NAME, LEGACY_NAME } from '../identity.js'
 
 let io = {
   withFileLock: (_key, run) => run(),
@@ -63,7 +64,7 @@ let io = {
    * a "scratch backup dir" in a comment for exactly this reason, but no such seam
    * existed, so every run of the suite dropped another backup into the real home.
    */
-  backupDir: () => join(dshHome(), 'skills-mcp-panel.backups'),
+  backupDir: () => join(dshHome(), 'dsh-skills-mcp-manager.backups'),
 }
 
 /** Inject the host's file-lock / atomic-write implementation. */
@@ -86,12 +87,41 @@ export async function backupPatch(before) {
   }
 }
 
-/**
- * Apply one panel command to the active profile patch.
- *
- * Uses the same lock and atomic write the official config editor uses, re-parses
- * the result before writing it, and keeps a backup of the previous content.
- */
+/** Rename legacy panel rows and remove obsolete runtime projections in one write. */
+export async function migratePanelConfig(ctx) {
+  const profile = ctx.get?.('profileContext') ?? ctx.profileContext
+  if (typeof profile?.dir !== 'string' || profile.dir === '') return 0
+  const path = join(profile.dir, 'cordis.patch.yml')
+  return io.withFileLock(join(profile.dir, 'package.json'), async () => {
+    const before = await readFile(path, 'utf8')
+    const document = parseDocument(before, { customTags: [YAML_JS_TAG] })
+    if (document.errors[0] !== undefined) throw document.errors[0]
+    if (!isSeq(document.contents)) throw new Error('profile patch must be a YAML sequence')
+    let removed = 0
+    const clean = (row) => {
+      if (!isMap(row) || ![NAME, LEGACY_NAME].includes(row.get('id'))) return
+      if (row.get('id') === LEGACY_NAME) {
+        row.set('id', NAME)
+        removed += 1
+      }
+      const config = row.get('config')
+      if (!isMap(config)) return
+      for (const key of ['serverTools', 'serverToolsError', 'serverStatus']) {
+        if (config.delete(key)) removed += 1
+      }
+    }
+    for (const row of document.contents.items) {
+      clean(row)
+      const insert = isMap(row) ? row.get('insert') : undefined
+      if (isSeq(insert)) insert.items.forEach(clean)
+    }
+    if (removed === 0) return 0
+    await backupPatch(before)
+    await io.writeFileAtomic(path, document.toString(), {})
+    return removed
+  })
+}
+
 export async function applyRowOp(ctx, op) {
   const profile = ctx.get?.('profileContext') ?? ctx.profileContext
   const dir = profile?.dir
@@ -125,15 +155,50 @@ export async function applyRowOp(ctx, op) {
       // key reads as global, which keeps every pre-existing row valid unchanged.
       const projectScoped = typeof op.scope === 'string' && op.scope !== '' && op.scope !== 'global'
       if (projectScoped) config.scope = op.scope
-      // A project row must not be instantiated by the Loader: this plugin mounts it into
-      // the agent whose cwd the scope covers, and an enabled row would connect the same
-      // server a second time. `disabled` skips instantiation while leaving the config
-      // readable in `loader.entries()` — which is where the mount path finds it.
-      changed = insertRow(document, op.entryId !== '' ? op.entryId : `mcp-${op.serverName}`, config, { disabled: projectScoped })
+      /**
+       * An add of an id that is already there rewrites that row instead of appending a second.
+       *
+       * `insertRow` appends unconditionally, so a repeated command would leave two rows with
+       * the same id — which the Loader then instantiates twice (two clients, two tool
+       * generations, one namespace). That was unreachable while commands came through the
+       * settings queue, which the Host cleared before applying; the HTTP route makes a repeat
+       * genuinely possible (a double click, a retried request, a replayed body), so the write
+       * path itself has to be the thing that is safe rather than its caller.
+       *
+       * "Already there" is judged by row id, which the panel derives from the server name, so
+       * re-sending the same add is the same row by construction.
+       */
+      const rowId = op.entryId !== '' ? op.entryId : `mcp-${op.serverName}`
+      const existing = locateRow(document, rowId)
+      if (existing !== null) {
+        // Replace the config wholesale so a retry converges on exactly the requested state,
+        // rather than merging into whatever the first attempt left behind.
+        existing.item.set('config', config)
+        // Keep the row's own enablement in step with the scope rule below; `locateRow`
+        // returns the node, and `disabled` lives beside `config`, not inside it.
+        if (projectScoped) existing.item.set('disabled', true)
+        else existing.item.delete('disabled')
+        changed = true
+      } else {
+        // A project row must not be instantiated by the Loader: this plugin mounts it into
+        // the agent whose cwd the scope covers, and an enabled row would connect the same
+        // server a second time. `disabled` skips instantiation while leaving the config
+        // readable in `loader.entries()` — which is where the mount path finds it.
+        changed = insertRow(document, rowId, config, { disabled: projectScoped })
+      }
     } else if (op.op === 'toggle') {
       changed = setRowDisabled(document, op.entryId, op.enabled === false)
     } else if (op.op === 'delete') {
+      /**
+       * Deleting a row that is already gone **succeeds**.
+       *
+       * The requested end state is "this row is not in the patch", and it holds. Throwing here
+       * would report a scary failure for an action that did what the user asked — and that is
+       * now reachable: the HTTP route can be retried, and a delete can race the periodic
+       * projection. `changed` stays false, so nothing is written and no backup is churned.
+       */
       changed = removeRow(document, op.entryId)
+      if (!changed) return true
     } else {
       // Validate the connection numbers up front: an out-of-range value has to
       // fail before anything is touched, not after the document was edited.
@@ -188,7 +253,7 @@ export async function applyRowOp(ctx, op) {
     parseDocument(after, { customTags: [YAML_JS_TAG] })   // gate: never write invalid YAML
     await backupPatch(before)
     await io.writeFileAtomic(path, after, {})
-    ctx.logger.info('skills-mcp-panel: %s profile row %s', op.op, op.entryId)
+    ctx.logger.info('dsh-skills-mcp-manager: %s profile row %s', op.op, op.entryId)
     return true
   })
 }

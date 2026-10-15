@@ -4,5 +4,5 @@
 # blind to everything this Host writes back (discoveredSkills, skillResult, ...).
 # The panel's data lives in the settings document.
 - insert:
-    - id: skills-mcp-panel
+    - id: dsh-skills-mcp-manager
       name: '@j62268781-alt/dsh-skills-mcp-manager'
