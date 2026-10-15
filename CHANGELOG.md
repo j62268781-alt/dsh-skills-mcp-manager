@@ -106,7 +106,38 @@
 > `loader.entries()`，而 `disabled` 是 entry 的 getter、不是过滤器，所以项目行仍在其中。
 > 已在 issue 里说明，避免后续往那个方向排查。
 
-### 5. MCP 行操作改走 HTTP：新增/删除不再等 2–4 秒
+### 5. 技能弹窗与正文读写的五处修复（真机验证后补记）
+
+这一版把技能的写操作搬去 HTTP 之后，连着暴露了四处缺陷。它们的共同点是
+**「把声明/定义从一处搬到另一处时，丢了原处的一部分」**，而且症状都不在改动点：
+
+- **弹窗一打开就卡「保存中…」（纯客户端）** —— 弹窗的 pending 是
+  `skillNonce !== '' || editBodyPending`，而两个标记**只由匹配的回执清除**。
+  一次「编辑 → 正文回执到达前取消」就会把 `editBodyPending` 永久留在 true，
+  三个入口（添加 / 编辑 / 取消）没有一个重置它。修法：新增 `resetSkillPending()` 在每个
+  入口调用，并给正文读取补 15 秒安全超时（删除流程早有同样护栏）。
+- **`Config` 导出丢失 → 技能列表全空** —— 提取共享 schema 时把定义插在了 `export` 与
+  `const Config` **之间**，`export` 绑到了下一个声明。宿主靠**读插件导出的 schema** 解析
+  命名空间，`Config` 没了 ⇒ 条目不再可配置 ⇒ 每次 `settings.update()` 抛
+  `No configurable plugin entry` ⇒ 所有投影写入失败、列表空。而插件看起来完全正常
+  （心跳在跳、路由已注册、磁盘 17 个技能都在）—— 只有投影那一环悄悄失败。
+- **编辑读不出正文** —— 同一份 `SkillRequest` 丢了 `.volatile()`（宿主只允许写 volatile
+  字段）与 `path`（read 请求靠它定位 SKILL.md）。
+- **编辑/删除报「未知的写入区域」** —— 上一处修好后又走到另一个极端：`SkillRequest` 被
+  同时当作 **Config 字段**与 **HTTP 路由的校验器**，而两者需要不同形态 ——
+  **调用一个 volatile schemastery schema 返回 `{}` 而不是校验结果**，于是 `scope`/`id`
+  变 undefined、`writableRoots` 匹配不到根。现在拆成 `SkillRequest`（纯 wire schema）与
+  `SkillRequestField`（volatile 包装），各自正确。
+- **编辑时正文多一行、且每次保存文件都长一点** —— `bodyOf` 只吃掉 frontmatter 结尾的
+  一个换行，而 `renderSkillMarkdown` 把那个空行当作格式分隔。读取因此不是写入的逆运算。
+  修法：只消费分隔换行（**不能**用 `\s*`，那会吃掉正文的前导缩进，而写入侧是保留缩进的）。
+
+护栏：冒烟新增 `Config` 导出与 schema 元数据断言；新增 `host.configSchema.test.mjs`
+（形态不可混用、字段集合完整、走队列的字段必须 volatile）、`skills.route.test.mjs`
+（路由必须保留 `scope`/`id`）、`skills.write.test.mjs`（7 种正文形态往返恒等）。
+这些断言都实测过**在修复前会失败**。
+
+### 6. MCP 行操作改走 HTTP：新增/删除不再等 2–4 秒
 
 
 #### 修复
@@ -143,7 +174,7 @@ HTTP 会被重试、也会和周期投影赛跑，所以写路径自己保证安
 只接受 `POST` 且必须 `content-type: application/json`（跨站 HTML 表单发不出这个类型）；
 body 由**同一个 `RowOp` schema** 校验，两个通道不能产生分歧；不返回凭据，失败只回一句原因。
 
-### 6. Skills：去掉项目筛选器、统一标签、四个落盘根
+### 7. Skills：去掉项目筛选器、统一标签、四个落盘根
 
 
 #### 变更
@@ -171,7 +202,7 @@ body 由**同一个 `RowOp` schema** 校验，两个通道不能产生分歧；�
   继承——改文字不该搬动文件。回归测试断言两个根各自只出现自己的文件、重复 reconcile 幂等。
 - `upsertSkillByName` 继承落盘根（同上），并补了对应测试。
 
-### 7. Skills 与 MCP 布局统一
+### 8. Skills 与 MCP 布局统一
 
 
 #### 变更
@@ -204,14 +235,14 @@ body 由**同一个 `RowOp` schema** 校验，两个通道不能产生分歧；�
 - `globalMcpSubtitle` / `projectMcpSubtitle` / `globalSkillSubtitle` / `projectSkillSubtitle`
   四个副标题函数：数字现在由 summary 行统一给出。
 
-### 8. 插件标识统一
+### 9. 插件标识统一
 
 
 - Host 行 id、settings 命名空间、运行时接口、日志及诊断文件统一使用 `dsh-skills-mcp-manager`。
 - 启动时迁移旧配置行，保留连接参数、技能和过滤规则；首次读取时导入旧技能归属清单，之后以新清单为准。
 - 旧标识仅保留在数据迁移常量及对应测试中。
 
-### 9. MCP 运行时数据脱离 YAML
+### 10. MCP 运行时数据脱离 YAML
 
 
 - 工具清单、描述和连接状态改从只读 `GET /dsh-skills-mcp-manager/runtime` 获取，沿用 Host 连接鉴权，禁用响应缓存；移除三个运行时字段的配置 schema 和 settings 发布。
@@ -219,7 +250,7 @@ body 由**同一个 `RowOp` schema** 校验，两个通道不能产生分歧；�
 - 启动时通过配置文件锁、备份和原子写删除旧 `serverTools`、`serverToolsError`、`serverStatus`，保留连接参数、过滤规则及其他配置。
 - 投影去重排除扫描时间戳，连接倒计时也不再进入 settings，避免仅运行时变化造成周期性写盘。
 
-### 10. MCP 卡片改版：状态圆点、作用域跟随、开关 + 操作菜单
+### 11. MCP 卡片改版：状态圆点、作用域跟随、开关 + 操作菜单
 
 
 #### 修复
@@ -269,7 +300,7 @@ body 由**同一个 `RowOp` schema** 校验，两个通道不能产生分歧；�
   （开关点击写 toggle 行操作、新增服务器排在最后）。
 - `npm run gate` 全绿：**300 通过 / 0 失败** + 真实 Host 装配冒烟通过。
 
-### 11. 「需要授权」：OAuth 拒绝不是故障
+### 12. 「需要授权」：OAuth 拒绝不是故障
 
 
 **这一版修的是同一类谎言的另一种形态**：前面的状态标签让「悄悄失效」看得见，但受 OAuth 保护
