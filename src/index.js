@@ -170,7 +170,7 @@ const RowOp = z.object({
 
 setHomeResolver(resolveDshHome)
 
-export /**
+/**
  * One skill write request, shared by the settings-queue channel and the HTTP route.
  *
  * Defining it once is the point: `mcp/rows.js` learned this the hard way — two paths that
@@ -189,7 +189,7 @@ const SkillRequest = z.object({
   nonce: z.string().default(''),
 }).default({})
 
-const Config = z.object({
+export const Config = z.object({
   servers: z.array(Server).default([]).volatile(),
   skills: z.array(Skill).default([]).volatile(),
   /**

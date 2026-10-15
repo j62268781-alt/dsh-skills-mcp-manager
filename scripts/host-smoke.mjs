@@ -150,6 +150,24 @@ try {
     return { status: 200, headers, body: { cancel: async () => {} } }
   }
   const mod = await import(pathToFileURL(join(pkgDir, 'dist', 'index.js')).href)
+
+  /**
+   * The plugin **must** export its `Config` schema.
+   *
+   * This is not a formality: the host's settings service resolves a namespace by finding a
+   * configurable entry and reading *its schema* (`configEditor.entries()` → `this.schema(entry)`),
+   * and throws `No configurable plugin entry "<ns>"` when it cannot. Every projection write goes
+   * through that service, so a missing `Config` export does not fail loudly at load — it silently
+   * rejects every write, and the panel shows an **empty skill list** while the Host looks alive
+   * (heartbeat ticking, routes registered) and the disk still holds the skills.
+   *
+   * That is exactly what shipped in 081bcfc: an edit inserted a doc comment between `export` and
+   * `const Config`, so the keyword bound to the next declaration and `Config` stopped being
+   * exported. `apply` still ran, so a smoke that only checks "the plugin loaded" passed. Asserting
+   * the export here is what makes that class of mistake visible before it reaches a profile.
+   */
+  note(mod.Config !== undefined, '插件导出了 Config（settings 服务靠它解析命名空间）')
+  note(typeof mod.apply === 'function', '插件导出了 apply')
   // The harness tool registry, with a real `register` so the tool filter's shadow
   // has something to install onto and its effect can be observed.
   /** Tools the registry actually accepted (i.e. what the model would be offered). */
