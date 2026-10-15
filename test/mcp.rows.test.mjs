@@ -12,14 +12,25 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import z from '@deepseek-ai/schemastery'
 import { ROWS_PATH, registerRowRoute } from '../src/mcp/rows.js'
 
-const Op = z.object({
-  op: z.string().default(''),
-  entryId: z.string().default(''),
-  enabled: z.boolean().default(true),
-})
+/**
+ * `registerRowRoute` 只要求一个「能把 payload 校验成 op」的函数，不关心它怎么实现 ——
+ * 生产环境传的是宿主的 `RowOp` schema（`@deepseek-ai/schemastery`）。
+ *
+ * **这里刻意不 import 那个包**：它是宿主提供的（不在 package.json 的依赖里），
+ * 只有运行中的 app 能解析到。早先这行 import 让测试在本地过、在 CI 上直接
+ * `ERR_MODULE_NOT_FOUND` —— 一个只在 CI 上炸的测试等于没有测试。
+ * 用等价的本地校验函数，测的是路由自己的契约（鉴权 / 方法 / content-type /
+ * 串行 / 错误回执），与"谁来做校验"无关。
+ */
+const makeSchema = ({ strict = false } = {}) => (payload) => {
+  if (payload === null || typeof payload !== 'object') throw new Error('body must be an object')
+  if (strict && payload.op !== 'add' && payload.op !== 'delete') {
+    throw new Error(`op expected "add" | "delete" but got "${payload.op}"`)
+  }
+  return { op: '', entryId: '', enabled: true, ...payload }
+}
 
 /** A route harness that drives the handler with a real-ish request/response pair. */
 function harness({ apply, rejection, schema } = {}) {
@@ -32,7 +43,7 @@ function harness({ apply, rejection, schema } = {}) {
     logger: { warn() {} },
   }
   registerRowRoute(ctx, {
-    schema: schema ?? ((payload) => Op(payload)),
+    schema: schema ?? makeSchema(),
     apply: apply ?? (async () => ({ ok: true, reason: '' })),
   })
   return {
@@ -97,7 +108,8 @@ test('命令路由：畸形 JSON 与非法字段得到 400，且不执行', asyn
   let applied = 0
   const h = harness({
     // 用真实的严格 schema：非法值应当抛错
-    schema: (payload) => z.object({ op: z.union(['add', 'delete']), entryId: z.string().default('') })(payload),
+    // 严格版：非法 op 抛错，用来验证「校验失败 → 400 且不执行」
+    schema: makeSchema({ strict: true }),
     apply: async () => { applied += 1; return { ok: true, reason: '' } },
   })
 
