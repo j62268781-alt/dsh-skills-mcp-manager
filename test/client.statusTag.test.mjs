@@ -35,6 +35,15 @@ const statusEntry = (over = {}) => ({
 const dotTones = (panel) => panel.findAll((node) => node.props.className === 'smp-dot').map((node) => node.props['data-dot'])
 
 /**
+ * 启用开关，按**语义契约**查找。
+ *
+ * 卡片改用宿主自己的 `Switch` 之后，它的 className 是宿主 CSS module 的哈希名，
+ * 按 `className === 'smp-switch'` 匹配会直接失效。`role=switch` + `aria-checked`
+ * 是官方组件与我们的回退分支共同保证的契约，所以断言契约而不是任一实现的样式。
+ */
+const findSwitch = (panel) => panel.findAll((node) => node.props?.role === 'switch')[0]
+
+/**
  * 某一个圆点档位对应的状态行文字。
  *
  * 状态行是「圆点 + 文字 + 数字」三个兄弟节点（见 `statusDot`），所以要按同一个
@@ -104,9 +113,9 @@ test('停用的条目：开关显示为关，且不显示状态圆点', { skip: 
   try {
     // 「停用」这件事现在由开关表达（它同时说状态和提供切换），不再是一个「已停用」标签，
     // 也不再需要「启用/停用」两个按钮 —— 一列卡片扫下来开关的开关态就能看明白。
-    const sw = panel.findAll((node) => String(node.props.className ?? '') === 'smp-switch')[0]
+    const sw = findSwitch(panel)
     assert.ok(sw !== undefined, '停用条目没有开关')
-    assert.equal(sw.props['data-on'], 'false', '停用条目的开关应显示为关')
+    assert.equal(sw.props['aria-checked'], false, '停用条目的开关应显示为关')
     // 关键：没有连接可报告，就不该留一个过期的绿点说「可用」
     assert.deepEqual(dotTones(panel), [], `停用条目仍显示连接状态圆点：${JSON.stringify(dotTones(panel))}`)
   } finally {
@@ -121,8 +130,8 @@ test('开关：点一下会把 toggle 行操作写进队列（乐观显示为关
   }))
   const { doc } = panel
   try {
-    const sw = panel.findAll((node) => String(node.props.className ?? '') === 'smp-switch')[0]
-    assert.equal(sw.props['data-on'], 'true', '启用的条目开关应为开')
+    const sw = findSwitch(panel)
+    assert.equal(sw.props['aria-checked'], true, '启用的条目开关应为开')
     panel.click(sw)
     const op = (doc.rowOps ?? []).find((o) => o.op === 'toggle')
     assert.ok(op, '点击开关后没有写 toggle 行操作')

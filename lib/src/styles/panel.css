@@ -40,6 +40,11 @@
    actions pinned right, and an open body that can hold arbitrarily long text. */
 .smp-cards{flex-direction:column;gap:14px;margin:0;padding:0;list-style:none;display:flex}
 .smp-card{border:.5px solid var(--dsw-alias-settings-card-stroke);background:var(--dsw-alias-settings-card-fill);border-radius:var(--dsw-radius-xl);flex-direction:column;gap:4px;padding:12px 14px;min-width:0;display:flex}
+/* 卡片分两列：左列是「标题行 + 描述」，右列是操作区。整行垂直居中对齐，
+   这样开关/菜单与两行内容居中，而不是只跟标题那一行居中（那会偏上）。
+   展开的详情在 cardRow 之外，占满整行宽度。 */
+.smp-cardRow{align-items:center;gap:10px;min-width:0;display:flex}
+.smp-cardMain{flex:1 1 auto;min-width:0;flex-direction:column;gap:4px;display:flex}
 .smp-cardHead+.smp-cardDescription{margin-top:0}
 .smp-cardHead{align-items:center;gap:10px;min-width:0;display:flex}
 .smp-cardToggle{box-sizing:border-box;color:inherit;font:inherit;text-align:left;cursor:pointer;background:0 0;border:0;align-items:center;gap:8px;min-width:0;padding:0;display:inline-flex}

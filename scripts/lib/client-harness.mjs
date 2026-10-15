@@ -176,6 +176,15 @@ export async function bootPanel(doc = emptyDoc()) {
             return {
               Modal: (props) => createElement('div', { 'data-modal': props.title, key: 'modal' }, props.description, props.footer, props.children),
               Button: 'button',
+              // Mirrors the Host's real Switch contract (button[role=switch] keyed off
+              // aria-checked, onChange called with the *next* value) so tests exercise the
+              // same code path production takes, not the fallback branch.
+              Switch: (props) => createElement('button', {
+                type: 'button', role: 'switch', 'aria-checked': props.checked,
+                'aria-label': props.label, disabled: props.disabled,
+                className: `smp-switch-stub ${props.className ?? ''}`.trim(),
+                onClick: () => props.onChange(!props.checked),
+              }),
             }
           }
           throw new Error(`test runtime: unknown module ${name}`)
@@ -263,6 +272,12 @@ export async function bootPanel(doc = emptyDoc()) {
         return {
           Modal: (props) => createElement('div', { 'data-modal': props.title, key: 'modal' }, props.description, props.footer, props.children),
           Button: 'button',
+          Switch: (props) => createElement('button', {
+            type: 'button', role: 'switch', 'aria-checked': props.checked,
+            'aria-label': props.label, disabled: props.disabled,
+            className: `smp-switch-stub ${props.className ?? ''}`.trim(),
+            onClick: () => props.onChange(!props.checked),
+          }),
         }
       }
       throw new Error(`test runtime: unknown module ${name}`)
