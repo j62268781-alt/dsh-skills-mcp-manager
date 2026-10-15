@@ -21,6 +21,38 @@ export function mountedKeyOf(servers) {
   return JSON.stringify(servers.filter((server) => server.scope === 'global' && server.enabled !== false))
 }
 /**
+ * A mount field (`env` / `headers`) as a plain object, whichever shape it arrives in.
+ *
+ * The two callers hand this module **different** shapes, and assuming one silently dropped the
+ * other:
+ *
+ *   · `serverRows()` produces an already-parsed **object** (`config.env` straight off the row),
+ *     which is what the real mount path passes in;
+ *   · the panel draft / import path produces `KEY=VALUE` **lines**.
+ *
+ * `parseEnv({JAVA_HOME: '/jdk'})` returns `{}` — `String(object)` is `"[object Object]"`, which
+ * has no `=`, so every line is skipped. That is how issue #2 happened: a project-scoped stdio
+ * row's `JAVA_HOME` / `GHIDRA_INSTALL_DIR` never reached the child process, with no error
+ * anywhere, while the same values worked on 0.5.4's `config.servers[]` path (which passed
+ * strings). Accept both instead of picking one.
+ *
+ * A `null`/absent value is `{}` either way. Non-string scalars are stringified the same way the
+ * YAML reader would, so a numeric value does not become `"[object Object]"`-style garbage.
+ */
+export function envObject(value) {
+  if (value === null || value === undefined) return {}
+  if (typeof value === 'string') return parseEnv(value)
+  if (typeof value !== 'object' || Array.isArray(value)) return {}
+  const out = {}
+  for (const [key, raw] of Object.entries(value)) {
+    if (key === '') continue
+    if (raw === null || raw === undefined) continue
+    out[key] = typeof raw === 'string' ? raw : String(raw)
+  }
+  return out
+}
+
+/**
  * stdio mount config.
  *
  * `npx`-style commands prefer the harness's own runtime (`node` + `pnpx`), which
@@ -30,7 +62,7 @@ export function mountedKeyOf(servers) {
 export function stdioMountConfig(server) {
   const raw = String(server.command ?? '')
   const args = Array.isArray(server.args) ? server.args : []
-  const userEnv = parseEnv(server.env)
+  const userEnv = envObject(server.env)
   const base = raw.split('/').pop() ?? ''
   const npmFamily = /^(npx|npm|pnpx|pnpm)(-cli)?(\.(js|cjs|mjs))?$/.test(base)
   // Some published servers break under pnpm's strict dependency layout
@@ -65,7 +97,10 @@ export function serverMountConfig(server) {
     ? stdioMountConfig(server)
     : {
         transport: 'streamable-http', serverName: server.serverName, url: server.url,
-        headers: parseEnv(server.headers),
+        // Same shape problem as `env` above — and here the stakes are an Authorization header
+        // silently going missing, which shows up as 「需要授权」 on a server whose row carries
+        // the credential.
+        headers: envObject(server.headers),
       }
   const missing = mountConfig.transport === 'stdio' ? !mountConfig.command : !mountConfig.url
   if (missing) return null

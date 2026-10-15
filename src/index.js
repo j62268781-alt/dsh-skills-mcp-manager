@@ -850,10 +850,21 @@ export function apply(ctx, config) {
       const probed = probeStateOf(target.serverName)
       const hasInstance = probed.hasInstance
       const toolCount = toolCounts.get(target.serverName) ?? 0
-      // The registry is a cheap positive signal for a global row. Project servers are
-      // mounted into agent scopes and their tools are invisible in the unscoped view,
-      // so for them the probe is the only source.
-      const connected = target.tier === 'global' && toolCount > 0 ? true : probed.connected
+      /**
+       * Tools in the registry are proof of a live connection, for **both** tiers.
+       *
+       * This used to trust `toolCount` only for a global row, because an *unscoped* registry
+       * read cannot see a project server's tools — so for a project row the count was
+       * structurally 0 and the probe was treated as the only source. `readRuntime` now reads
+       * project tools **in the agent's own scope**, so the count is real, and it is a stronger
+       * signal than the probe: tools present means the server is talking to us, which is
+       * exactly what "connected" claims.
+       *
+       * Issue #3 is the other side of the same coin: a project server that works fine showed
+       * 「已放弃重试」 with `toolCount: 0`, because the status path kept asking a source that is
+       * *designed* not to contain project rows.
+       */
+      const connected = toolCount > 0 ? true : probed.connected
       if (connected !== true) {
         refreshProbe(target.serverName, target.agent)
         // Only asked while not connected. An authorization requirement is a *reason a

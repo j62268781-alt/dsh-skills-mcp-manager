@@ -2,8 +2,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  mountedKeyOf, projectServersFor, serverMountConfig, setMountClient, workingDirectoryOf,
+  envObject, mountedKeyOf, projectServersFor, serverMountConfig, setMountClient, workingDirectoryOf,
 } from '../src/project/mount.js'
+import { serverFromRow } from '../src/mcp/serverRows.js'
 
 setMountClient({ name: '@deepseek-ai/dsh-mcp-client' })
 
@@ -72,4 +73,61 @@ test('serverMountConfig：数字非法时退回客户端默认，不让挂载整
   })
   assert.equal(mounted.url, 'https://z/mcp')
   assert.equal('reconnect' in mounted, false)
+})
+
+/**
+ * issue #2 的回归：项目级 stdio 行的 env 没有传给子进程。
+ *
+ * 根因是**形状**而不是宿主：`serverRows()` 产出的 `env`/`headers` 已经是解析好的**对象**，
+ * 而 `mount.js` 对它调 `parseEnv()`（期望 `KEY=VALUE` 文本行）。`String({...})` 得到
+ * `"[object Object]"`，没有 `=`，于是每一行都被跳过，返回 `{}` —— 环境变量静默消失，
+ * 没有任何报错，而同一份配置在 0.5.4 的 `config.servers[]` 路径（传字符串）下是好的。
+ *
+ * 这条测试刻意用**真实的** `serverFromRow()` 形状，而不是手写字符串：现有测试全都传字符串，
+ * 正是这个 bug 能溜过去的原因。
+ */
+test('serverMountConfig：对象形状的 env 也要带到子进程（issue #2 回归）', () => {
+  const server = serverFromRow({
+    id: 'mcp-rea',
+    // 项目行必须以 disabled: true 写入，否则 Loader 会把它也连一次
+    disabled: true,
+    options: {
+      name: '@deepseek-ai/dsh-mcp-client',
+      config: {
+        serverName: 'rea', transport: 'stdio', command: 'rea', args: ['--mcp'],
+        env: { JAVA_HOME: '/opt/jdk', GHIDRA_INSTALL_DIR: '/opt/ghidra' },
+        scope: '/p/proj',
+      },
+    },
+  })
+  // 前提：投影出来的确实是对象（不是字符串），否则这条测试就没在测真正的问题
+  assert.equal(typeof server.env, 'object', 'serverRows 应当给出对象形状的 env')
+
+  const mount = serverMountConfig(server)
+  assert.equal(mount.env.JAVA_HOME, '/opt/jdk', 'env 丢失了（对象形状没被识别）')
+  assert.equal(mount.env.GHIDRA_INSTALL_DIR, '/opt/ghidra')
+})
+
+test('serverMountConfig：对象形状的 headers 也要带过去（Authorization 不能静默丢失）', () => {
+  const mount = serverMountConfig({
+    serverName: 'z', transport: 'streamable-http', url: 'https://z/mcp',
+    headers: { Authorization: 'Bearer k' },
+  })
+  assert.equal(mount.headers.Authorization, 'Bearer k')
+})
+
+test('envObject：两种形状都接受，空值与非对象不炸', () => {
+  // 对象（serverRows 的形状）
+  assert.deepEqual(envObject({ A: '1', B: 2 }), { A: '1', B: '2' })
+  // 文本行（面板草稿 / 导入的形状）
+  assert.deepEqual(envObject('A=1\nB=2'), { A: '1', B: '2' })
+  // 空值
+  assert.deepEqual(envObject(undefined), {})
+  assert.deepEqual(envObject(null), {})
+  assert.deepEqual(envObject(''), {})
+  // 不该被当成对象处理的东西
+  assert.deepEqual(envObject(['A=1']), {})
+  assert.deepEqual(envObject(42), {})
+  // 空键与空值跳过，而不是写进一个空名字的变量
+  assert.deepEqual(envObject({ '': 'x', OK: null, KEEP: 'v' }), { KEEP: 'v' })
 })
