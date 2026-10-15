@@ -179,7 +179,7 @@ cordis.patch.yml                                   声明插件行（本包自�
 
 **数据通道**：MCP 工具清单、描述及连接状态通过只读 `GET /dsh-skills-mcp-manager/runtime` 获取，复用 Host 的 `connection.requestRejection()` 鉴权，响应禁用缓存。面板打开 MCP 页签、展开卡片及页面恢复可见时读取，可见期间每 5 秒刷新；切换页签或卸载时取消请求。读取失败会显示原因并清除旧连接状态，不回退到 YAML 快照。清单只反映当前注册的工具，断开或未挂载时可能为空。
 
-**命名与升级**：插件行 id、settings 命名空间和运行时接口前缀统一为 `dsh-skills-mcp-manager`。启动时将旧配置行改为新 id，保留连接参数、技能和过滤规则；首次读取技能归属清单时导入旧文件，后续以新文件为准。
+**命名与升级**：插件行 id、settings 命名空间和运行时接口前缀统一为 `dsh-skills-mcp-manager`。启动时将旧配置行改为新 id，保留连接参数、技能和过滤规则；首次读取技能归属清单时导入旧文件，后续以新文件为准。**升级前请读 [`docs/MIGRATION-0.5.5.md`](docs/MIGRATION-0.5.5.md)** —— 这一版改动了「数据存在哪里」（插件身份、MCP 配置单源化、行操作换传输），迁移全部自动完成，但需要重启一次 DSH。
 
 **配置持久化**：服务器连接参数、`toolFilters` 和现有操作通道仍通过官方 settings remote 管理；`profileServers`、`discoveredSkills`、`filterState`、`probeState` 等投影暂保留原通道。启动时使用配置文件锁、备份和原子写清理本插件行里的旧 `serverTools`、`serverToolsError`、`serverStatus`。扫描时间戳不参与投影去重，因此仅扫描时间变化不会触发 settings 写入。
 
@@ -237,6 +237,7 @@ cordis.patch.yml                                   声明插件行（本包自�
 | 文档 | 给谁看 |
 |---|---|
 | [`CHANGELOG.md`](CHANGELOG.md) | 每个版本改了什么 |
+| [`docs/MIGRATION-0.5.5.md`](docs/MIGRATION-0.5.5.md) | 从 0.5.4 升级的人：这一版的破坏性变更、自动迁移覆盖了什么、怎么回退 |
 | [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | 改这个插件的人：自测命令、诊断文件、故障恢复 |
 | [`docs/PUBLISHING.md`](docs/PUBLISHING.md) | 维护者：npm 发包、GitHub Release、上架插件市场 |
 | [`docs/ICON.md`](docs/ICON.md) | 改图标的人：插件的绘制规范（画布 / 尺寸 / 配色）与两个易踩的坑 |
