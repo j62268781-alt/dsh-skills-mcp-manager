@@ -168,6 +168,44 @@ try {
    */
   note(mod.Config !== undefined, '插件导出了 Config（settings 服务靠它解析命名空间）')
   note(typeof mod.apply === 'function', '插件导出了 apply')
+
+  /**
+   * The `skillRequest` field contract, checked against **schema metadata** — what the host's own
+   * `volatileForm()` reads (`meta.volatile` and `dict`), not our reading of the source.
+   *
+   * Both defects below came from extracting an inline schema into a shared definition and losing
+   * a declaration; neither failed loudly:
+   *
+   *   · a missing `.volatile()` makes `settings.write` throw
+   *     `Config field "skillRequest" is not volatile`, and since `read` still travels the queue
+   *     the symptom was 「创建正常、编辑读不出正文」;
+   *   · a missing `path` makes validation strip it, and the Host answers
+   *     「该技能不在当前扫描结果里」.
+   *
+   * This lives in the smoke (not a plain unit test) because `dist/index.js` imports
+   * `@deepseek-ai/schemastery`, which only resolves with the app's node_modules linked — a unit
+   * test would `ERR_MODULE_NOT_FOUND` on CI.
+   */
+  const configDict = mod.Config?.dict ?? {}
+  const skillRequest = configDict.skillRequest
+  note(skillRequest !== undefined, 'Config 里有 skillRequest')
+  note(skillRequest?.meta?.volatile === true,
+    'skillRequest 声明了 volatile（否则队列写入被宿主拒绝：Config field "skillRequest" is not volatile）')
+  note(skillRequest?.dict?.path !== undefined,
+    'skillRequest 带 path（read/预览靠它定位 SKILL.md）')
+  note(String(skillRequest?.dict?.path?.meta?.default) === '',
+    'path 的默认值是空串')
+  {
+    const names = Object.keys(skillRequest?.dict ?? {}).sort().join(',')
+    const want = ['body', 'description', 'id', 'name', 'nonce', 'op', 'path', 'prevName', 'project', 'scope'].sort().join(',')
+    note(names === want, `skillRequest 字段集合完整（实际 ${names}）`)
+  }
+  // The convention, not just the field that was reported: every queue-driven field is volatile.
+  {
+    const missing = ['servers', 'skills', 'rowOps', 'skillRequest', 'skillResult', 'profileServers']
+      .filter((name) => configDict[name]?.meta?.volatile !== true)
+    note(missing.length === 0, `走队列的字段都声明了 volatile${missing.length ? `（漏了 ${missing.join(', ')}）` : ''}`)
+  }
   // The harness tool registry, with a real `register` so the tool filter's shadow
   // has something to install onto and its effect can be observed.
   /** Tools the registry actually accepted (i.e. what the model would be offered). */

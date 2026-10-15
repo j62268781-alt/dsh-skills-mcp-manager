@@ -182,12 +182,31 @@ const SkillRequest = z.object({
   scope: z.string().default(''),
   id: z.string().default(''),
   project: z.string().default(''),
+  /**
+   * The `SKILL.md` path for `op: 'read'` — the editor and the preview send only this.
+   *
+   * It was in the inline schema this definition replaced, and dropping it silently broke
+   * 「编辑」: the panel sent the read request, validation stripped `path`, and the Host answered
+   * 「该技能不在当前扫描结果里」. Creating still worked (it goes over HTTP now and never sends
+   * `path`), which is exactly why the loss was easy to miss.
+   */
+  path: z.string().default(''),
   name: z.string().default(''),
   prevName: z.string().default(''),
   description: z.string().default(''),
   body: z.string().default(''),
   nonce: z.string().default(''),
-}).default({})
+  /**
+   * `.volatile()` is **required** — this field travels through the settings document.
+   *
+   * The settings service only accepts writes to fields declared volatile
+   * (`isVolatilePath` in `@deepseek-ai/dsh-settings`), and every other queue-driven field here
+   * carries it. The inline schema this replaced had it on the whole object; extracting the
+   * definition without re-applying it made every queue write throw
+   * `Config field "skillRequest" is not volatile`. `op: 'read'` still travels the queue, so that
+   * is what the editor hit.
+   */
+}).default({}).volatile()
 
 export const Config = z.object({
   servers: z.array(Server).default([]).volatile(),
