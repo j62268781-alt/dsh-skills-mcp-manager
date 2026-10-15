@@ -154,13 +154,24 @@ export async function bootPanel(doc = emptyDoc(), options = {}) {
   const realClearInterval = globalThis.clearInterval
   const realClearTimeout = globalThis.clearTimeout
   /**
-   * Default fetch: answers **both** panel endpoints.
+   * Default fetch: answers **all three** panel endpoints.
    *
-   * `/runtime` is the read route and `/rows` is the command route, and they have different
-   * payloads — one blanket stub would hand the command route a runtime body, so every command
-   * would look rejected. `options.fetch` still replaces the whole thing.
+   * `/runtime` is the read route, `/rows` is the MCP command route, and `/skills` is the skill
+   * **write** route — they have different payloads, and one blanket stub would hand a command
+   * route a runtime body, so every command would look rejected. `options.fetch` still replaces
+   * the whole thing.
    */
   globalThis.fetch = options.fetch ?? (async (url, init) => {
+    if (String(url).endsWith('/skills')) {
+      // Record the write so a test can assert the HTTP path was taken, and echo the Host's
+      // receipt shape. Rejections are driven by `options.fetch` or by `doc.skillCommandResult`.
+      const body = init?.body === undefined ? {} : JSON.parse(String(init.body))
+      const commands = doc.skillCommands ?? []
+      commands.push(body)
+      doc.skillCommands = commands
+      if (doc.skillCommandResult !== undefined) return { ok: true, status: 200, json: async () => doc.skillCommandResult }
+      return { ok: true, status: 200, json: async () => ({ ok: true, reason: '', name: body.name ?? '', at: new Date().toISOString() }) }
+    }
     if (String(url).endsWith('/rows')) {
       // Record the command so a test can assert the HTTP path was taken, and echo the Host's
       // success shape. Rejections are driven by `options.fetch` or by pre-seeding `rowCommands`.

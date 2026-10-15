@@ -21,8 +21,12 @@ test('客户端删除流程：删除中不出现按钮边框，回执到达后�
     change(panel.byPlaceholder('例如 my-skill'), 'test-skills')
     change(panel.byPlaceholder('一句话说明何时使用它'), 'test-skills')
     click(byText('创建'))
-    const createNonce = doc.skillRequest.nonce
-    assert.equal(doc.skillRequest.op, 'create', '创建请求没有写进设置文档')
+    // 写入现在走 HTTP（`/skills`），不再排进 settings 队列 —— 队列只是回退通道。
+    // 这里同时断言队列**没有**被写，否则又变成两条通道各写一次。
+    const createNonce = (doc.skillCommands ?? [])[0]?.nonce
+    assert.equal((doc.skillCommands ?? [])[0]?.op, 'create', '创建请求没有走 HTTP 路由')
+    assert.equal(doc.skillRequest?.op ?? '', '', 'HTTP 成功时不该再写设置队列')
+    await panel.settle()
 
     // Host answers and the re-scan lists the new skill on disk.
     doc.skillResult = { ok: true, reason: '', name: 'test-skills', body: '', at: new Date().toISOString(), nonce: createNonce }
@@ -43,7 +47,7 @@ test('客户端删除流程：删除中不出现按钮边框，回执到达后�
     panel.openMenu()
     click(byText('删除'))
     click(byText('删除'))
-    assert.equal(doc.skillRequest.op, 'delete', '删除请求没有写进设置文档')
+    assert.equal((doc.skillCommands ?? []).at(-1)?.op, 'delete', '删除请求没有走 HTTP 路由')
     const actions = find((node) => String(node.props.className ?? '').includes('smp-cardActions') && textOf(node).includes('删除中…'))
     assert.ok(actions !== null, '删除进行中没有显示「删除中…」状态')
     let buttonInside = false
@@ -51,16 +55,43 @@ test('客户端删除流程：删除中不出现按钮边框，回执到达后�
     // The danger button's own border used to frame the status as a stray pill.
     assert.equal(buttonInside, false, '删除中的状态被渲染在按钮里（会多出一个圆角边框）')
 
-    // 3) The receipt arrives while the renderer's mirror still lists the skill:
-    //    the card must go at once and must not come back as an optimistic ghost.
-    doc.skillResult = { ok: true, reason: '', name: 'test-skills', body: '', at: new Date().toISOString(), nonce: doc.skillRequest.nonce }
-    runtime.render()
+    // 3) The answer arrives while the renderer's mirror still lists the skill: the card must go
+    //    at once and must not come back as an optimistic ghost.
+    //
+    //    The HTTP answer resolves on a microtask, so settle before asserting — asserting straight
+    //    after the click would check the state *before* the reply, which is the previous step's
+    //    contract (「删除中…」 above), not this one.
+    await panel.settle()
     assert.equal(find((node) => String(node.props.className ?? '').includes('smp-card') && textOf(node).includes('test-skills')), null,
-      '回执到达后卡片还在（设置文档还没跟上）')
+      '删除完成后卡片还在（设置文档还没跟上）')
     doc.discoveredSkills = []
     runtime.render()
     assert.equal(find((node) => String(node.props.className ?? '').includes('smp-card') && textOf(node).includes('test-skills')), null,
       '文档跟上后又冒出幽灵卡片')
+  } finally {
+    restore()
+  }
+})
+
+/**
+ * 回退通道：Host 没有 `/skills` 路由时（旧 Host / 无 webServer），写入必须落回设置队列。
+ *
+ * 三条路里这是最容易悄悄坏掉的一条 —— 它默认不会被走到，所以要有测试盯着。
+ */
+test('技能写入回退：路由返回 404 时改走设置队列', { skip: skipWithoutBundle() }, async () => {
+  const panel = await bootPanel(emptyDoc(), {
+    fetch: async () => ({ ok: false, status: 404, json: async () => ({}) }),
+  })
+  const { doc, byClass, byText, click, change, restore } = panel
+  try {
+    click(panel.find((node) => String(node.props.className ?? '').includes('smp-tab') && textOf(node).startsWith('Skills')))
+    click(byClass('smp-button', '添加技能'))
+    change(panel.byPlaceholder('例如 my-skill'), 'fallback-skill')
+    click(byText('创建'))
+    await panel.settle()
+    assert.equal(doc.skillRequest?.op, 'create', '404 时没有回退到设置队列')
+    assert.equal(doc.skillRequest?.name, 'fallback-skill')
+    assert.deepEqual(doc.skillCommands ?? [], [], '404 不该被当成写入成功')
   } finally {
     restore()
   }

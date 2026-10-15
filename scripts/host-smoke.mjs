@@ -18,6 +18,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { RUNTIME_PATH } from '../src/mcp/runtime.js'
 import { ROWS_PATH } from '../src/mcp/rows.js'
+import { SKILLS_PATH } from '../src/skills/route.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const root = resolve(here, '..')
@@ -306,6 +307,7 @@ try {
   }]
   let runtimeRoute
   let rowsRoute
+  let skillsRoute
   const readRuntime = async () => {
     let body = ''
     const res = { setHeader: noop, end: (value = '') => { body = value }, statusCode: 0 }
@@ -343,6 +345,7 @@ try {
         register: (route) => {
           if (route.path === RUNTIME_PATH) runtimeRoute = route
           if (route.path === ROWS_PATH) rowsRoute = route
+          if (route.path === SKILLS_PATH) skillsRoute = route
           return noop
         },
       },
@@ -442,6 +445,18 @@ try {
     await rowsRoute.handler({ method: 'GET', headers: {} }, rowsRes)
     note(rowsRes.statusCode === 405, `命令路由只接受 POST（GET 得到 ${rowsRes.statusCode}）`)
     note(rowsBody === '', '被拒绝的请求没有产生响应体')
+  }
+
+  // Channel 3d: the skill **write** route. Same contract as the row route — it writes files on
+  // disk, so it must refuse a GET and must be registered at all. A skill write used to travel the
+  // settings queue, which stacked four polls (measured worst case ≈9.1s for 1ms of disk work).
+  note(skillsRoute !== undefined, '技能写入路由已注册（POST /<name>/skills）')
+  if (skillsRoute !== undefined) {
+    let skillBody = ''
+    const skillRes = { setHeader: noop, end: (value = '') => { skillBody = value }, statusCode: 0 }
+    await skillsRoute.handler({ method: 'GET', headers: {} }, skillRes)
+    note(skillRes.statusCode === 405, `技能写入路由只接受 POST（GET 得到 ${skillRes.statusCode}）`)
+    note(skillBody === '', '被拒绝的请求没有产生响应体')
   }
 
   // Channel 3b: the reconnect request. A server the profile does not configure cannot

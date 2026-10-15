@@ -177,6 +177,8 @@ lib/src/**    Client 半（esbuild → lib/client.js） 跑在浏览器，单文
 cordis.patch.yml                                   声明插件行（本包自己的 bundle patch）
 ```
 
+**写通道**：MCP 行的增删改走 `POST /dsh-skills-mcp-manager/rows`，技能的新增/编辑/改名/删除走 `POST /dsh-skills-mcp-manager/skills`。两条路由都先过 `connection.requestRejection()` 鉴权，只接受 `POST` + `application/json`（跨站 HTML 表单发不出这个类型），body 用与设置队列**同一个** schema 校验，请求串行执行。为什么不用设置队列：写一个文件只要 1ms，而队列通道要连等四个轮询（600ms 取请求 + 面板自己的回读 + 2s 对账 + 5s 投影），实测最坏约 9 秒。**设置队列保留为回退通道**并在继续排空，所以旧面板、旧 Host 或没有 webServer 的 profile 都照旧可用。
+
 **数据通道**：MCP 工具清单、描述及连接状态通过只读 `GET /dsh-skills-mcp-manager/runtime` 获取，复用 Host 的 `connection.requestRejection()` 鉴权，响应禁用缓存。面板打开 MCP 页签、展开卡片及页面恢复可见时读取，可见期间每 5 秒刷新；切换页签或卸载时取消请求。读取失败会显示原因并清除旧连接状态，不回退到 YAML 快照。清单只反映当前注册的工具，断开或未挂载时可能为空。
 
 **命名与升级**：插件行 id、settings 命名空间和运行时接口前缀统一为 `dsh-skills-mcp-manager`。启动时将旧配置行改为新 id，保留连接参数、技能和过滤规则；首次读取技能归属清单时导入旧文件，后续以新文件为准。**升级前请读 [`docs/MIGRATION-0.5.5.md`](docs/MIGRATION-0.5.5.md)** —— 这一版改动了「数据存在哪里」（插件身份、MCP 配置单源化、行操作换传输），迁移全部自动完成，但需要重启一次 DSH。

@@ -32,6 +32,7 @@ import { beat, beatFile } from './diagnostics/heartbeat.js'
 import { agentsHome, projectRootOf, reconcileSkills } from './skills/reconcile.js'
 import { bodyOf, discoverSkills } from './skills/discover.js'
 import { createSkill, deleteSkill, renameSkill, updateSkill, writableRoots } from './skills/write.js'
+import { registerSkillRoute } from './skills/route.js'
 import { serverMountConfig, setMountClient, workingDirectoryOf } from './project/mount.js'
 import { GLOBAL_SCOPE, projectServersFor, serverRows, serverSetKey } from './mcp/serverRows.js'
 import { connectionDraftOf } from './mcp/connection.js'
@@ -169,7 +170,26 @@ const RowOp = z.object({
 
 setHomeResolver(resolveDshHome)
 
-export const Config = z.object({
+export /**
+ * One skill write request, shared by the settings-queue channel and the HTTP route.
+ *
+ * Defining it once is the point: `mcp/rows.js` learned this the hard way — two paths that
+ * validate separately drift, and the drift shows up as a field that works on one channel and
+ * silently disappears on the other. Both channels now validate with *this* schema.
+ */
+const SkillRequest = z.object({
+  op: z.string().default(''),
+  scope: z.string().default(''),
+  id: z.string().default(''),
+  project: z.string().default(''),
+  name: z.string().default(''),
+  prevName: z.string().default(''),
+  description: z.string().default(''),
+  body: z.string().default(''),
+  nonce: z.string().default(''),
+}).default({})
+
+const Config = z.object({
   servers: z.array(Server).default([]).volatile(),
   skills: z.array(Skill).default([]).volatile(),
   /**
@@ -196,17 +216,7 @@ export const Config = z.object({
   }).default({}).volatile(),
   /** The scan answer for the latest request. */
   /** Skill write request from the panel (create/update/rename/delete on disk). */
-  skillRequest: z.object({
-    op: z.string().default(''),
-    scope: z.string().default(''),
-    id: z.string().default(''),
-    project: z.string().default(''),
-    name: z.string().default(''),
-    prevName: z.string().default(''),
-    description: z.string().default(''),
-    body: z.string().default(''),
-    nonce: z.string().default(''),
-  }).default({}).volatile(),
+  skillRequest: SkillRequest,
   skillResult: z.object({
     ok: z.boolean().default(false),
     reason: z.string().default(''),
@@ -1515,6 +1525,109 @@ export function apply(ctx, config) {
     const reconnectTimer = setInterval(drainReconnect, 500)
     inner.effect(() => () => clearInterval(reconnectTimer))
 
+    /**
+     * Apply one skill write, shared by the HTTP route and the settings-queue fallback.
+     *
+     * Extracted so the two channels cannot drift: they used to differ in ways that mattered
+     * (the queue path re-scanned roots, the direct path must too), and a fix in one place
+     * silently missing the other is exactly the failure mode this plugin has hit before with
+     * `serverRows.js`'s two field lists.
+     *
+     * `read` is **not** handled here — it stays on the queue (see `skills/route.js`).
+     */
+    const applySkillWrite = async (skillReq) => {
+      const at = () => new Date().toISOString()
+      const fail = (reason) => ({ ok: false, reason, name: '', body: '', nonce: String(skillReq?.nonce ?? ''), at: at() })
+      const op = String(skillReq?.op ?? '')
+      const roots = writableRoots({
+        dshHome: resolveDshHome(),
+        agentsHome: agentsHome(),
+        projectRoot: skillReq?.project === '' ? '' : projectRootOf(String(skillReq.project)),
+      })
+      const target = roots.find((entry) => entry.scope === skillReq?.scope && entry.id === skillReq?.id)
+      let result
+      if (String(skillReq?.scope ?? '') === 'project' && String(skillReq?.project ?? '') === '') {
+        // Never guess: an empty project used to fall back to the cwd and wrote
+        // the skill into the wrong workspace.
+        result = fail('未选择项目，无法写入项目级技能')
+      } else if (target === undefined) {
+        result = fail('未知的写入区域')
+      } else {
+        const payload = {
+          dir: target.dir, name: String(skillReq?.name ?? ''),
+          description: String(skillReq?.description ?? ''), body: String(skillReq?.body ?? ''),
+        }
+        // A disk op that throws (a failing copy, a permission error) must
+        // still produce an answer: without a receipt the panel's card kept
+        // spinning on 「删除中…」 forever.
+        let done
+        try {
+          done = op === 'create' ? await createSkill(payload)
+            : op === 'rename' ? await renameSkill({ ...payload, from: String(skillReq?.prevName ?? ''), to: String(skillReq?.name ?? '') })
+              : op === 'delete' ? await deleteSkill(payload)
+                : await updateSkill(payload)
+        } catch (error) {
+          done = { ok: false, reason: String(error?.message ?? error) }
+        }
+        result = { ok: done.ok === true, reason: String(done.reason ?? ''), name: String(done.name ?? ''), body: '', nonce: String(skillReq?.nonce ?? ''), at: at() }
+      }
+      if (result.ok === true) {
+        // Re-scan so the projection can show it now. A `read` never reaches here, and the
+        // periodic scan already covers every project — but a write must refresh the roots it
+        // touched, or the new skill is invisible until the next 5 s scan.
+        try {
+          const projectScopes = [...new Set(discoveredSkills
+            .map((entry) => entry.scope)
+            .filter((scope) => typeof scope === 'string' && scope !== '' && scope !== 'global'))]
+          await refreshDiscovered([...new Set([
+            ...roots.map((entry) => projectRootOf(entry.dir)),
+            ...projectScopes,
+          ])].filter((root) => typeof root === 'string' && root !== ''))
+        } catch (error) {
+          if (process.env.SMP_DEBUG) console.error('[dsh-skills-mcp-manager] post-write rescan failed', error)
+        }
+      }
+      return result
+    }
+
+    /** Record what just happened (diagnostics) and push the projection out now. */
+    const finishSkillOp = (op, skillReq, result) => {
+      lastOp = {
+        op: String(op ?? ''), name: String(skillReq?.name ?? ''),
+        nonce: String(result?.nonce ?? ''), ok: result?.ok === true,
+        at: new Date().toISOString(),
+      }
+      // Publish immediately: waiting for the 5s publish interval was the
+      // entire reason a save took ~4.6s to show up in the panel.
+      try { tick(); publish() } catch (error) { console.error('[dsh-skills-mcp-manager] immediate publish failed:', error) }
+    }
+
+    /**
+     * Skill writes over HTTP — same reasoning as the row route above.
+     *
+     * Writing one file takes **1 ms** (measured); the queue round-trip took up to **9.1 s**
+     * because it stacked four polls (600 ms request drain + the panel's settings poll + the
+     * 2 s reconcile tick + the 5 s publish). Adding a skill is a click, so it should not wait
+     * on four timers. Deleting only *felt* fast — it has an optimistic tombstone; it used the
+     * same slow channel.
+     *
+     * The queue keeps draining, so an older panel still works and this route stays an
+     * optimisation rather than a requirement.
+     */
+    ctx.inject(['webServer', 'connection'], (skillRouteCtx) => registerSkillRoute(skillRouteCtx, {
+      schema: (payload) => SkillRequest(payload),
+      apply: async (request) => {
+        const op = String(request?.op ?? '')
+        // `read` is a read: it stays on the settings channel (that is where the panel asks for
+        // it, and it is not the slow path anyone complained about). Refusing it here keeps the
+        // route's contract to "writes only", so a mis-routed request fails loudly.
+        if (op === 'read') return { ok: false, reason: 'read 不走此路由', name: '', body: '', nonce: String(request?.nonce ?? ''), at: new Date().toISOString() }
+        const result = await applySkillWrite(request)
+        finishSkillOp(op, request, result)
+        return result
+      },
+    }))
+
     // Project MCP import: the panel posts a request, this half scans one tool's
     // project files and writes the answer back for the panel to preview.
     let seenNonce = ''
@@ -1530,7 +1643,6 @@ export function apply(ctx, config) {
             agentsHome: agentsHome(),
             projectRoot: skillReq?.project === '' ? '' : projectRootOf(String(skillReq.project)),
           })
-          const target = roots.find((entry) => entry.scope === skillReq?.scope && entry.id === skillReq?.id)
           void (async () => {
            try {
             let result
@@ -1565,31 +1677,10 @@ export function apply(ctx, config) {
                 }
               }
             }
-            else if (String(skillReq?.scope ?? '') === 'project' && String(skillReq?.project ?? '') === '') {
-              // Never guess: an empty project used to fall back to the cwd and wrote
-              // the skill into the wrong workspace.
-              result = { ok: false, reason: '未选择项目，无法写入项目级技能', name: '', body: '', nonce: skillNonce , at: new Date().toISOString() }
-            }
-            else if (target === undefined) {
-              result = { ok: false, reason: '未知的写入区域', name: '', body: '', nonce: skillNonce , at: new Date().toISOString() }
-            } else {
-              const payload = {
-                dir: target.dir, name: String(skillReq?.name ?? ''),
-                description: String(skillReq?.description ?? ''), body: String(skillReq?.body ?? ''),
-              }
-              // A disk op that throws (a failing copy, a permission error) must
-              // still produce an answer: without a receipt the panel's card kept
-              // spinning on 「删除中…」 forever.
-              let done
-              try {
-                done = op === 'create' ? await createSkill(payload)
-                  : op === 'rename' ? await renameSkill({ ...payload, from: String(skillReq?.prevName ?? ''), to: String(skillReq?.name ?? '') })
-                    : op === 'delete' ? await deleteSkill(payload)
-                      : await updateSkill(payload)
-              } catch (error) {
-                done = { ok: false, reason: String(error?.message ?? error) }
-              }
-              result = { ok: done.ok === true, reason: String(done.reason ?? ''), name: String(done.name ?? ''), body: '', nonce: skillNonce , at: new Date().toISOString() }
+            else {
+              // Writes share one implementation with the HTTP route (`applySkillWrite`), so a
+              // fix cannot land in one channel and miss the other.
+              result = await applySkillWrite(skillReq)
             }
             // A skill op must never throw out of here: an exception used to escape
             // the plugin load and DSH exited with "fatal load failure", taking the
@@ -1600,26 +1691,10 @@ export function apply(ctx, config) {
                 // Clear the request in the same write so a restart cannot replay it.
                 skillRequest: { op: '', scope: '', id: '', project: '', path: '', name: '', prevName: '', description: '', body: '', nonce: '' },
               }))
-              // A `read` does not touch the disk, and the periodic scan already covers
-              // every project. Re-scanning from the request's own roots shrank the
-              // list to global-only, which made project skills vanish mid-preview.
-              if (op !== 'read') {
-                const projectScopes = [...new Set(discoveredSkills
-                  .map((entry) => entry.scope)
-                  .filter((scope) => typeof scope === 'string' && scope !== '' && scope !== 'global'))]
-                await refreshDiscovered([...new Set([
-                  ...roots.map((entry) => projectRootOf(entry.dir)),
-                  ...projectScopes,
-                ])].filter((root) => typeof root === 'string' && root !== ''))
-              }
-              lastOp = {
-                op: String(op ?? ''), name: String(skillReq?.name ?? ''),
-                nonce: String(result?.nonce ?? ''), ok: result?.ok === true,
-                at: new Date().toISOString(),
-              }
-              // Publish immediately: waiting for the 5s publish interval was the
-              // entire reason a save took ~4.6s to show up in the panel.
-              try { publish() } catch (error) { console.error('[dsh-skills-mcp-manager] immediate publish failed:', error) }
+              // A `read` never touches the disk, so it must not move the projection —
+              // re-scanning from the request's own roots shrank the list to global-only,
+              // which made project skills vanish mid-preview.
+              if (op !== 'read') finishSkillOp(op, skillReq, result)
             } catch (error) {
               console.error('[dsh-skills-mcp-manager] skill op failed:', error)
             }
