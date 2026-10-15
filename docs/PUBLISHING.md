@@ -84,14 +84,40 @@ npm view @j62268781-alt/dsh-skills-mcp-manager version  # 验证
 配好之后**不再需要任何 secret**：workflow 里 OIDC（`id-token: write`）会自动带上
 provenance 签名，npm 页面上会出现「Built and signed on GitHub Actions」。
 
-### 2.2 之后每个版本（自动）
+### 2.2 分支模型：master 是发布线，`dev-*` 是开发线
+
+| 分支 | 跑 CI | 能发包 | 用途 |
+|---|---|---|---|
+| `master` | ✓ | ✓（只能靠 release tag） | 发布线。`package.json` 始终是**已发布或即将发布**的版本号 |
+| `dev-*`（如 `dev-0.5.5`） | ✓ | ✗ | 开发线。下一个版本在这里做，版本号提前锁好 |
+| 任意 PR | ✓ | ✗ | 合并前把关 |
+
+**发包的唯一入口是 release tag**：`publish.yml` 只有 `release: published` 与手动触发，
+**没有任何 push / branch 条件**。所以给 `dev-*` 开 CI 不会让开发分支有机会发包 ——
+CI 与发布是两条互不重叠的路径。
+
+这样安排的原因：一个版本的改动往往要攒几周（0.5.4 → 0.5.5 之间积了 8 组改动），
+期间 master 不能一直漂着未发布的版本号，否则「master 上是什么版本」就没有意义了。
+
+### 2.3 之后每个版本（自动）
+
+在**开发线**上把版本做好，合并/快进到发布线，再打 tag：
 
 ```bash
-npm version minor --no-git-tag-version     # 1) 改 package.json 版本 + CHANGELOG
-git commit -am "release: v0.5.0" && git push
-git tag v0.5.0 && git push origin v0.5.0   # 2) 打 tag
-# 3) 在 GitHub 上按这个 tag 发一个 Release（Publish release）
+# 1) 在 dev-* 上：改 package.json 版本 + CHANGELOG，把「未发布」收敛成该版本
+#    （开发期间 CI 会在每次 push 时把关）
+git switch dev-0.5.5
+npm version minor --no-git-tag-version
+
+# 2) 并入发布线
+git switch master && git merge --ff-only dev-0.5.5 && git push
+
+# 3) 打 tag，并在 GitHub 上按该 tag 发 Release（Publish release）
+git tag v0.5.5 && git push origin v0.5.5
 ```
+
+`--ff-only` 是刻意的：发布线的历史应当是开发线历史的后缀，不做一次多余的合并提交，
+也让「master 上这个 commit 就是发出去的那个」一眼可查。
 
 Release 一发布，workflow 自动：核对 tag 与 `package.json` 版本一致 → build → 门禁 → `npm publish`（带 provenance）。
 
@@ -100,7 +126,7 @@ Release 一发布，workflow 自动：核对 tag 与 `package.json` 版本一致
 - 想改用 token 而不是可信发布：在仓库 Secrets 里加 `NPM_TOKEN`（npm 的 **Granular Access Token**，勾 Publish 权限），
   workflow 会自动切到那条路径（`env.NPM_TOKEN != ''` 的分支）。
 
-### 2.3 手动兜底
+### 2.4 手动兜底
 
 ```bash
 npm login

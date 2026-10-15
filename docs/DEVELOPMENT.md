@@ -31,7 +31,7 @@ node scripts/screenshots.mjs   # 重新生成 README 的两张截图
 
 | 工作流 | 什么时候跑 | 干什么 |
 |---|---|---|
-| [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) | push 到 `master`、所有 PR、手动 | Node 20 / 22 / 24 三个版本各跑一遍 `npm run build` + `npm run gate`，再核对 `npm pack --dry-run` 的清单（必须含 `dist/index.js`、不能混进 `lib/src`） |
+| [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) | push 到 `master` 或 `dev-*`、所有 PR、手动 | Node 20 / 22 / 24 三个版本各跑一遍 `npm run build` + `npm run gate`，再核对 `npm pack --dry-run` 的清单（必须含 `dist/index.js`、不能混进 `lib/src`） |
 | [`.github/workflows/publish.yml`](../.github/workflows/publish.yml) | 发布 GitHub Release（tag `v<版本>`）、手动 | 核对 tag 与版本一致 → build → gate → 发 npm（优先可信发布 OIDC，其次 `NPM_TOKEN`） |
 
 CI 上 `smoke` 与预览基线会跳过（找不到本机 DSH 与夹具），这是预期；真正跑得起来的是

@@ -1,11 +1,15 @@
 name: ci
 
-# 平时改代码就在这几道门禁上把关：push 到 master、以及所有 PR。
+# 平时改代码就在这几道门禁上把关：push 到 master、push 到 dev-* 开发分支、以及所有 PR。
 # 发版走的是 publish.yml（release published 触发），两者互不替代：
 # publish 自己也会再跑一次 gate，避免「CI 绿了但发的是另一个 commit」。
+#
+# `dev-*` 是**开发分支**（例如 0.5.5 的开发在 dev-0.5.5 上）：它们只跑 CI，不是发布源。
+# 发布只认 release tag，而 publish.yml 没有任何 push/branch 触发条件 —— 所以放开这里
+# 不会让开发分支有机会发包。
 on:
   push:
-    branches: [master]
+    branches: [master, 'dev-*']
   pull_request:
   workflow_dispatch:
 
