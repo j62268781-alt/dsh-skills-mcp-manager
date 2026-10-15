@@ -197,3 +197,27 @@ test('技能路由：响应不可缓存', async () => {
   const res = await h.request({ body: JSON.stringify({ op: 'create', name: 'demo' }) })
   assert.equal(res.headers['cache-control'], 'no-store')
 })
+
+/**
+ * 路由必须把 `scope` / `id` 原样交给写路径 —— 它们是 `writableRoots` 唯一的匹配依据。
+ *
+ * 丢掉的后果是每次编辑/删除都答「未知的写入区域」，而根因可以很隐蔽：真机上是因为把
+ * **volatile 的 Config 字段**直接当成了校验器，而调用一个 volatile schemastery schema
+ * 返回 `{}` 而不是校验结果。这条测试用本地校验器钉住路由这一侧的契约
+ * （`should not silently drop scope/id`），schema 那一侧由 `host.configSchema.test.mjs`
+ * 与冒烟覆盖 —— **这里刻意不 import `@deepseek-ai/schemastery`**，它在 CI 上解析不到，
+ * 会让整个测试文件 `ERR_MODULE_NOT_FOUND`（已踩过一次）。
+ */
+test('技能路由：校验器返回的请求必须保留 scope/id（丢了会报「未知的写入区域」）', async () => {
+  let received = null
+  const h = harness({
+    schema: (payload) => makeSchema()(payload),
+    apply: async (request) => { received = request; return { ok: true } },
+  })
+  await h.request({ body: JSON.stringify({ op: 'delete', scope: 'global', id: 'agents', name: 'x', nonce: 'n1' }) })
+
+  assert.equal(received?.scope, 'global', 'scope 丢了：writableRoots 匹配不到根 ⇒「未知的写入区域」')
+  assert.equal(received?.id, 'agents', 'id 丢了：writableRoots 匹配不到根 ⇒「未知的写入区域」')
+  assert.equal(received?.name, 'x')
+  assert.equal(received?.nonce, 'n1')
+})

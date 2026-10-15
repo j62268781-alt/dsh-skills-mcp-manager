@@ -52,9 +52,23 @@ export function parseFrontmatter(markdown) {
  */
 const BODY_LIMIT = 4000
 
-/** The markdown body without the frontmatter block, capped for the projection. */
+/**
+ * The markdown body without the frontmatter block, capped for the projection.
+ *
+ * This is the **exact inverse of `renderSkillMarkdown`**, which writes
+ * `---\n<front>\n---\n\n<body>` and strips leading newlines from the body. So the blank line
+ * between the closing `---` and the text is **formatting, not content**, and reading it back as
+ * part of the body made the editor open with an empty first line (「正文多了一行，然后才到正文」);
+ * saving then persisted that blank line, so the file grew on every round-trip.
+ *
+ * Consuming exactly that separator is what makes read the inverse of write, and it is why this
+ * cannot simply use `\s*` — that also eats a body's leading **indentation**, which the writer
+ * preserves (a body starting with an indented block is legitimate, e.g. inside a code fence).
+ */
 export function bodyOf(markdown) {
-  const text = String(markdown ?? '').replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '')
+  // Trailing spaces on the `---` line are tolerated; the two separator newlines are consumed;
+  // anything after that is content, indentation included.
+  const text = String(markdown ?? '').replace(/^---\r?\n[\s\S]*?\r?\n---[ \t]*\r?\n(?:\r?\n)?/, '')
   if (text.length <= BODY_LIMIT) return text
   return `${text.slice(0, BODY_LIMIT)}\n\n…（已截断，完整内容见文件）`
 }

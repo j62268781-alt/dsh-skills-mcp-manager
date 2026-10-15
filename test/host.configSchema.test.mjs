@@ -33,12 +33,28 @@ const declarationOf = (name) => {
   return source.slice(start, end < 0 ? undefined : end)
 }
 
-test('SkillRequest：结尾必须带 .volatile()（否则队列写入被宿主拒绝）', () => {
-  const block = declarationOf('SkillRequest')
-  assert.ok(block !== undefined, 'src/index.js 里找不到 const SkillRequest')
-  assert.match(block, /\}\)\.default\(\{\}\)\.volatile\(\)/,
-    'SkillRequest 缺少 .volatile()：settings.write 会抛 `Config field "skillRequest" is not volatile`，'
-    + '而 read（编辑/预览）走的正是队列，症状是「创建正常、编辑读不出正文」')
+test('SkillRequest：Config 字段带 .volatile()，而**校验器那份不带**', () => {
+  /**
+   * 两个用途需要**不同形态**，混用会出真 bug —— 两者都实际发生过：
+   *
+   *   · Config 字段要 `.volatile()`，否则 `settings.write` 抛
+   *     `Config field "skillRequest" is not volatile`（症状：创建正常、编辑读不出正文）；
+   *   · HTTP 路由的**校验器不能** volatile —— 调用一个 volatile schemastery schema 返回 `{}`
+   *     而不是校验结果，于是 `scope`/`id` 变 undefined、`writableRoots` 匹配不上，
+   *     每次编辑/删除都答「未知的写入区域」。
+   *
+   * `RowOp`（MCP 路由的校验器）从来不带 `.volatile()`，正是同一个道理。
+   */
+  const wire = declarationOf('SkillRequest')
+  assert.ok(wire !== undefined, 'src/index.js 里找不到 const SkillRequest')
+  assert.doesNotMatch(wire, /\.volatile\(\)/,
+    'SkillRequest 带上 .volatile() 了：它作为 HTTP 路由的校验器会返回 {}，'
+    + '导致 scope/id 丢失、报「未知的写入区域」')
+
+  assert.match(source, /const SkillRequestField = SkillRequest\.default\(\{\}\)\.volatile\(\)/,
+    '缺少 SkillRequestField（Config 字段用的 volatile 包装）')
+  assert.match(source, /skillRequest: SkillRequestField,/,
+    'Config 的 skillRequest 应当引用 SkillRequestField')
 })
 
 test('SkillRequest：必须声明 path（read/预览靠它定位 SKILL.md）', () => {
@@ -68,7 +84,9 @@ test('约定：走设置队列的字段都声明了 .volatile()', () => {
    * **引用**共享定义的（`skillRequest: SkillRequest`）。引用形态下 `.volatile()` 在定义处，
    * 所以要顺着名字找到定义 —— 早先只截 `Config` 里的那一行，于是把引用误判成"没声明"。
    */
-  const names = ['servers', 'skills', 'rowOps', 'skillRequest', 'skillResult', 'profileServers', 'currentWorkspace']
+  // `skillRequest` 走引用形态（`SkillRequestField`），它的 `.volatile()` 在包装处 —— 由上面
+  // 那条断言单独钉住；这里列的是内联声明的字段。
+  const names = ['servers', 'skills', 'rowOps', 'skillResult', 'profileServers', 'currentWorkspace']
   for (const name of names) {
     const at = source.indexOf(`${name}: `)
     assert.ok(at >= 0, `Config 里找不到 ${name}`)

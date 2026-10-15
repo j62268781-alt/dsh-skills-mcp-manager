@@ -83,3 +83,50 @@ test('renderSkillMarkdown / stripFrontmatter：往返一致', async () => {
   assert.equal(stripFrontmatter(text).trim(), '正文')
   assert.equal(stripFrontmatter('没有 frontmatter').trim(), '没有 frontmatter')
 })
+
+/**
+ * 读回必须是写入的**逆运算**：不带改动的「编辑 → 保存」不能改变文件内容。
+ *
+ * 用户报告「编辑后正文多了一行，然后才到正文」。原因就在这对函数之间：
+ * `renderSkillMarkdown` 写成 `---<front>---\n\n<body>` 并把正文的前导换行剥掉，
+ * 而 `bodyOf` 只吃掉了 frontmatter 结尾的**一个**换行，把那个空行当成正文的一部分。
+ * 于是编辑框第一行是空的；保存又把它当真实内容写回去，文件每次往返都长一点。
+ *
+ * 这条测试钉住的是**不变量**（往返恒等），而不是某个具体正则 —— 只要两边再次漂移就会失败。
+ */
+test('bodyOf / renderSkillMarkdown：往返恒等，且不带改动的保存不改文件', async () => {
+  const { bodyOf } = await import('../src/skills/discover.js')
+  const { renderSkillMarkdown } = await import('../src/skills/write.js')
+
+  for (const body of [
+    'test',
+    'line1\nline2',
+    'line1\n\nline2',
+    'line1\n\n\nline3',
+    '# 标题\n\n正文',
+    // 缩进开头：写入侧**保留**缩进，所以读取侧不能把它当分隔符吃掉
+    '    indented code',
+    '  a\n  b',
+  ]) {
+    const file = renderSkillMarkdown({ name: 'demo', description: 'd', body })
+    assert.equal(bodyOf(file), body, `往返改变了正文：${JSON.stringify(body)}`)
+    // 再写一次必须逐字节相同 —— 这正是「每存一次多一行」的那条不变量
+    assert.equal(renderSkillMarkdown({ name: 'demo', description: 'd', body: bodyOf(file) }), file,
+      '不带改动的保存改变了文件内容')
+  }
+})
+
+test('bodyOf / stripFrontmatter：两份实现必须一致（它们漂移过一次）', async () => {
+  const { bodyOf } = await import('../src/skills/discover.js')
+  const { stripFrontmatter } = await import('../src/skills/write.js')
+  for (const markdown of [
+    '---\nname: a\ndescription: d\n---\n\ntext',
+    '---\nname: a\n---\n    indented',
+    '---\nname: a\n---\n',
+    'no frontmatter',
+    '',
+  ]) {
+    assert.equal(stripFrontmatter(markdown), bodyOf(markdown),
+      `两份 frontmatter 剥离实现结果不同：${JSON.stringify(markdown)}`)
+  }
+})

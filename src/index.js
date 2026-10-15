@@ -196,17 +196,27 @@ const SkillRequest = z.object({
   description: z.string().default(''),
   body: z.string().default(''),
   nonce: z.string().default(''),
-  /**
-   * `.volatile()` is **required** — this field travels through the settings document.
-   *
-   * The settings service only accepts writes to fields declared volatile
-   * (`isVolatilePath` in `@deepseek-ai/dsh-settings`), and every other queue-driven field here
-   * carries it. The inline schema this replaced had it on the whole object; extracting the
-   * definition without re-applying it made every queue write throw
-   * `Config field "skillRequest" is not volatile`. `op: 'read'` still travels the queue, so that
-   * is what the editor hit.
-   */
-}).default({}).volatile()
+})
+
+/**
+ * The `Config` field: the same shape, plus `.default({}).volatile()`.
+ *
+ * **These two roles must not share one schema**, and conflating them caused a real bug:
+ *
+ *   · as a **Config field** it needs `.volatile()` — the settings service only writes fields
+ *     declared volatile (`isVolatilePath` in `@deepseek-ai/dsh-settings`), and `op: 'read'`
+ *     still travels the settings queue;
+ *   · as a **validator** (the HTTP route calls `SkillRequest(payload)`) it must **not** be
+ *     volatile — calling a volatile schemastery schema returns `{}` rather than the validated
+ *     input. `SkillRequest(payload)` therefore produced `scope: undefined` / `id: undefined`,
+ *     `writableRoots` could not match a root, and every edit/delete answered
+ *     「未知的写入区域」.
+ *
+ * `RowOp` (the MCP route's validator) never had `.volatile()` for exactly this reason; the two
+ * halves are kept apart here too. The queue path does not call this schema at all — it reads the
+ * resolved config value — so wrapping it in `.default({}).volatile()` is safe for its own use.
+ */
+const SkillRequestField = SkillRequest.default({}).volatile()
 
 export const Config = z.object({
   servers: z.array(Server).default([]).volatile(),
@@ -235,7 +245,7 @@ export const Config = z.object({
   }).default({}).volatile(),
   /** The scan answer for the latest request. */
   /** Skill write request from the panel (create/update/rename/delete on disk). */
-  skillRequest: SkillRequest,
+  skillRequest: SkillRequestField,
   skillResult: z.object({
     ok: z.boolean().default(false),
     reason: z.string().default(''),

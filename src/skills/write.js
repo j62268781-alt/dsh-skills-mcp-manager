@@ -107,7 +107,14 @@ export async function deleteSkill({ dir, name }) {
   return { ok: true, name: checked.value, backup }
 }
 
-/** Everything after the frontmatter block. */
+/**
+ * Everything after the frontmatter block — with the separator newlines consumed.
+ *
+ * Kept identical to `bodyOf` in `discover.js` **on purpose**: two copies of this regex already
+ * drifted once, and the copy that kept the blank line made the editor open with an empty first
+ * line. Both now consume the `---`-to-text separator and nothing else, so indentation is
+ * preserved. (`discover.bodyOf` adds the 4 KB cap for the projection; this one does not.)
+ */
 export function stripFrontmatter(markdown) {
-  return String(markdown ?? '').replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '')
+  return String(markdown ?? '').replace(/^---\r?\n[\s\S]*?\r?\n---[ \t]*\r?\n(?:\r?\n)?/, '')
 }
