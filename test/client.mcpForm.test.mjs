@@ -12,7 +12,8 @@ import { bootPanel, emptyDoc, skipWithoutBundle, textOf } from '../scripts/lib/c
 const PROFILE_ROW = {
   entryId: 'include:mcp-existing', serverName: 'existing', transport: 'stdio',
   target: 'npx -y pkg', command: 'npx', args: '-y pkg', env: 'T=1',
-  failOnStartupError: true, reconnectInitialDelayMs: '1000', reconnectMaxDelayMs: '', reconnectMaxAttempts: '60',
+  failOnStartupError: true, reconnectInitialDelayMs: '1000', reconnectMaxDelayMs: '60000', reconnectMaxAttempts: '60',
+  toolCallTimeoutMs: '60000',
   enabled: true, phase: '',
 }
 
@@ -28,7 +29,21 @@ function openAddForm(panel) {
  * 不再按 placeholder 找：输入框现在**预填真实默认值**，placeholder 只是同一个数字，
  * 拿它当选择器会把"字段有值"和"字段是空的"混为一谈。
  */
-const reconnectInputs = (panel) => panel.findAll((node) => node.type === 'input' && node.props.type === 'number')
+/**
+ * The three **reconnect** number inputs, in render order.
+ *
+ * 按 label 而不是按位置取：表单里还有 `toolCallTimeoutMs` 这个同样是 number 的顶层字段，
+ * 而它排在 reconnection 三项**之前**（见 render 顺序）。按位置取会让每次新增字段都悄悄
+ * 错位一格 —— 之前就是用一个"取全部 number 输入"的助手，加字段后第一个断言就挂了。
+ */
+const reconnectInputs = (panel) => panel
+  .findAll((node) => node.type === 'input' && node.props.type === 'number')
+  .slice(-3)
+
+/** `toolCallTimeoutMs` 的输入框（number 字段里排在重连三项之前的那一个）。 */
+const timeoutInput = (panel) => panel
+  .findAll((node) => node.type === 'input' && node.props.type === 'number')
+  .slice(0, -3)[0]
 
 test('MCP 表单：连接与重连输入**预填真实默认值**，不是空框', { skip: skipWithoutBundle() }, async () => {
   /**
@@ -41,6 +56,7 @@ test('MCP 表单：连接与重连输入**预填真实默认值**，不是空框
     openAddForm(panel)
     const numbers = reconnectInputs(panel).map((node) => node.props.value)
     assert.deepEqual(numbers, ['500', '30000', '10'], `三个重连输入应预填默认值：${JSON.stringify(numbers)}`)
+    assert.equal(timeoutInput(panel).props.value, '60000', '工具调用超时应预填 60000（PR #1）')
 
     const checkbox = panel.find((node) => node.type === 'input' && node.props.type === 'checkbox')
     assert.ok(checkbox !== null, '缺少 failOnStartupError 勾选框')
@@ -140,9 +156,8 @@ test('MCP 表单：编辑配置行时回填连接参数，且 command 不被 tar
     assert.ok(byText('保存到配置行') !== null, '没有进入配置行的编辑态')
 
     // 回填：三个数字来自行配置；command 是原始可执行文件，不是拼好的 target
-    const inputs = panel.findAll((node) => node.type === 'input' && node.props.type === 'number')
-    const values = inputs.map((node) => node.props.value)
-    assert.deepEqual(values, ['1000', '', '60'], `回填的数字不对：${JSON.stringify(values)}`)
+    const values = reconnectInputs(panel).map((node) => node.props.value)
+    assert.deepEqual(values, ['1000', '60000', '60'], `回填的数字不对：${JSON.stringify(values)}`)
     const commandInput = find((node) => node.type === 'input' && node.props.value === 'npx')
     assert.ok(commandInput !== null, 'command 没有回填成原始命令（可能被 target 污染）')
 
@@ -160,7 +175,8 @@ test('MCP 表单：编辑配置行时回填连接参数，且 command 不被 tar
     assert.equal(op.failOnStartupError, true)
     assert.equal(op.reconnectInitialDelayMs, '1000')
     assert.equal(op.reconnectMaxAttempts, '60')
-    assert.equal(op.reconnectMaxDelayMs, '')
+    assert.equal(op.reconnectMaxDelayMs, '60000')
+    assert.equal(op.toolCallTimeoutMs, '60000', '顶层超时字段也要随命令带过去（PR #1）')
 
     // 真改了其中一个数字 → 标记成改动，Host 才会写。
     doc.rowCommands = []
@@ -194,7 +210,7 @@ test('项目级编辑：回填连接字段，并作为**行操作**写入（不�
     entryId, scope: '/p/tcl', serverName, transport: 'streamable-http',
     target: `http://x/mcp/${serverName}`, command: '', args: '', env: '', headersText: '',
     failOnStartupError: false, reconnectInitialDelayMs: '', reconnectMaxDelayMs: '',
-    reconnectMaxAttempts: '', enabled: true, phase: 'active', ...over,
+    reconnectMaxAttempts: '', toolCallTimeoutMs: '', enabled: true, phase: 'active', ...over,
   })
   const gitnexus = projectRow('mcp-gitnexus', 'gitnexus', {
     failOnStartupError: true, reconnectInitialDelayMs: '1000', reconnectMaxDelayMs: '60000', reconnectMaxAttempts: '60',
@@ -212,7 +228,9 @@ test('项目级编辑：回填连接字段，并作为**行操作**写入（不�
     panel.click(byText('编辑'))
 
     // 回填：必须显示已配置的 1000 / 60000 / 60，而不是空（空会显示成 placeholder 500）
-    const numbers = findAll((node) => node.type === 'input' && node.props.type === 'number').map((n) => n.props.value)
+    // number 输入有 4 个（含顶层的 toolCallTimeoutMs），这里只关心重连三项
+    const numbers = findAll((node) => node.type === 'input' && node.props.type === 'number')
+      .slice(-3).map((n) => n.props.value)
     assert.deepEqual(numbers, ['1000', '60000', '60'], `连接字段没回填：${JSON.stringify(numbers)}`)
 
     change(reconnectInputs(panel)[0], '2000')

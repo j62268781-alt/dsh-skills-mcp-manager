@@ -40,6 +40,7 @@ export const CONNECTION_DRAFT_DEFAULTS = Object.freeze({
   reconnectInitialDelayMs: String(CONNECTION_DEFAULTS.initialDelayMs),
   reconnectMaxDelayMs: String(CONNECTION_DEFAULTS.maxDelayMs),
   reconnectMaxAttempts: String(CONNECTION_DEFAULTS.maxAttempts),
+  toolCallTimeoutMs: String(CONNECTION_DEFAULTS.toolCallTimeoutMs),
 })
 
 /**

@@ -12,7 +12,8 @@ test('connectionFields：没填的 reconnect 写**显式默认值**，不再省�
    * 而那个值住在别人的包里 —— 用户要读 `dsh-mcp-client` 的源码才知道这一行到底怎么重连。
    * 现在两端都把它写出来：这是同一件事（500/30000/10），只是不再隐式。
    */
-  const defaults = { reconnect: { initialDelayMs: 500, maxDelayMs: 30000, maxAttempts: 10 } }
+  // toolCallTimeoutMs 是**顶层**键（不在 reconnect 块里），同样写显式默认值
+  const defaults = { reconnect: { initialDelayMs: 500, maxDelayMs: 30000, maxAttempts: 10 }, toolCallTimeoutMs: 60000 }
   assert.deepEqual(connectionFields({}), defaults)
   assert.deepEqual(connectionFields(undefined), defaults)
   assert.deepEqual(connectionFields({
@@ -26,18 +27,19 @@ test('connectionFields：没填的 reconnect 写**显式默认值**，不再省�
 test('connectionFields：填了的键覆盖默认值，未填的仍是默认', () => {
   assert.deepEqual(
     connectionFields({ reconnectMaxAttempts: '60' }),
-    { reconnect: { initialDelayMs: 500, maxDelayMs: 30000, maxAttempts: 60 } },
+    { reconnect: { initialDelayMs: 500, maxDelayMs: 30000, maxAttempts: 60 }, toolCallTimeoutMs: 60000 },
   )
   assert.deepEqual(
     connectionFields({ reconnectInitialDelayMs: '1000', reconnectMaxDelayMs: '60000' }),
-    { reconnect: { initialDelayMs: 1000, maxDelayMs: 60000, maxAttempts: 10 } },
+    { reconnect: { initialDelayMs: 1000, maxDelayMs: 60000, maxAttempts: 10 }, toolCallTimeoutMs: 60000 },
   )
 })
 
 test('connectionFields：failOnStartupError 只在 true 时写入', () => {
   // 与 reconnect 不同：false 是客户端的默认值，「键不存在」与「false」完全等价，
   // 所以写它只是给每一行加噪音。
-  const defaults = { reconnect: { initialDelayMs: 500, maxDelayMs: 30000, maxAttempts: 10 } }
+  // toolCallTimeoutMs 是**顶层**键（不在 reconnect 块里），同样写显式默认值
+  const defaults = { reconnect: { initialDelayMs: 500, maxDelayMs: 30000, maxAttempts: 10 }, toolCallTimeoutMs: 60000 }
   assert.deepEqual(connectionFields({ failOnStartupError: true }), { failOnStartupError: true, ...defaults })
   assert.deepEqual(connectionFields({ failOnStartupError: false }), defaults)
 })
@@ -50,6 +52,7 @@ test('connectionFields：非整数与越界都拒绝（写进去会让整行加�
   assert.throws(() => connectionFields({ reconnectMaxDelayMs: '2147483648' }), /必须在 1–/)
   assert.deepEqual(connectionFields({ reconnectMaxDelayMs: '2147483647' }), {
     reconnect: { initialDelayMs: 500, maxDelayMs: 2147483647, maxAttempts: 10 },
+    toolCallTimeoutMs: 60000,
   })
 })
 
@@ -65,6 +68,8 @@ test('connectionDraftOf：回填表单草稿，行里没写的用客户端默认
       reconnectInitialDelayMs: '1000',
       reconnectMaxDelayMs: '30000',
       reconnectMaxAttempts: '60',
+      // 行里没写 → 回填客户端默认值，而不是空串（空串会显示成"未设置"）
+      toolCallTimeoutMs: '60000',
     },
   )
   assert.deepEqual(connectionDraftOf(undefined), {
@@ -72,6 +77,7 @@ test('connectionDraftOf：回填表单草稿，行里没写的用客户端默认
     reconnectInitialDelayMs: '500',
     reconnectMaxDelayMs: '30000',
     reconnectMaxAttempts: '10',
+    toolCallTimeoutMs: '60000',
   })
 })
 
@@ -80,6 +86,7 @@ test('表单默认值与写入默认值同源（避免两处各写一遍然后�
     reconnectInitialDelayMs: String(CONNECTION_DEFAULTS.initialDelayMs),
     reconnectMaxDelayMs: String(CONNECTION_DEFAULTS.maxDelayMs),
     reconnectMaxAttempts: String(CONNECTION_DEFAULTS.maxAttempts),
+    toolCallTimeoutMs: String(CONNECTION_DEFAULTS.toolCallTimeoutMs),
   })
 })
 
@@ -89,5 +96,31 @@ test('默认值与客户端文档一致（表单占位用的就是这些）', ()
     initialDelayMs: 500,
     maxDelayMs: 30000,
     maxAttempts: 10,
+    toolCallTimeoutMs: 60000,
   })
+})
+
+/**
+ * `toolCallTimeoutMs`（PR #1）—— 顶层键，不是 `reconnect` 的成员。
+ *
+ * 它必须与表单预填同源：`connectionDraftOf` 回填 60000、`connectionFields` 写出 60000，
+ * 否则用户会看到输入框显示一个数、而文件里存的是另一个。
+ */
+test('toolCallTimeoutMs：顶层键的读写与显式默认值', () => {
+  // 没填 → 写客户端默认值（与 reconnect 同一规则）
+  assert.equal(connectionFields({}).toolCallTimeoutMs, 60000)
+  // 填了 → 以填的为准，且不进 reconnect 块
+  const tuned = connectionFields({ toolCallTimeoutMs: '600000' })
+  assert.equal(tuned.toolCallTimeoutMs, 600000)
+  assert.equal('toolCallTimeoutMs' in tuned.reconnect, false, '它不该被塞进 reconnect 块')
+
+  // 回读：有值用值，没值补默认（不是空串）
+  assert.equal(connectionDraftOf({ toolCallTimeoutMs: 600000 }).toolCallTimeoutMs, '600000')
+  assert.equal(connectionDraftOf({}).toolCallTimeoutMs, '60000')
+
+  // 边界与非法值：写进去会让整行加载失败，所以在这里就要拒
+  assert.throws(() => connectionFields({ toolCallTimeoutMs: 'abc' }), /必须是整数/)
+  assert.throws(() => connectionFields({ toolCallTimeoutMs: '0' }), /必须在 1–/)
+  assert.throws(() => connectionFields({ toolCallTimeoutMs: '2147483648' }), /必须在 1–/)
+  assert.equal(connectionFields({ toolCallTimeoutMs: '2147483647' }).toolCallTimeoutMs, 2147483647)
 })
