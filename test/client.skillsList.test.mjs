@@ -293,3 +293,52 @@ test('Skills：原地编辑不会把已停用的技能悄悄改回启用', { ski
     panel.restore()
   }
 })
+
+/**
+ * 弹窗的 pending 状态不能跨对话框泄漏。
+ *
+ * 用户报告：打开「添加技能」，弹窗一出现就显示「正在与磁盘同步…」+「保存中…」，保存按钮点不动。
+ *
+ * 根因：`pending = skillNonce !== '' || editBodyPending`，而这两个标记都**只由匹配的回执清除**。
+ * 一次「编辑 → 正文回执到达前取消」就会把 `editBodyPending` 永久留在 true —— 而编辑路径的
+ * 三个入口（添加 / 编辑 / 取消）没有一个重置它。
+ *
+ * 夹具放 `discoveredSkills`（磁盘发现）而不是 `config.skills[]`：受管条目走的是**卡片内联表单**，
+ * 只有磁盘发现的条目才走对话框，而只有对话框会设置 `editBodyPending`。
+ */
+test('Skills：编辑后取消，再打开「添加技能」不应卡在保存中', { skip: skipWithoutBundle() }, async () => {
+  const panel = await bootPanel(emptyDoc({
+    discoveredSkills: [{ name: 'demo', description: 'x', path: '/h/.agents/skills/demo/SKILL.md', source: 'user-agents', scope: 'global' }],
+    workspaces: [{ path: '/p/tcl', title: 'TCL' }], currentWorkspace: '/p/tcl',
+    skillDirs: { userDsh: '/h/skills', userAgents: '/h/.agents/skills' },
+    rowOpsReady: true, reconnectReady: true,
+  }))
+  const { runtime } = panel
+  const dialogButtons = () => panel.findAll((node) => node.type === 'button')
+    .map((node) => textOf(node)).filter((text) => text.includes('创建') || text.includes('保存') || text.includes('保存中'))
+  try {
+    const tab = panel.find((node) => String(node.props?.className ?? '').includes('smp-tab') && textOf(node).startsWith('Skills'))
+    panel.click(tab)
+    runtime.render()
+
+    // 编辑 → 正文读请求发出（editBodyPending = true），但**不让回执到达**
+    panel.openMenu(0)
+    runtime.render()
+    panel.click(panel.byText('编辑'))
+    runtime.render()
+    await panel.settle()
+    assert.deepEqual(dialogButtons(), ['保存中…'], '编辑态应当先处于读取正文的 pending')
+
+    // 取消，然后重新打开添加对话框
+    panel.click(panel.findAll((node) => node.type === 'button' && textOf(node).trim() === '取消')[0])
+    runtime.render()
+    panel.click(panel.byText('添加技能'))
+    runtime.render()
+    await panel.settle()
+
+    assert.equal(panel.byText('正在与磁盘同步…'), null, '新弹窗不该显示「正在与磁盘同步…」')
+    assert.deepEqual(dialogButtons(), ['创建'], '新弹窗的按钮应当是「创建」，而不是「保存中…」')
+  } finally {
+    panel.restore()
+  }
+})
