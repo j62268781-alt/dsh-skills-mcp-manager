@@ -57,7 +57,9 @@
 .smp-cardDetails .smp-details{margin:0}
 .smp-details{grid-template-columns:76px minmax(0,1fr);gap:6px 10px;margin:8px 0 0;display:grid;font-size:12px;line-height:18px}
 .smp-detailsKey{color:var(--dsw-alias-label-tertiary)}
-.smp-detailsValue{color:var(--dsw-alias-label-secondary);word-break:break-all}
+/* 值是**数据**，键才是说明。两者都用灰时整块读起来是一片低对比文字，
+   分不清哪个是标签、哪个是内容 —— 值用主色（正文黑），键保留三级灰。 */
+.smp-detailsValue{color:var(--dsw-alias-label-primary);word-break:break-all;font-weight:400}
 .smp-tag{display:inline-flex;align-items:center;border-radius:999px;padding:1px 8px;font-size:11px;line-height:17px;font-weight:500;white-space:nowrap}
 .smp-tag[data-tone=neutral]{background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary)}
 /* 连接状态标签的三档语气。
@@ -297,8 +299,11 @@ div[role='dialog']:has(.smp-skillDialogBody),
    the switch's own height so the first line and the thumb share a baseline. */
 .smp-switchRow {
   display: flex;
-  align-items: flex-start;
-  gap: 10px;
+  /* 文字在左、开关固定贴右：整张表单的布尔设置都读成「这一项叫什么 → 它是哪一档」，
+     开关位置不再随文字长度左右浮动。 */
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   padding: 2px 0;
   color: var(--dsw-alias-label-primary);
 }
@@ -313,9 +318,9 @@ div[role='dialog']:has(.smp-skillDialogBody),
   flex: none;
   display: flex;
   align-items: center;
-  /* Match the text's first line box so the pill sits on that line even when the text wraps.
-     `min-height` rather than `height`: a Host that ships a taller switch must not be clipped. */
-  min-height: 20px;
+  /* `min-content` keeps the pill from being squeezed when the text column grows; the row's
+     `space-between` then does the positioning, so no magic left/right value is needed. */
+  min-width: min-content;
 }
 
 /* Wrapping text column. `min-width: 0` is what actually allows it to wrap inside a flex row —

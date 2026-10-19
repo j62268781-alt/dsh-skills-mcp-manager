@@ -34,10 +34,15 @@ test('开关行不能有固定高度', () => {
   assert.equal(/[^-]height\s*:/.test(body), false, `.smp-switchRow 不该有固定 height（换行会被裁掉）：${body}`)
 })
 
-test('开关行按首行对齐，且文字列可以收缩换行', () => {
+test('开关行：文字在左、开关贴右、两者上下居中', () => {
+  /**
+   * 布局契约来自用户的读法：整张表单的布尔设置都应读成「这一项叫什么 → 它是哪一档」，
+   * 所以开关位置必须固定在右边，不能随文字长短左右浮动；竖直方向则与左侧标题+说明
+   * 这一整块居中。
+   */
   const body = ruleBody('.smp-switchRow')
-  // `flex-start`：两行文字时开关应对齐第**一**行，而不是浮在两行中间。
-  assert.match(body, /align-items\s*:\s*flex-start/, '开关行必须 align-items:flex-start')
+  assert.match(body, /align-items\s*:\s*center/, '开关与左侧文字必须上下居中')
+  assert.match(body, /justify-content\s*:\s*space-between/, '开关必须贴右：文字与开关之间用 space-between 推开')
   // 文字列缺 `min-width: 0` 会取 max-content 宽度，在 flex 行里直接溢出对话框。
   const textBody = ruleBody('.smp-switchRowText')
   assert.ok(textBody !== null, '找不到 .smp-switchRowText 规则')
@@ -60,4 +65,18 @@ test('字段标签与控件之间的间距不小于 6px', () => {
   const gap = body.match(/gap\s*:\s*(\d+)px/)
   assert.ok(gap !== null, '.smp-field 应显式声明 gap')
   assert.ok(Number(gap[1]) >= 6, `字段内间距至少 6px，实际 ${gap[1]}px`)
+})
+
+test('展开详情：键用灰、值用主色（数据要能一眼读出）', () => {
+  /**
+   * 之前键（`行 id`）和值（那串 id 本身）都是灰的，整块读起来是一片低对比文字 ——
+   * 分不清哪个是标签、哪个是内容。值是**数据**，键只是说明，所以值必须是正文色。
+   * 反过来（值比键还淡）会让用户以为那串 id 是次要信息。
+   */
+  const key = ruleBody('.smp-detailsKey')
+  const value = ruleBody('.smp-detailsValue')
+  assert.ok(key !== null && value !== null, '找不到 .smp-detailsKey / .smp-detailsValue')
+  assert.match(key, /label-tertiary/, '键应保持三级灰')
+  assert.match(value, /label-primary/, '值必须用主色（正文黑），否则和键糊成一片')
+  assert.equal(/label-tertiary|label-secondary/.test(value), false, '值不能再用灰阶')
 })

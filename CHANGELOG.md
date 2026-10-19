@@ -163,9 +163,15 @@ SDK 的 `assertSecureTokenEndpoint` 无条件拒绝向非 https 的 token 端点
   于是第二行被压在第一行上、看起来像被裁掉。单行文案下完全正常，所以它一直没被发现 ——
   换行是常态，不是例外。
 
-现在两条都渲染成 `smp-switchRow`：开关槽位 + 可换行的文字列，标题与后果说明分成两行，
-`align-items: flex-start` 让开关对齐**第一行**而不是浮在两行中间。删掉了固定高度
+现在两条都渲染成 `smp-switchRow`：**文字在左、开关固定贴右、两者上下居中**，
+标题与后果说明分成上下两行。开关贴右是刻意的 —— 整张表单的布尔设置都应该读成
+「这一项叫什么 → 它是哪一档」，位置不再随文字长短左右浮动。删掉了固定高度
 （`min-height` 代替），字段内间距 4px → 6px，标签行高 18px → 19px。
+
+同一个问题还暴露出**展开详情**的对比度问题：`.smp-detailsKey` 和 `.smp-detailsValue`
+两级灰（tertiary / secondary），于是「行 id」和它右边那串 id 糊成一片低对比文字，
+分不清哪个是标签、哪个是内容。值是**数据**，键只是说明 —— 值改成主色（正文黑），
+键保留三级灰。
 
 顺手把开关的渲染收编成一处 `switchControl`：它原本在三个地方各写了一遍（MCP 卡片、
 技能卡片、表单），只是标签和回调略有不同。第十三处副本出现时「这是哪个开关」就会变成
@@ -192,7 +198,7 @@ SDK 的 `assertSecureTokenEndpoint` 无条件拒绝向非 https 的 token 端点
 | `test/mcp.oauthPatch.test.mjs` | 注入生效、lookup 抛错不影响连接、HMR 不叠 wrapper、冻结原型如实失败、`verify()` 能验出「注入了却没进请求头」 |
 | `test/mcp.oauthFlow.test.mjs` | 两段式跑通、伪造 state 拒绝、超时、PKCE 跨段存活、**provider 必须单实例共享**、明文端点拒绝/放行两条分支、回调路由只接受 GET、响应体不含令牌 |
 | `test/mcp.oauthInsecure.test.mjs` | 明文判定与 SDK 的 `isLoopbackHost` 逐字一致、https/回环不误判、每次明文请求必须留 warning、令牌响应收敛（丢掉未知字段）、非 JSON 不谎报成功 |
-| `test/styles.panel.test.mjs` | 布局契约：开关行不能有固定高度、文字列 `min-width:0`、旧勾选框样式已删、字段间距 ≥6px |
+| `test/styles.panel.test.mjs` | 布局契约：开关行不能有固定高度、文字左/开关贴右/上下居中、文字列 `min-width:0`、旧勾选框样式已删、字段间距 ≥6px、详情值必须用主色 |
 
 每条关键断言都验证过**在修复前会失败**（例如把 `isValidServerName` 的 `.`/`..` 判断去掉、
 把补丁的注入点短路掉），而不是只在绿的时候跑过一遍。
