@@ -248,6 +248,10 @@ export async function applyRowOp(ctx, op) {
         changed = setRowConfigField(document, op.entryId, 'reconnect', connection.reconnect ?? null) || changed
         // 顶层键，和上面两个一样只在「用户确实改过」时写；空值=清键回客户端默认。
         changed = setRowConfigField(document, op.entryId, 'toolCallTimeoutMs', connection.toolCallTimeoutMs ?? null) || changed
+        // 明文 token 端点例外：只在 true 时写键，关掉即删键（null）。删键而不是写 false，
+        // 是为了让「关掉它」等于「回到出厂状态」——一份配置里不该留下一个 `: false` 让人
+        // 以为曾经开过。
+        changed = setRowConfigField(document, op.entryId, 'allowInsecureTokenEndpoint', op.allowInsecureTokenEndpoint === true ? true : null) || changed
       }
     }
     if (!changed) throw new Error(`row "${op.entryId}" not found in the profile patch`)

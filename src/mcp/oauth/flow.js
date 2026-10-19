@@ -26,6 +26,7 @@
  */
 import { tokenStatus, pendingIsFresh } from './provider.js'
 import { stateMatches } from './state.js'
+import { exchangeInsecureToken, insecureTokenEndpoint, tokenExchangeErrorText } from './insecure.js'
 
 /** 发起授权的失败原因。 */
 export const FLOW_ERRORS = Object.freeze({
@@ -37,6 +38,8 @@ export const FLOW_ERRORS = Object.freeze({
   noPending: 'no-authorization-in-progress',
   expired: 'authorization-expired',
   completeFailed: 'authorization-could-not-complete',
+  /** 非 https 且非回环的 token 端点，且这台服务器没有勾选明文例外。 */
+  insecureNotAllowed: 'insecure-token-endpoint-not-allowed',
 })
 
 /** 失败原因的中文说明。面板直接展示，所以要说「下一步做什么」。 */
@@ -58,9 +61,78 @@ export function flowReasonText(reason) {
       return '这次授权已经超时（超过 10 分钟），请重新点「授权」'
     case FLOW_ERRORS.completeFailed:
       return '完成授权失败'
+    case FLOW_ERRORS.insecureNotAllowed:
+      return 'token 端点不是 https，而「允许明文 token 端点」没有为这台服务器打开。明文传输令牌会把凭据暴露给同网段，因此默认拒绝'
     default:
       return '授权失败'
   }
+}
+
+/**
+ * 用回调拿到的 `code`，在**明文** token 端点上完成交换。
+ *
+ * 与 SDK 那条路径的区别只有「谁发这个 POST」。其余状态（PKCE verifier、client_id、
+ * discoveryState、落盘、清理 pending）都来自同一个 provider 记录，所以两条路径不会分叉出
+ * 两套凭据语义 —— 那是本仓库已经踩过一次的坑（两处实现必然漂移）。
+ *
+ * @param options.serverName - 服务器名（日志与错误文案用）。
+ * @param options.record - 当前凭据记录（含 `clientInformation` / `discoveryState` / `codeVerifier`）。
+ * @param options.tokenEndpoint - 授权服务器元数据里的 `token_endpoint`。
+ * @param options.code - 回调带来的授权码。
+ */
+async function completeInsecure({ serverName, provider, record, tokenEndpoint, code, forget, snapshot, log }) {
+  const clientId = String(record?.clientInformation?.client_id ?? '')
+  if (clientId === '') {
+    return {
+      ok: false,
+      reason: FLOW_ERRORS.completeFailed,
+      detail: '缺少 client_id：明文例外要求先用动态注册（或手填）拿到客户端信息',
+      text: flowReasonText(FLOW_ERRORS.completeFailed),
+    }
+  }
+  const verifier = String(record?.codeVerifier ?? '')
+  if (verifier === '') {
+    return {
+      ok: false,
+      reason: FLOW_ERRORS.completeFailed,
+      detail: '缺少 PKCE code_verifier：授权流程可能已过期，请重新点一次「授权」',
+      text: flowReasonText(FLOW_ERRORS.completeFailed),
+    }
+  }
+  const redirectUri = String(record?.clientInformation?.redirect_uris?.[0] ?? '')
+  const resource = String(record?.resourceUrl ?? '')
+  const exchanged = await exchangeInsecureToken({
+    tokenEndpoint,
+    clientId,
+    log,
+    params: {
+      grant_type: 'authorization_code',
+      code,
+      code_verifier: verifier,
+      // RFC 6749 §4.1.3: `redirect_uri` must be repeated when it was in the authorization
+      // request. Some servers ignore it; omitting it when required fails with invalid_grant.
+      redirect_uri: redirectUri,
+      resource,
+    },
+  })
+  if (exchanged.ok !== true) {
+    return { ok: false, reason: exchanged.reason, detail: exchanged.detail, text: exchanged.text ?? tokenExchangeErrorText(exchanged.reason) }
+  }
+  // 落盘走 provider 的 saveTokens：它同时记下 tokensSavedAt 并清掉 pending / codeVerifier，
+  // 与 SDK 路径完全一致 —— 两条路径共用同一个写入点，才不会分叉出两套凭据语义。
+  try {
+    await provider.saveTokens({ ...exchanged.tokens, issuer: String(record?.discoveryState?.authorizationServerUrl ?? '') })
+  } catch (error) {
+    return {
+      ok: false,
+      reason: FLOW_ERRORS.completeFailed,
+      detail: String(error?.message ?? error),
+      text: flowReasonText(FLOW_ERRORS.completeFailed),
+    }
+  }
+  const saved = await snapshot()
+  forget(serverName)
+  return { ok: true, reason: '', detail: '', text: '授权完成（明文 token 端点）', ...tokenStatus(saved) }
 }
 
 /** 从 SDK 抛出的错误里取一段**能贴到面板上**的文字。 */
@@ -84,7 +156,7 @@ export function describeFlowError(error) {
  *   注入以便测试替换。
  * @param options.log - `{ warn, info }`。
  */
-export function createOAuthFlow({ store, getSdk, makeProvider, log } = {}) {
+export function createOAuthFlow({ store, getSdk, makeProvider, allowInsecure, log } = {}) {
   /** 每个服务器一个 provider 实例：内存缓存要在多次请求之间保持，否则每请求都读盘。 */
   const providers = new Map()
 
@@ -249,6 +321,36 @@ export function createOAuthFlow({ store, getSdk, makeProvider, log } = {}) {
       // 完成时**必须**用同一个 provider 实例：PKCE code_verifier 与 discoveryState 都在
       // 它的缓存里，新建一个就读不到，SDK 会报「没有保存 code_verifier」。
       const { provider, snapshot } = providerFor(serverName, url)
+
+      /*
+       * Plaintext token endpoint, explicitly allowed for this server.
+       *
+       * The SDK refuses this unconditionally (`assertSecureTokenEndpoint`), which is correct
+       * policy — but an intranet MCPHub deployed without TLS cannot satisfy it. Rather than
+       * patching the SDK, this path does the final exchange itself (one RFC 6749 §4.1.3 form
+       * POST) so the SDK's code stays untouched for every HTTPS server. See `insecure.js`.
+       *
+       * The refusal case is checked FIRST: if the server has an insecure endpoint and the
+       * exception is off, the user must get the explicit "not allowed" reason rather than the
+       * SDK's opaque `InsecureTokenEndpointError` — the former tells them which checkbox to
+       * look at.
+       */
+      const record = await snapshot()
+      const tokenEndpoint = String(record?.discoveryState?.authorizationServerMetadata?.token_endpoint ?? '')
+      const gate = tokenEndpoint === '' ? { insecure: false } : insecureTokenEndpoint(tokenEndpoint)
+      if (gate.insecure === true) {
+        const allowed = allowInsecure?.(serverName) === true
+        if (!allowed) {
+          return {
+            ok: false,
+            reason: FLOW_ERRORS.insecureNotAllowed,
+            detail: `${tokenEndpoint}（${gate.protocol}//${gate.host}）`,
+            text: flowReasonText(FLOW_ERRORS.insecureNotAllowed),
+          }
+        }
+        return completeInsecure({ serverName, provider, record, tokenEndpoint, code, forget, snapshot, log })
+      }
+
       try {
         const result = await sdk.auth(provider, { serverUrl: target.url, authorizationCode: code })
         if (result !== 'AUTHORIZED') {

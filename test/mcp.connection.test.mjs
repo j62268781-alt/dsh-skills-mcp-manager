@@ -54,6 +54,11 @@ test('connectionFields：非整数与越界都拒绝（写进去会让整行加�
     reconnect: { initialDelayMs: 500, maxDelayMs: 2147483647, maxAttempts: 10 },
     toolCallTimeoutMs: 60000,
   })
+  // 明文 token 端点例外：**只在 true 时写键**。省略而不是写 `false`，是因为「不写」
+  // 就是出厂状态 —— 一份配置里不该留下 `: false` 让人以为曾经开过。
+  assert.equal('allowInsecureTokenEndpoint' in connectionFields({}), false)
+  assert.equal(connectionFields({ allowInsecureTokenEndpoint: true }).allowInsecureTokenEndpoint, true)
+  assert.equal(connectionFields({ allowInsecureTokenEndpoint: 'true' }).allowInsecureTokenEndpoint, undefined, '只认真正的 true，字符串不算')
 })
 
 test('connectionDraftOf：回填表单草稿，行里没写的用客户端默认值（不是空串）', () => {
@@ -70,6 +75,8 @@ test('connectionDraftOf：回填表单草稿，行里没写的用客户端默认
       reconnectMaxAttempts: '60',
       // 行里没写 → 回填客户端默认值，而不是空串（空串会显示成"未设置"）
       toolCallTimeoutMs: '60000',
+      // 布尔开关：缺失即 false（默认不放宽安全）
+      allowInsecureTokenEndpoint: false,
     },
   )
   assert.deepEqual(connectionDraftOf(undefined), {
@@ -78,7 +85,11 @@ test('connectionDraftOf：回填表单草稿，行里没写的用客户端默认
     reconnectMaxDelayMs: '30000',
     reconnectMaxAttempts: '10',
     toolCallTimeoutMs: '60000',
+    allowInsecureTokenEndpoint: false,
   })
+  // 行里明确写了 true 才回填 true：这是安全开关，读错方向会打开一个本不该开的例外。
+  assert.equal(connectionDraftOf({ allowInsecureTokenEndpoint: true }).allowInsecureTokenEndpoint, true)
+  assert.equal(connectionDraftOf({ allowInsecureTokenEndpoint: 'true' }).allowInsecureTokenEndpoint, false, '字符串不算 true')
 })
 
 test('表单默认值与写入默认值同源（避免两处各写一遍然后漂移）', () => {
@@ -87,6 +98,8 @@ test('表单默认值与写入默认值同源（避免两处各写一遍然后�
     reconnectMaxDelayMs: String(CONNECTION_DEFAULTS.maxDelayMs),
     reconnectMaxAttempts: String(CONNECTION_DEFAULTS.maxAttempts),
     toolCallTimeoutMs: String(CONNECTION_DEFAULTS.toolCallTimeoutMs),
+    // 布尔开关的默认是 false —— 表单打开时它必须是未勾选的。
+    allowInsecureTokenEndpoint: false,
   })
 })
 

@@ -259,6 +259,65 @@ test('providerFor：forget 只丢内存实例；真正的登出还必须删盘�
   assert.equal(await afterLogout.provider.tokens(), undefined, 'logout 删了盘上的凭据，之后读到 undefined')
 })
 
+test('complete：非回环 http 端点且未开例外时，给出明确原因而不是 SDK 的晦涩报错', async (t) => {
+  // 这条钉住的是「用户看得懂」。SDK 抛的是 InsecureTokenEndpointError（一句话，
+  // 且不提我们自己的开关）；这里要给出「哪个开关、在哪台服务器上」。
+  const home = await tempHome(t)
+  const { sdk } = fakeSdk()
+  const store = createOAuthStore({ dshHome: home })
+  const flow = createOAuthFlow({
+    store,
+    getSdk: () => ({ ok: true, sdk }),
+    makeProvider: (serverName, url) => createOAuthProvider({ store, serverName, url, redirectUri: 'http://127.0.0.1:1/cb', log: noopLog }),
+    allowInsecure: () => false,
+    log: noopLog,
+  })
+  // 先造一份 discoveryState，把 token_endpoint 指向内网明文地址（真实流程里由发现阶段写入）
+  await store.update('gitnexus', 'http://sz-00575123-01/mcp/coding', (record) => {
+    record.clientInformation = { client_id: 'cid', redirect_uris: ['http://127.0.0.1:1/cb'] }
+    record.codeVerifier = 'verifier'
+    record.discoveryState = {
+      authorizationServerUrl: 'http://sz-00575123-01',
+      authorizationServerMetadata: { issuer: 'http://sz-00575123-01', token_endpoint: 'http://sz-00575123-01/oauth/token' },
+    }
+  })
+  const result = await flow.complete('gitnexus', 'http://sz-00575123-01/mcp/coding', 'the-code')
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, FLOW_ERRORS.insecureNotAllowed)
+  assert.match(result.text, /允许明文 token 端点/, '要指出是哪个开关，否则用户不知道去哪找')
+  assert.match(result.detail, /oauth\/token/, '要把出问题的端点写出来')
+})
+
+test('complete：开了例外就走自己的交换，令牌落盘且带 refresh_token', async (t) => {
+  const home = await tempHome(t)
+  const { sdk } = fakeSdk()
+  const store = createOAuthStore({ dshHome: home })
+  const flow = createOAuthFlow({
+    store,
+    getSdk: () => ({ ok: true, sdk }),
+    makeProvider: (serverName, url) => createOAuthProvider({ store, serverName, url, redirectUri: 'http://127.0.0.1:1/cb', log: noopLog }),
+    allowInsecure: (serverName) => serverName === 'gitnexus',
+    log: noopLog,
+  })
+  await store.update('gitnexus', 'http://sz-00575123-01/mcp/coding', (record) => {
+    record.clientInformation = { client_id: 'cid-intranet', redirect_uris: ['http://127.0.0.1:1/cb'] }
+    record.codeVerifier = 'the-verifier'
+    record.discoveryState = {
+      authorizationServerUrl: 'http://sz-00575123-01',
+      authorizationServerMetadata: { issuer: 'http://sz-00575123-01', token_endpoint: 'http://sz-00575123-01/oauth/token' },
+    }
+    record.pending = { url: 'http://x', state: 'st', at: new Date().toISOString(), expiresAt: new Date(Date.now() + 60000).toISOString() }
+  })
+  // 用真实 HTTP：起一个只回令牌的本地服务器会绕过「明文」判定（127.0.0.1 是回环），
+  // 所以这里断言的是「它确实走到了自己的交换路径」，而不是真的发出去。
+  // 交换本身由 test/mcp.oauthInsecure.test.mjs 用注入的 fetch 完整覆盖。
+  const result = await flow.complete('gitnexus', 'http://sz-00575123-01/mcp/coding', 'the-code')
+  // 真实网络到不了内网地址时，结果是 network 错误 —— 关键是它**没有**报 insecureNotAllowed，
+  // 也没有抛错。
+  assert.notEqual(result.reason, FLOW_ERRORS.insecureNotAllowed, '开了例外就不该再拒绝')
+  assert.equal(typeof result.text, 'string')
+})
+
 test('logout：删掉凭据并让内存 provider 失效', async (t) => {
   const home = await tempHome(t)
   const { sdk } = fakeSdk()

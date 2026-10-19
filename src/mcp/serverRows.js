@@ -95,7 +95,12 @@ export function serverFromRow(entry) {
     failOnStartupError: row.failOnStartupError === true,
     reconnect: row.reconnect ?? null,
     // 顶层键：与其它连接字段一样从行里带出来。少了它，读回与挂载两条路径都拿不到这个值。
+    // 这个仓库已经因为「字段清单漏带一项」出过两次问题（toolCallTimeoutMs 就是其中之一），
+    // 所以新增连接相关字段时，这两处（这里与 serverSetKey）必须一起改。
     toolCallTimeoutMs: row.toolCallTimeoutMs ?? null,
+    // 明文 token 端点的例外。**只从行里读**，默认 false —— 一份没有这个键的旧配置
+    // 绝对不能意外地打开它。
+    allowInsecureTokenEndpoint: row.allowInsecureTokenEndpoint === true,
     enabled: userEnabled(row, entry, scope),
     phase: phaseOf(entry),
     /** True for rows the Loader connects itself (global scope). */
@@ -201,6 +206,7 @@ export function serverSetKey(servers) {
     failOnStartupError: server.failOnStartupError,
     reconnect: server.reconnect,
     toolCallTimeoutMs: server.toolCallTimeoutMs,
+    allowInsecureTokenEndpoint: server.allowInsecureTokenEndpoint === true,
     enabled: server.enabled,
   })))
 }

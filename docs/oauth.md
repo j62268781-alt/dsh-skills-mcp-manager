@@ -168,7 +168,48 @@ transport 自动带上 Bearer → 真的连上 → 真的调用一个工具。
 服务器（名字随意，例如 `oauth-mock`）。卡片应显示「需要授权」→ 点「授权」→ 复制链接到浏览器
 （mock 会自动同意并跳回回调）→ 回到面板点一次「重连」。
 
-## 7. 已知限制
+## 7. 内网明文 token 端点（默认关闭）
+
+内网部署的授权服务器常常没有 TLS（例如没配证书的 MCPHub）。SDK 会无条件拒绝：
+
+```js
+function assertSecureTokenEndpoint(tokenEndpoint) {
+  const url = new URL(String(tokenEndpoint));
+  if (url.protocol !== "https:" && !isLoopbackHost(url.hostname))
+    throw new InsecureTokenEndpointError(url.href);
+}
+```
+
+这是对的：明文 HTTP 上交换令牌，等于把 `access_token` 和长命的 `refresh_token` 广播给
+同网段任何能嗅探的设备。
+
+因此本插件提供一个**每服务器单独、默认关闭**的例外：服务器表单里的
+**「允许明文 token 端点」**。
+
+开启后会发生什么：
+
+- 只有**这一台**服务器的 token 交换（含刷新）走本插件自己的实现
+  （`src/mcp/oauth/insecure.js`，RFC 6749 §4.1.3 的一个表单 POST）；
+- **SDK 的代码一行不改** —— 所有 HTTPS 服务器继续走 SDK 的完整编排。不 patch SDK 是
+  刻意的：patch 一个没有公开扩展点的私有实现，升级就会坏，而且坏了是静默的；
+- **每次明文请求都会在 Host 日志里留一条 warning**，写着端点地址。这是你日后唯一能
+  查到自己开过什么的证据。
+
+它**不**做的事：不放宽 SSRF 保护；不影响发现 / DCR / 授权端点（那些仍走 SDK）；
+不改变凭据落盘位置或权限（仍是 0600）。
+
+MCPHub 自己也用同样的思路解决同一个问题（它的 `allowInsecureTokenEndpoint`，默认 `false`），
+见[它的 OAuth 文档](https://docs.mcphub.app/features/oauth#http-token-endpoints-in-private-networks)。
+
+### 什么时候该用
+
+| 情况 | 怎么做 |
+|---|---|
+| 授权服务器是 `https://…` | **不要勾**，走 SDK |
+| 授权服务器是 `http://127.0.0.1:…`（本机） | **不要勾**，回环地址本来就被豁免 |
+| 授权服务器是 `http://内网主机/…` | 只能勾；但更好的方向是给它加 TLS |
+
+## 8. 已知限制
 
 - **只支持 `streamable-http`**。stdio 没有 HTTP 状态码可挑战，请用环境变量传凭据。
 - **不自动打开浏览器**。DSH 官方登录也是「复制登录链接」，而且 Host 侧 `open` 在无头/远程
@@ -178,7 +219,9 @@ transport 自动带上 Bearer → 真的连上 → 真的调用一个工具。
 - **设备码流程（RFC 8628）不支持** —— SDK 本身没有实现。
 - **刷新靠 401 触发**，不做时间预判。猜时间只会让令牌提前失效。
 - **不跨机器共享凭据**：回环回调 + 本机文件，这是刻意的。
-- **内网明文 `http://` 的授权服务器走不通**。SDK 的 `assertSecureTokenEndpoint` 拒绝向非
-  TLS 的 token 端点发送凭据，只豁免回环地址（`localhost` / `127.0.0.1` / `::1`）。所以
-  `http://some-intranet-host/...` 会在换令牌那一步抛 `InsecureTokenEndpointError`。
-  这是**协议要求的安全边界**，不是本插件的缺陷；给端点加 TLS 是对的方向，不要关掉这道检查。
+- **内网明文 `http://` 的授权服务器默认走不通**，需要按上一节显式开启每台服务器的例外。
+  SDK 的 `assertSecureTokenEndpoint` 只豁免回环地址（`localhost` / `127.0.0.1` / `::1`）；
+  非回环的明文端点在默认配置下会被本插件拒绝，并给出「去打开哪个开关」的说明。
+- **只支持动态注册（DCR）或已存在的客户端**。若授权服务器既不支持 DCR、又要求预注册
+  `client_id`，目前需要手工把 `clientInformation` 写进凭据文件
+  （`$DSH_HOME/dsh-skills-mcp-manager/oauth/<serverName>.json`）；面板还没有输入 `client_id` 的字段。

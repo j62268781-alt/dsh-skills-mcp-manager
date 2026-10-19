@@ -41,6 +41,11 @@ export const CONNECTION_DRAFT_DEFAULTS = Object.freeze({
   reconnectMaxDelayMs: String(CONNECTION_DEFAULTS.maxDelayMs),
   reconnectMaxAttempts: String(CONNECTION_DEFAULTS.maxAttempts),
   toolCallTimeoutMs: String(CONNECTION_DEFAULTS.toolCallTimeoutMs),
+  /**
+   * 明文 token 端点的例外默认为 **false**，与数字字段不同：数字要有「客户端默认值」可以
+   * 对齐，而这个开关的默认就是不放宽安全。所以这里放布尔而不是字符串。
+   */
+  allowInsecureTokenEndpoint: false,
 })
 
 /**
@@ -116,6 +121,14 @@ export function connectionFields(source) {
   const toolCallTimeoutMs = topLevelNumber(source?.toolCallTimeoutMs, 'toolCallTimeoutMs')
     ?? CONNECTION_DEFAULTS.toolCallTimeoutMs
   out.toolCallTimeoutMs = toolCallTimeoutMs
+  /**
+   * 明文 token 端点的例外：**只在 true 时写入**。
+   *
+   * 与上面几个数字不同，它没有「客户端默认值」可以对齐：不写这个键就是 `false`，而 `false`
+   * 恰恰是我们要的默认。所以省略键而不是写 `false`，让一份没有它的旧配置与新配置文件
+   * 逐字相同 —— 也不会在 diff 里凭空多出一行让人以为改了什么。
+   */
+  if (source?.allowInsecureTokenEndpoint === true) out.allowInsecureTokenEndpoint = true
   return out
 }
 
@@ -143,5 +156,7 @@ export function connectionDraftOf(config) {
   out.toolCallTimeoutMs = typeof timeout === 'number' && Number.isFinite(timeout)
     ? String(timeout)
     : String(CONNECTION_DEFAULTS.toolCallTimeoutMs)
+  // 布尔值直接回填：缺失即 false，不需要「默认值」这一层。
+  out.allowInsecureTokenEndpoint = config?.allowInsecureTokenEndpoint === true
   return out
 }

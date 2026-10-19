@@ -114,7 +114,46 @@ SDK 的私有字段（`_authProvider`、`_commonHeaders`、`start`）会随版�
 回环地址是协议层面允许的明文 OAuth 路径（RFC 8252 §7.3，SDK 的 `isLoopbackHost` 明确豁免），
 所以这条验证不受内网 TLS 限制影响。没有 mock 在跑时**跳过并说明原因**。
 
-### 9. 测试
+### 9. 内网明文 token 端点（默认关闭的例外）
+
+SDK 的 `assertSecureTokenEndpoint` 无条件拒绝向非 https 的 token 端点发凭据，只豁免回环
+地址。内网部署的授权服务器（如没配证书的 MCPHub）正好落在这条线外，于是 OAuth 在换令牌
+那一步必然失败。
+
+新增**每服务器单独、默认关闭**的 `allowInsecureTokenEndpoint`（面板里是「允许明文 token
+端点」勾选框）。开启后：
+
+- 只有这一台服务器的 token 交换与刷新走 `src/mcp/oauth/insecure.js`（RFC 6749 §4.1.3
+  的一个表单 POST）；
+- **SDK 一行不改** —— 所有 HTTPS 服务器继续走 SDK 的完整编排。不 patch SDK 是刻意的：
+  patch 一个没有公开扩展点的私有实现，升级就会坏，而且坏得静默；
+- 每次明文请求都记一条 warning，写着端点地址 —— 那是用户日后唯一能查到自己开过什么的证据。
+
+它不放宽 SSRF 保护、不影响发现 / DCR / 授权端点、不改变凭据落盘位置与 0600 权限。
+没有这个字段的旧配置读作 `false`（拒绝），且关闭时会**删掉配置键**而不是写 `: false`。
+
+同一问题 MCPHub 自己也用同样思路解决（`allowInsecureTokenEndpoint`，默认 `false`），
+见 [MCPHub OAuth 文档](https://docs.mcphub.app/features/oauth#http-token-endpoints-in-private-networks)。
+
+### 10. 持久化部署：`scripts/pack-deploy.mjs`
+
+真机上踩到一次：`npm run deploy` 把 0.5.6 拷进了 profile，但 profile 的 `package.json`
+依赖仍指向 **0.5.5 的 tarball**。DSH 重建 profile 时按那份依赖重装，覆盖了拷贝进去的目录 ——
+跑起来的其实是 0.5.5，于是 `/oauth` 与 `/oauth/callback` 全是 404，而 `package.json` 说
+0.5.5，一切看起来都正常。症状是「新功能完全不存在，也没有任何报错」。
+
+`deploy.mjs` 只做文件拷贝，这在设计上就不够：**profile 的依赖指向才是真相**。
+新增 `scripts/pack-deploy.mjs`：
+
+1. `npm pack` 出当前版本的 tarball（会跑 `prepare` → build），写进 `~/.dsh/plugin-packages/`
+2. 校验 tarball 里真的有 `dist/index.js` / `lib/client.js` / `cordis.patch.yml`
+   （否则会「部署成功」但插件不可用）
+3. 把 profile 依赖指向新 tarball
+4. 顺带跑一次 `deploy.mjs`，让不重建 profile 的情况下也立刻生效
+
+新版本用**新文件名**，不覆盖旧 tarball：回退就是把依赖改回旧那行再重启。
+
+### 11. 测试
 
 新增 78 个用例（399 → 454 全绿），四个文件，**都不 import 宿主包**（CI 上没有宿主
 `node_modules`，导入宿主包会让测试只在 CI 上炸）：
@@ -124,7 +163,8 @@ SDK 的私有字段（`_authProvider`、`_commonHeaders`、`start`）会随版�
 | `test/mcp.oauthState.test.mjs` | `state` 定长比较、长度不等不抛错、多字节按字节比、重复参数拒绝 |
 | `test/mcp.oauthStore.test.mjs` | 凭据落盘/权限 0600/坏文件隔离/`tokens()` 无参调用/`expires_in` 换算 |
 | `test/mcp.oauthPatch.test.mjs` | 注入生效、lookup 抛错不影响连接、HMR 不叠 wrapper、冻结原型如实失败、`verify()` 能验出「注入了却没进请求头」 |
-| `test/mcp.oauthFlow.test.mjs` | 两段式跑通、伪造 state 拒绝、超时、PKCE 跨段存活、**provider 必须单实例共享**、回调路由只接受 GET、响应体不含令牌 |
+| `test/mcp.oauthFlow.test.mjs` | 两段式跑通、伪造 state 拒绝、超时、PKCE 跨段存活、**provider 必须单实例共享**、明文端点拒绝/放行两条分支、回调路由只接受 GET、响应体不含令牌 |
+| `test/mcp.oauthInsecure.test.mjs` | 明文判定与 SDK 的 `isLoopbackHost` 逐字一致、https/回环不误判、每次明文请求必须留 warning、令牌响应收敛（丢掉未知字段）、非 JSON 不谎报成功 |
 
 每条关键断言都验证过**在修复前会失败**（例如把 `isValidServerName` 的 `.`/`..` 判断去掉、
 把补丁的注入点短路掉），而不是只在绿的时候跑过一遍。

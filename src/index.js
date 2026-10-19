@@ -90,6 +90,19 @@ const Server = z.object({
   reconnectMaxAttempts: z.string().default(''),
   /** Per-call tool timeout for this server ('' = the client's own default). */
   toolCallTimeoutMs: z.string().default(''),
+  /**
+   * 这台服务器的 token 端点允许**明文 http**（非回环地址）。
+   *
+   * 默认关闭，且**这是唯一能开启它的地方**：每台服务器自己的字段，不存在全局开关。
+   * 开启后 OAuth 的 token 交换（含 refresh）会把 `access_token` / `refresh_token` 以
+   * 明文发到内网 —— 同网段任何能嗅探的设备都能读到。SDK 的 `assertSecureTokenEndpoint`
+   * 无条件拒绝这种端点（这是对的），所以本插件用 `src/mcp/oauth/insecure.js` 自己完成那一步，
+   * 每次明文请求都记一条 warning。
+   *
+   * 存在的理由：内网部署的授权服务器（如 MCPHub）常常没有 TLS，而它既不是回环地址、
+   * 也不会升级 https。没有这个例外，那类服务器在 OAuth 上完全不可用。
+   */
+  allowInsecureTokenEndpoint: z.boolean().default(false),
   enabled: z.boolean().default(true),
 })
 
@@ -130,6 +143,19 @@ const ProfileRow = z.object({
   reconnectMaxAttempts: z.string().default(''),
   /** Per-call tool timeout for this server ('' = the client's own default). */
   toolCallTimeoutMs: z.string().default(''),
+  /**
+   * 这台服务器的 token 端点允许**明文 http**（非回环地址）。
+   *
+   * 默认关闭，且**这是唯一能开启它的地方**：每台服务器自己的字段，不存在全局开关。
+   * 开启后 OAuth 的 token 交换（含 refresh）会把 `access_token` / `refresh_token` 以
+   * 明文发到内网 —— 同网段任何能嗅探的设备都能读到。SDK 的 `assertSecureTokenEndpoint`
+   * 无条件拒绝这种端点（这是对的），所以本插件用 `src/mcp/oauth/insecure.js` 自己完成那一步，
+   * 每次明文请求都记一条 warning。
+   *
+   * 存在的理由：内网部署的授权服务器（如 MCPHub）常常没有 TLS，而它既不是回环地址、
+   * 也不会升级 https。没有这个例外，那类服务器在 OAuth 上完全不可用。
+   */
+  allowInsecureTokenEndpoint: z.boolean().default(false),
   enabled: z.boolean().default(true),
   phase: z.string().default(''),
 })
@@ -156,6 +182,19 @@ const RowOp = z.object({
   reconnectMaxAttempts: z.string().default(''),
   /** Per-call tool timeout for this server ('' = the client's own default). */
   toolCallTimeoutMs: z.string().default(''),
+  /**
+   * 这台服务器的 token 端点允许**明文 http**（非回环地址）。
+   *
+   * 默认关闭，且**这是唯一能开启它的地方**：每台服务器自己的字段，不存在全局开关。
+   * 开启后 OAuth 的 token 交换（含 refresh）会把 `access_token` / `refresh_token` 以
+   * 明文发到内网 —— 同网段任何能嗅探的设备都能读到。SDK 的 `assertSecureTokenEndpoint`
+   * 无条件拒绝这种端点（这是对的），所以本插件用 `src/mcp/oauth/insecure.js` 自己完成那一步，
+   * 每次明文请求都记一条 warning。
+   *
+   * 存在的理由：内网部署的授权服务器（如 MCPHub）常常没有 TLS，而它既不是回环地址、
+   * 也不会升级 https。没有这个例外，那类服务器在 OAuth 上完全不可用。
+   */
+  allowInsecureTokenEndpoint: z.boolean().default(false),
   /**
    * update: whether the user actually edited the connection fields.
    *
@@ -957,6 +996,19 @@ export function apply(ctx, config) {
       store: oauthStore,
       getSdk: () => (oauthSdk?.ok === true ? oauthSdk : { ok: false, reason: String(oauthSdk?.reason ?? ''), detail: String(oauthSdk?.detail ?? '') }),
       makeProvider: makeOAuthProvider,
+      /**
+       * Whether this server may use a **plaintext** token endpoint.
+       *
+       * Read from the row on every call, never cached: the user can toggle the checkbox and
+       * retry without restarting, and a cached `true` would keep the exception alive after it
+       * was switched off — the one direction that must never lag.
+       *
+       * A missing row or a missing field answers `false`: the default has to be "refuse".
+       */
+      allowInsecure: (serverName) => {
+        const row = candidateServers().find((entry) => entry.serverName === serverName)
+        return row?.allowInsecureTokenEndpoint === true
+      },
       log: { warn: (message) => ctx.logger.warn(message) },
     })
     oauthReady = { ready: true, reason: '', detail: '', sdkVersion: loaded.version }
