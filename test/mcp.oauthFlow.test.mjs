@@ -652,3 +652,95 @@ test('refresh：服务器拒绝刷新时给出 refreshFailed 而不是谎报成�
   const saved = await store.read('gitnexus', 'http://sz-00575123-01/mcp/coding')
   assert.equal(saved.tokens.access_token, 'a')
 })
+
+test('begin：回调地址变了就丢掉旧 client 重新注册（端口每次启动都变）', async (t) => {
+  /**
+   * 桌面版把 `--port 0` 写死在启动参数里，所以 DSH 每次重启端口都不同；而动态注册得到
+   * 的 client_id 与注册时的 redirect_uri 绑定。拿旧 client 去授权只会得到一句难懂的
+   * `invalid_client`，用户不可能自己联想到「因为我重启过 DSH」。
+   *
+   * 这里钉住：地址不一致 → 清掉 clientInformation → SDK 拿到的是空客户端（于是重新 DCR）。
+   */
+  const home = await tempHome(t)
+  const store = createOAuthStore({ dshHome: home })
+  const seen = []
+  const sdk = {
+    async auth(provider) {
+      seen.push(await provider.clientInformation())
+      await provider.redirectToAuthorization('http://as/authorize?x=1')
+      return 'REDIRECT'
+    },
+  }
+  const flow = createOAuthFlow({
+    store,
+    getSdk: () => ({ ok: true, sdk }),
+    makeProvider: (serverName, url) => createOAuthProvider({ store, serverName, url, redirectUri: 'http://127.0.0.1:9999/cb', log: noopLog }),
+    allowInsecure: () => true,
+    currentRedirectUri: () => 'http://127.0.0.1:9999/cb',
+    log: noopLog,
+  })
+  await store.update('gitnexus', 'http://sz-00575123-01/mcp/coding', (record) => {
+    record.clientInformation = { client_id: 'stale', redirect_uris: ['http://127.0.0.1:1111/cb'] }
+  })
+
+  const result = await flow.begin('gitnexus', 'http://sz-00575123-01/mcp/coding')
+  assert.equal(result.kind, 'redirect')
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0], undefined, 'SDK 应当拿到「没有客户端」，从而重新注册')
+
+  const after = await store.read('gitnexus', 'http://sz-00575123-01/mcp/coding')
+  assert.equal(after.clientInformation, null, '旧 client 必须清掉')
+  assert.equal(after.pending?.url ?? '', 'http://as/authorize?x=1', '新的 pending 要写下来')
+})
+
+test('begin：回调地址没变时保留已注册的 client（不能无端重新注册）', async (t) => {
+  /**
+   * 每次授权都重新 DCR 会在服务器侧堆一串一次性的客户端，而且有些服务器把注册限流或
+   * 要求管理员批准 —— 无端重注册会把一条本来能用的路径变慢甚至变坏。
+   */
+  const home = await tempHome(t)
+  const store = createOAuthStore({ dshHome: home })
+  const seen = []
+  const sdk = {
+    async auth(provider) {
+      seen.push(await provider.clientInformation())
+      await provider.redirectToAuthorization('http://as/authorize?x=2')
+      return 'REDIRECT'
+    },
+  }
+  const flow = createOAuthFlow({
+    store,
+    getSdk: () => ({ ok: true, sdk }),
+    makeProvider: (serverName, url) => createOAuthProvider({ store, serverName, url, redirectUri: 'http://127.0.0.1:9999/cb', log: noopLog }),
+    allowInsecure: () => true,
+    currentRedirectUri: () => 'http://127.0.0.1:9999/cb',
+    log: noopLog,
+  })
+  await store.update('gitnexus', 'http://sz-00575123-01/mcp/coding', (record) => {
+    record.clientInformation = { client_id: 'good', redirect_uris: ['http://127.0.0.1:9999/cb'] }
+  })
+
+  await flow.begin('gitnexus', 'http://sz-00575123-01/mcp/coding')
+  assert.equal(seen[0]?.client_id, 'good', '地址一致时必须复用已注册的 client')
+})
+
+test('begin：拿不到当前回调地址时不去猜（不清任何凭据）', async (t) => {
+  const home = await tempHome(t)
+  const store = createOAuthStore({ dshHome: home })
+  const sdk = { async auth(provider) { await provider.redirectToAuthorization('http://as/x'); return 'REDIRECT' } }
+  const flow = createOAuthFlow({
+    store,
+    getSdk: () => ({ ok: true, sdk }),
+    makeProvider: (serverName, url) => createOAuthProvider({ store, serverName, url, redirectUri: 'http://127.0.0.1:9999/cb', log: noopLog }),
+    allowInsecure: () => true,
+    // Host 还没拿到 webServer 时就是这个状态（曾经的 redirectUri 空串 bug）。
+    currentRedirectUri: () => '',
+    log: noopLog,
+  })
+  await store.update('gitnexus', 'http://sz-00575123-01/mcp/coding', (record) => {
+    record.clientInformation = { client_id: 'keep', redirect_uris: ['http://127.0.0.1:1111/cb'] }
+  })
+  await flow.begin('gitnexus', 'http://sz-00575123-01/mcp/coding')
+  const after = await store.read('gitnexus', 'http://sz-00575123-01/mcp/coding')
+  assert.equal(after.clientInformation?.client_id, 'keep', '不知道当前地址时不该动已注册的 client')
+})

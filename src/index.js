@@ -1010,6 +1010,15 @@ export function apply(ctx, config) {
         const row = candidateServers().find((entry) => entry.serverName === serverName)
         return row?.allowInsecureTokenEndpoint === true
       },
+      /**
+       * 当前的回调地址。
+       *
+       * 桌面版把端口写死成 `--port 0`（`dsh-desktop-host` 的启动参数里），所以每次启动
+       * 端口都不同；而动态注册的 `client_id` 与注册时的 `redirect_uri` 绑定。把「此刻
+       * 的地址」交给 flow，它就能在启动授权前发现旧绑定并重新注册 —— 用户不必因为重启
+       * 一次 DSH 就去清一遍凭据。
+       */
+      currentRedirectUri: () => oauthRedirectUri(),
       log: { warn: (message) => ctx.logger.warn(message) },
     })
     oauthReady = { ready: true, reason: '', detail: '', sdkVersion: loaded.version }

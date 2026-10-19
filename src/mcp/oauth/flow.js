@@ -164,7 +164,7 @@ export function describeFlowError(error) {
  *   注入以便测试替换。
  * @param options.log - `{ warn, info }`。
  */
-export function createOAuthFlow({ store, getSdk, makeProvider, allowInsecure, log } = {}) {
+export function createOAuthFlow({ store, getSdk, makeProvider, allowInsecure, currentRedirectUri, log } = {}) {
   /** 每个服务器一个 provider 实例：内存缓存要在多次请求之间保持，否则每请求都读盘。 */
   const providers = new Map()
 
@@ -182,6 +182,34 @@ export function createOAuthFlow({ store, getSdk, makeProvider, allowInsecure, lo
    * @param url - the MCP endpoint; a changed URL invalidates the cached instance because the
    *   saved credentials may belong to the old server.
    */
+  /**
+   * 丢掉绑定在**旧回调地址**上的客户端信息。
+   *
+   * @returns `true` 表示确实丢掉了一份过期绑定（调用方应重新取 provider）。
+   */
+  const dropStaleClientBinding = async ({ serverName, url, forget }) => {
+    const current = String(currentRedirectUri?.() ?? '')
+    if (current === '') return false
+    const record = await store.read(serverName, url)
+    const bound = Array.isArray(record?.clientInformation?.redirect_uris)
+      ? record.clientInformation.redirect_uris
+      : []
+    // 没有 clientInformation（还没注册过）或它没写 redirect_uris（服务器没回）：
+    // 没有可比对的东西，交给 SDK 自己处理。
+    if (bound.length === 0) return false
+    if (bound.includes(current)) return false
+    log?.info?.(`dsh-skills-mcp-manager: ${serverName} 的 OAuth 客户端绑定在旧回调地址上（${bound.join(', ')} → ${current}），将重新注册`)
+    await store.update(serverName, url, (next) => {
+      // 只清「注册产物」和「与之绑定的进行中状态」：令牌不动 —— 它们可能仍然有效，
+      // 清掉等于让一台本来能用的服务器掉线。
+      next.clientInformation = null
+      next.pending = null
+      next.codeVerifier = ''
+    })
+    forget(serverName)
+    return true
+  }
+
   const providerFor = (serverName, url) => {
     const cached = providers.get(serverName)
     if (cached !== undefined && cached.url === url) return cached
@@ -248,7 +276,20 @@ export function createOAuthFlow({ store, getSdk, makeProvider, allowInsecure, lo
         }
       }
       const { sdk } = sdkResult
-      const { provider, snapshot } = providerFor(serverName, url)
+      let { provider, snapshot } = providerFor(serverName, url)
+      /**
+       * 缓存的 client 是否还绑在当前的回调地址上。
+       *
+       * 桌面版把端口写死成 `--port 0`，每次启动都是新端口；而动态注册回来的
+       * `client_id` 与注册时的 `redirect_uri` 绑定。端口一变，旧 client 就作废了 ——
+       * 继续用它只会得到一句难以理解的 `invalid_client`。这里主动比对：不一致就丢掉
+       * 缓存的 client，让 SDK 重新注册一次（DCR 本来就是为这种场景设计的）。
+       *
+       * 只在**已知**当前回调地址、且记录里**确实有**一份绑定的情况下动手：拿不到当前
+       * 地址时不该无端清掉一份可用的凭据。
+       */
+      const boundRedirect = await dropStaleClientBinding({ serverName, url: target.url, forget })
+      if (boundRedirect === true) ({ provider, snapshot } = providerFor(serverName, url))
       try {
         const result = await sdk.auth(provider, { serverUrl: target.url })
         if (result === 'AUTHORIZED') {

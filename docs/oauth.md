@@ -235,6 +235,48 @@ MCPHub 自己也用同样的思路解决同一个问题（它的 `allowInsecureT
 | 授权服务器是 `http://127.0.0.1:…`（本机） | **不要勾**，回环地址本来就被豁免 |
 | 授权服务器是 `http://内网主机/…` | 只能勾；但更好的方向是给它加 TLS |
 
+## 7.5 端口每次启动都会变，但不用管它
+
+桌面版把 Web 端口写死在启动参数里：
+
+```js
+// dsh-desktop-host/lib/index.js
+args: ["--no-open", "--host", "127.0.0.1", "--port", "0"]
+```
+
+`--port 0` 表示让操作系统随机挑一个空闲端口 —— **没有任何配置文件或环境变量暴露它**。
+于是 `redirect_uri` 每次启动都不同，而动态注册得到的 `client_id` 是**绑定 redirect_uri** 的。
+
+理论上可以用 profile patch 按 id 覆盖 `webserver` 那一行来固定端口（bundle 行可以被用户
+patch 覆盖，最后写入者胜）：
+
+```yaml
+# ~/.dsh/profiles/desktop/cordis.patch.yml
+- id: webserver
+  config:
+    host: 127.0.0.1
+    port: 3080
+    compression: gzip
+    compressionLevel: 1
+    compressionThresholdBytes: 1024
+```
+
+**但不建议这么做。** `server.listen` 失败会 reject，端口一旦被别的程序占住，**整个 Web UI
+都起不来** —— 为了一个 OAuth 的便利，给日常用的应用埋一个「打不开」的雷，不划算。
+
+本插件改为**自己处理端口变化**：`begin` 之前比对缓存里 client 的 `redirect_uris` 与此刻
+的回调地址，不一致就丢掉那份 client，让 SDK 重新注册一次（DCR 本来就是为这种场景设计的）。
+代价是一次多出来的注册请求，收益是「重启 DSH 后 OAuth 仍然可用」。
+
+三个刻意的边界：
+
+- **地址一致时绝不重注册**：有些服务器对注册限流、或要求管理员批准，无端重注册会把一条
+  本来能用的路径变慢甚至变坏；
+- **拿不到当前地址时什么都不清**（Host 还没拿到 `webServer` 时就是这种状态）—— 不知道
+  就别动一份可能有效的凭据；
+- **只清注册产物和与之绑定的进行中状态**（`clientInformation` / `pending` / `codeVerifier`），
+  **令牌不动** —— 它们可能仍然有效，清掉等于让一台本来能用的服务器掉线。
+
 ## 8. 已知限制
 
 - **只支持 `streamable-http`**。stdio 没有 HTTP 状态码可挑战，请用环境变量传凭据。
