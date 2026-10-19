@@ -312,7 +312,29 @@ return rows.map((row) => ({ serverName: row.serverName, transport: row.transport
 测试在源头守住：行里写了 `true`，投影必须带出 `true`；没写是 `false`；字符串 `"true"`
 不算（配置可以被人手改成字符串）。
 
-### 17. 测试
+### 17. 弹出菜单被切掉：改成视口坐标 + 自动翻转
+
+真机反馈：卡片靠近可视区底部时，`…` 菜单**下半截看不见**。两个原因叠在一起：
+
+1. 菜单是 `position: absolute`，定位祖先是卡片里那个 `position: relative` 的小容器，
+   而面板自己的滚动容器有 `overflow` —— 绝对定位的后代会被**裁剪**；
+2. 它永远向下展开，根本没考虑「上方还有多少空间」。
+
+改成 `position: fixed` + 打开前测一次触发按钮的位置：优先向下，下方放不下且上方更宽裕
+就翻转向上；两边都放不下时选空间更大的一边，用 `max-height` 让菜单自己滚动而不是被切掉。
+菜单位置是**视口坐标**，因此逃出了所有祖先的 overflow。
+
+判定逻辑抽成 `lib/src/components/menuAnchor.js` 的纯函数 —— 「像素看起来对不对」只能靠
+真机，不该和「该往上还是往下」混在同一个测试里。新增 9 条测试钉住：向下/向上/刚好放得下
+时不跳、两边都不够时选宽敞的一边、项数越多越容易翻转、不会溢出视口左边缘、量不出来时
+返回 null 安静降级。
+
+顺手补两条真实缺陷：
+- 滚动或改变窗口大小**关掉菜单**（视口坐标的菜单一滚就会停在一个已经不在这儿的位置，
+  比关掉更糟的是让人点错东西）；
+- 给 `.smp-menu` 加 `box-sizing: border-box`，否则 `padding` 会把 `min-width` 撑大一点。
+
+### 18. 测试
 
 新增 78 个用例（399 → 454 全绿），四个文件，**都不 import 宿主包**（CI 上没有宿主
 `node_modules`，导入宿主包会让测试只在 CI 上炸）：
@@ -325,6 +347,7 @@ return rows.map((row) => ({ serverName: row.serverName, transport: row.transport
 | `test/mcp.oauthFlow.test.mjs` | 两段式跑通、伪造 state 拒绝、超时、PKCE 跨段存活、**provider 必须单实例共享**、明文端点拒绝/放行两条分支、回调路由只接受 GET、响应体不含令牌 |
 | `test/mcp.oauthBrowser.test.mjs` | 只开 http/https（`file:`/`javascript:` 一律拒绝）、三平台命令、Windows 的空参数、不经 shell 重解析、启动器缺失只记 warning 不抛错 |
 | `test/mcp.oauthInsecure.test.mjs` | 明文判定与 SDK 的 `isLoopbackHost` 逐字一致、https/回环不误判、每次明文请求必须留 warning、令牌响应收敛（丢掉未知字段）、非 JSON 不谎报成功 |
+| `test/components.menuAnchor.test.mjs` | 菜单向下/向上翻转、两边都不够时选宽敞的一边并滚动、项数影响翻转、不溢出边缘、量不到时降级、上下两个方向用互斥的定位属性 |
 | `test/styles.panel.test.mjs` | 布局契约：开关行不能有固定高度、文字左/开关贴右/上下居中、文字列 `min-width:0`、旧勾选框样式已删、字段间距 ≥6px、详情值必须用主色 |
 
 每条关键断言都验证过**在修复前会失败**（例如把 `isValidServerName` 的 `.`/`..` 判断去掉、

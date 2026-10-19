@@ -105,7 +105,12 @@
 /* 遮罩挡住页面其余部分的点击：菜单不该在一次无关点击后还开着，
    否则下一次点击会落在用户没打算打开的菜单项上。 */
 .smp-menuScrim{position:fixed;inset:0;z-index:40}
-.smp-menu{position:absolute;top:calc(100% + 4px);right:0;z-index:41;min-width:104px;padding:4px;display:flex;flex-direction:column;background:var(--dsw-alias-bg-layer-1,#fff);border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);box-shadow:0 6px 20px rgba(0,0,0,.12)}
+/* 弹出菜单。
+   默认这一套是**兜底**：量不到触发按钮位置时（离线渲染、没有布局）就向下展开。
+   真实运行时会由 menuAnchor.js 算出视口坐标，用内联样式改成 `position:fixed` ——
+   这样才能既不被面板滚动容器的 overflow 裁剪，又能在下方放不下时翻转向上。
+   `min-width` 保证即使只有「授权」两个字也不会挤成一条。 */
+.smp-menu{position:absolute;top:calc(100% + 4px);right:0;z-index:41;min-width:104px;padding:4px;display:flex;flex-direction:column;background:var(--dsw-alias-bg-layer-1,#fff);border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);box-shadow:0 6px 20px rgba(0,0,0,.12);box-sizing:border-box}
 .smp-menuItem{box-sizing:border-box;width:100%;text-align:left;border:0;background:0 0;border-radius:var(--dsw-radius-sm);padding:6px 10px;font-size:13px;line-height:18px;color:var(--dsw-alias-label-primary);cursor:pointer;white-space:nowrap}
 .smp-menuItem:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .smp-menuItem:disabled{opacity:.5;cursor:default}
