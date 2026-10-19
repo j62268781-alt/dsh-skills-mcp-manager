@@ -58,9 +58,18 @@ test('MCP 表单：连接与重连输入**预填真实默认值**，不是空框
     assert.deepEqual(numbers, ['500', '30000', '10'], `三个重连输入应预填默认值：${JSON.stringify(numbers)}`)
     assert.equal(timeoutInput(panel).props.value, '60000', '工具调用超时应预填 60000（PR #1）')
 
-    const checkbox = panel.find((node) => node.type === 'input' && node.props.type === 'checkbox')
-    assert.ok(checkbox !== null, '缺少 failOnStartupError 勾选框')
-    assert.equal(checkbox.props.checked, false, '默认应当是未勾选（DSH 默认 false）')
+    /**
+     * 布尔设置渲染成宿主的 `Switch`（`button[role=switch]`），不再是 `<input type=checkbox>`：
+     * 开关同时表达「现在是哪一档」，而勾选框只表达「点了会怎样」。
+     * 断言仍要钉住默认值 —— 读 `aria-checked`，那才是开关对外的状态契约。
+     */
+    const failSwitch = panel.switchNamed('连不上时拒绝激活（failOnStartupError）')
+    assert.ok(failSwitch !== null, '缺少 failOnStartupError 开关')
+    assert.equal(failSwitch.props['aria-checked'], false, '默认应当关闭（DSH 默认 false）')
+    // 第二条安全开关必须在同一张表单里，且默认关闭 —— 它一旦默认打开就是安全降级。
+    const insecureSwitch = panel.switchNamed('允许明文 token 端点')
+    assert.ok(insecureSwitch !== null, '缺少「允许明文 token 端点」开关')
+    assert.equal(insecureSwitch.props['aria-checked'], false, '明文 token 端点默认必须关闭')
   } finally {
     panel.restore()
   }
@@ -96,7 +105,7 @@ test('MCP 表单：填了连接参数后，命令直接发给 Host（HTTP，不�
     change(reconnectInputs(panel)[0], '1000')
     change(reconnectInputs(panel)[1], '60000')
     change(reconnectInputs(panel)[2], '60')
-    panel.toggle(panel.find((node) => node.type === 'input' && node.props.type === 'checkbox'), true)
+    panel.flip('连不上时拒绝激活（failOnStartupError）')
     panel.click(byText('保存'))
     await panel.settle()
 
@@ -250,5 +259,64 @@ test('项目级编辑：回填连接字段，并作为**行操作**写入（不�
     assert.deepEqual(doc.servers ?? [], [], '不该再往 config.servers 写东西')
   } finally {
     restore()
+  }
+})
+
+test('MCP 表单：两个布尔设置是开关，不是勾选框', { skip: skipWithoutBundle() }, async () => {
+  /**
+   * 用户反馈：布尔设置用勾选框，且说明文字换行成两行时行距被挤在一起。
+   *
+   * 两个问题都来自同一处旧样式 `.smp-inlineCheck { height: 32px }` —— 固定高度对一行文字
+   * 成立，两行 13px/18px 需要 36px，于是第二行被压在第一行上。这些说明几乎都是整句话，
+   * 换行是常态而不是例外，所以固定高度是 bug，不是文字太长。
+   *
+   * 这条测试钉住**结构**：开关 + 独立文字列 + 独立的后果说明行。具体像素在 CSS 里，
+   * 但「说明是不是一个独立元素」决定了它会不会和标题挤成一行 —— 那是可测的。
+   */
+  const panel = await bootPanel(emptyDoc())
+  try {
+    openAddForm(panel)
+    const rows = panel.findAll((node) => String(node.props.className ?? '') === 'smp-switchRow')
+    assert.equal(rows.length, 2, `应有两个开关行，实际 ${rows.length}`)
+    for (const row of rows) {
+      const classes = (row.children ?? []).flat(3).filter((child) => child?.props).map((child) => String(child.props.className ?? ''))
+      assert.ok(classes.some((name) => name === 'smp-switchSlot'), '开关行缺少开关槽位（决定了 flex 布局的是包装器，不是控件本身）')
+      assert.ok(classes.some((name) => name === 'smp-switchRowText'), '开关行缺少文字列')
+    }
+    // 说明文字必须是**独立**的一行：拼进标题里会被当成名称的一部分而跳读。
+    const hints = panel.findAll((node) => String(node.props.className ?? '') === 'smp-switchRowHint')
+    assert.equal(hints.length, 2, '两条说明应各自是独立元素')
+    assert.match(textOf(hints[1]), /明文/, '安全降级的后果说明必须写出来')
+  } finally {
+    panel.restore()
+  }
+})
+
+test('MCP 表单：打开明文 token 端点会写进行操作', { skip: skipWithoutBundle() }, async () => {
+  /**
+   * UI 改了但数据没通是最难发现的一类回归 —— 开关能点、能回填，只是永远不落库。
+   *
+   * 这条走完整交互：填必填项 → 打开开关 → 保存 → 断言 `allowInsecureTokenEndpoint: true`
+   * 真的进了命令。（`connectionChanged` 里手写的字段清单漏一项就会这样，那个清单
+   * 在本仓库已经漏过两次。）
+   */
+  const panel = await bootPanel(emptyDoc({ profileServers: [], rowOpsReady: true }))
+  const { doc, change, byPlaceholder } = panel
+  try {
+    openAddForm(panel)
+    change(byPlaceholder('例如 test，最多 32 字符'), 'gitnexus')
+    change(byPlaceholder('https://…/mcp'), 'http://sz-00575123-01/mcp/coding')
+    const flipped = panel.flip('允许明文 token 端点')
+    assert.equal(flipped.props['aria-checked'], true, '翻转后开关状态应当是开')
+    panel.click(panel.byText('保存'))
+    await panel.settle()
+
+    const op = (doc.rowCommands ?? [])[0]
+    assert.ok(op, '保存后没有把命令发给 Host')
+    assert.equal(op.allowInsecureTokenEndpoint, true, '明文开关没有写进行操作')
+    // 未碰的另一个开关不能被顺手打开 —— 默认值必须仍是关闭。
+    assert.notEqual(op.failOnStartupError, true, '没碰的开关被打开了')
+  } finally {
+    panel.restore()
   }
 })

@@ -148,7 +148,7 @@
 .smp-envField{display:flex;flex-direction:column;gap:6px;min-width:0}
 .smp-envField code{font-family:var(--dsw-font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:11px;background:var(--dsw-alias-bg-module-platform);border-radius:var(--dsw-radius-xs,4px);padding:0 4px}
 .smp-formGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:10px}
-.smp-field{display:flex;flex-direction:column;gap:4px;min-width:0}
+.smp-field{display:flex;flex-direction:column;gap:6px;min-width:0}
 .smp-field[data-wide=true]{grid-column:1 / -1}
 /* 技能对话框里「将写入 <路径>」那一行：它不属于任何字段，但要跨满两列。 */
 .smp-skillPath{grid-column:1 / -1}
@@ -160,7 +160,7 @@
 .smp-oauthLinkRow{display:flex;align-items:center;gap:8px;margin-top:2px}
 /* 失败文案用错误色，但**不加粗、不放大**：它不是故障警报，只是这次操作没成功。 */
 .smp-oauthError{color:var(--dsw-alias-state-error-primary,#d92d20)}
-.smp-label{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}
+.smp-label{font-size:12px;line-height:19px;color:var(--dsw-alias-label-secondary)}
 .smp-button{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;gap:4px;height:32px;padding:0 14px;border:.5px solid transparent;border-radius:var(--dsw-radius-md);background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;cursor:pointer;flex:none}
 .smp-button:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
 .smp-button:active:not(:disabled){background:var(--dsw-alias-interactive-bg-active)}
@@ -284,23 +284,56 @@ div[role='dialog']:has(.smp-skillDialogBody),
   margin-left: 6px;
 }
 
-/* Checkbox inside a form field: keep it on the same 32px baseline as the inputs
-   next to it, so the connection-policy row lines up with the number fields. */
-.smp-inlineCheck {
+/* Boolean setting inside a form field: a switch plus its explanatory text.
+
+   The old checkbox row had a **fixed `height: 32px`**, which was fine for a one-line label and
+   wrong the moment the text wrapped: two lines of 13px/18px need 36px, so the second line was
+   squeezed against the first and the row looked clipped. Almost every one of these labels is a
+   full sentence, so wrapping is the normal case, not the exception — the fixed height was the
+   bug, not the text.
+
+   So: no fixed height (let it grow), `flex-start` so the switch lines up with the **first** line
+   of text instead of floating in the middle of a two-line block, and a line-height that matches
+   the switch's own height so the first line and the thumb share a baseline. */
+.smp-switchRow {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 32px;
-  font-size: 13px;
-  line-height: 18px;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 2px 0;
   color: var(--dsw-alias-label-primary);
-  cursor: pointer;
 }
 
-.smp-inlineCheck input {
+/* The control slot.
+
+   A wrapper rather than a rule on the control itself, because the control is either the Host's
+   `primitives.Switch` **or** our own `.smp-switch` fallback button — different elements with
+   different class names. Targeting a slot keeps `flex: none` applying to both, instead of
+   silently working only on whichever one the current Host happens to render. */
+.smp-switchRow > .smp-switchSlot {
   flex: none;
-  margin: 0;
-  width: 14px;
-  height: 14px;
-  accent-color: var(--dsw-alias-state-business-primary);
+  display: flex;
+  align-items: center;
+  /* Match the text's first line box so the pill sits on that line even when the text wraps.
+     `min-height` rather than `height`: a Host that ships a taller switch must not be clipped. */
+  min-height: 20px;
+}
+
+/* Wrapping text column. `min-width: 0` is what actually allows it to wrap inside a flex row —
+   without it the column takes its max-content width and overflows the dialog. */
+.smp-switchRowText {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  gap: 3px;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+/* The consequence sentence. Deliberately a separate line from the title: a warning that is
+   appended to the label reads as part of the name and gets skimmed past. */
+.smp-switchRowHint {
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--dsw-alias-label-secondary);
 }

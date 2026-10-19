@@ -294,6 +294,27 @@ export async function bootPanel(doc = emptyDoc(), options = {}) {
     node.props.onChange({ target: { checked } })
     runtime.render()
   }
+  /**
+   * Find a switch by its accessible name.
+   *
+   * Boolean settings render the Host's `Switch` (`button[role=switch]`), **not** an
+   * `<input type=checkbox>` — so `toggle()`'s `{target:{checked}}` contract does not apply;
+   * a switch's `onChange` receives the next boolean directly. Keeping the two contracts in
+   * separate helpers means a test cannot silently pass an event object to a switch and read
+   * the resulting `!undefined` as "on".
+   */
+  const switchNamed = (name) => {
+    if (name === undefined) return find((node) => node.props.role === 'switch')
+    return find((node) => node.props.role === 'switch' && String(node.props['aria-label'] ?? '') === name)
+  }
+  /** Flip the switch whose accessible name is `name`; returns it for a state assertion. */
+  const flip = (name) => {
+    const node = switchNamed(name)
+    assert.ok(node, `找不到名为「${name}」的开关`)
+    node.props.onClick({})
+    runtime.render()
+    return switchNamed(name)
+  }
 
   React = {
     createElement,
@@ -352,5 +373,5 @@ export async function bootPanel(doc = emptyDoc(), options = {}) {
     delete globalThis.location
   }
 
-  return { doc, runtime, settle, find, findAll, byClass, byText, byPlaceholder, click, change, toggle, text, openMenu, restore }
+  return { doc, runtime, settle, find, findAll, byClass, byText, byPlaceholder, click, change, toggle, switchNamed, flip, text, openMenu, restore }
 }
