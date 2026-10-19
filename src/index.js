@@ -1254,6 +1254,28 @@ export function apply(ctx, config) {
   const OAUTH_REFRESH_SWEEP_MS = 60 * 1000
   /** 正在刷新的服务器，避免同一台被连点几次刷出多个并发刷新。 */
   const oauthRefreshing = new Set()
+
+  /**
+   * 丢掉一台服务器**所有**的可观测缓存。
+   *
+   * 这些缓存各有各的 TTL（鉴权挑战 2 分钟、连接探测 12 秒、凭据状态 15 秒），存在的理由
+   * 都是「别让 publish 去等一个远程往返」。但授权完成那一刻，它们的**每一条结论都过期了**：
+   *
+   *   · `authCache` 里还留着授权前那次 401 —— 不丢，卡片会继续显示「需要授权」两分钟；
+   *   · `oauthStatusCache` 里还写着「没有凭据」—— 不丢，`hasCredentials` 就是 false，
+   *     上面那条抑制也就不会生效；
+   *   · `probeCache` 里还写着「连接断开」—— 不丢，重新挂载之后的第一次 publish 会拿旧
+   *     结论去贴标签。
+   *
+   * 真机上表现就是「授权完了，状态还是需要授权」，而等到的往往只是下一个 TTL，不是
+   * 任何真实的进展。授权是**明确的状态跃迁**，这类时刻必须主动失效，而不是等缓存过期。
+   */
+  const invalidateServerCaches = (serverName) => {
+    authCache.delete(serverName)
+    probeCache.delete(serverName)
+    oauthStatusCache.delete(serverName)
+    downSince.delete(serverName)
+  }
   const refreshOAuthStatus = (serverName, url) => {
     if (oauthFlow === null) return
     const cached = oauthStatusCache.get(serverName)
@@ -2109,6 +2131,13 @@ export function apply(ctx, config) {
       if (task === null) return
       if (task.stage === 'project') {
         const touched = remountProject(task.serverName)
+        /**
+         * 重新挂载之后，「连接断开」这条探测结论也过期了 —— 不清掉的话，第一次投影会
+         * 拿它去贴标签（用户看到「已放弃重试」），要等到下一个 12 秒的 TTL 才会变成
+         * 「已连接」。清掉之后状态先落到「连接中」，探测落地后再变「已连接」，
+         * 每一步都是真的。
+         */
+        invalidateServerCaches(task.serverName)
         finishReconnect(task.nonce, touched === 0 ? `没有会话正在使用项目级服务器 ${task.serverName}，无需重连` : undefined)
         return
       }
@@ -2323,6 +2352,13 @@ export function apply(ctx, config) {
            * 这里只是把任务放进去，不新写一套。
            */
           ctx.logger.info('dsh-skills-mcp-manager: %s finished OAuth authorization, reconnecting', serverName)
+          /**
+           * 先把授权前的观测结论全部丢掉，再排重连。
+           *
+           * 顺序很重要：缓存不先清，紧接着那次 `kickProjection()` 会拿「需要授权 / 没有
+           * 凭据 / 连接断开」这三条旧结论去渲染，用户看到的还是授权前的样子。
+           */
+          invalidateServerCaches(serverName)
           const target = candidateServers().find((entry) => entry.serverName === serverName)
           const tier = target !== undefined && String(target.scope ?? '') === 'global' ? 'global' : 'project'
           /**

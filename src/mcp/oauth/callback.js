@@ -26,6 +26,7 @@
  *   · 永远不会把 `code` 或任何令牌写进响应体或日志。
  */
 import { NAME } from '../../identity.js'
+import { AUTH_CHANNEL, AUTH_DONE } from './channel.js'
 import { flowReasonText } from './flow.js'
 import { singleParams } from './state.js'
 
@@ -36,19 +37,39 @@ export const CALLBACK_PATH = `/${NAME}/oauth/callback`
 const PAGE_STYLE = 'body{font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;padding:48px;color:#1f2328;background:#fff}' +
   'h1{font-size:18px;margin:0 0 12px}p{margin:0 0 8px;color:#57606a}code{background:#f6f8fa;padding:2px 6px;border-radius:4px}'
 
-/** 渲染一个中性的结果页。永远不把 code/令牌放进页面。 */
-function page(title, message) {
+/**
+ * 渲染一个中性的结果页。永远不把 code/令牌放进页面。
+ *
+ * @param script - 可选的内联脚本（只有成功页用它：广播一声「授权完成了」）。
+ *   刻意不给错误页 —— 失败时说「成功了」会让面板白刷一次。
+ */
+function page(title, message, script = '') {
   return '<!doctype html><html lang="zh"><head><meta charset="utf-8">' +
     `<title>${title}</title><style>${PAGE_STYLE}</style></head><body>` +
-    `<h1>${title}</h1>${message}</body></html>`
+    `<h1>${title}</h1>${message}${script}</body></html>`
 }
 
-function sendHtml(res, status, title, message) {
+/**
+ * 通知面板「授权完成了」。
+ *
+ * 回调页和面板是**同源**的（同一个 webServer），所以 `BroadcastChannel` 可以直接把
+ * 面板从 5 秒的轮询里叫醒。没有它的话，用户在浏览器里点完同意、切回面板，卡片还会
+ * 停在「需要授权」上最多 5 秒 —— 那几秒里什么都没发生，看起来就像没生效。
+ *
+ * `BroadcastChannel` 不存在时（老浏览器）静默跳过：面板的轮询仍然会把状态带到正确值，
+ * 这只是把「快」加上去，不该成为正确性的前提。
+ */
+const NOTIFY_SCRIPT = '<script>(function(){try{' +
+  `var c=new BroadcastChannel(${JSON.stringify(AUTH_CHANNEL)});` +
+  `c.postMessage(${JSON.stringify(AUTH_DONE)});c.close();` +
+  '}catch(e){}})();</script>'
+
+function sendHtml(res, status, title, message, script = '') {
   res.statusCode = status
   res.setHeader('content-type', 'text/html; charset=utf-8')
   // `no-store`：回调整页可能带着一次性 code，不能被任何缓存留下。
   res.setHeader('cache-control', 'no-store')
-  res.end(page(title, message))
+  res.end(page(title, message, script))
 }
 
 /**
@@ -148,8 +169,12 @@ export function registerOAuthCallback(ctx, options = {}) {
         }
 
         remember(serverName, { ok: true, reason: '', text: '授权完成', detail: '', at: new Date().toISOString(), ...done })
-        sendHtml(res, 200, '授权完成', `<p><strong>${escapeHtml(serverName)}</strong> 已授权，可以关闭这个页面并回到 DSH。</p>` +
-          '<p>如果面板还显示「需要授权」，点一次「重连」让它重新建立连接。</p>')
+        /**
+         * 文案已经不需要「点一次重连」了：Host 现在会自动重连（见 onAuthorized），
+         * 面板也会被下面那个广播叫醒。留着一句用户不必做的指令，只会让人以为坏了。
+         */
+        sendHtml(res, 200, '授权完成', `<p><strong>${escapeHtml(serverName)}</strong> 已授权，正在回到 DSH 建立连接。</p>` +
+          '<p>可以关闭这个页面了。</p>', NOTIFY_SCRIPT)
         try {
           await onAuthorized?.(serverName)
         } catch (error) {

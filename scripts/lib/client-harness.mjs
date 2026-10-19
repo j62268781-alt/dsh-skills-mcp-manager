@@ -182,6 +182,9 @@ export async function bootPanel(doc = emptyDoc(), options = {}) {
       if (doc.rowCommandResult !== undefined) return { ok: true, status: 200, json: async () => doc.rowCommandResult }
       return { ok: true, status: 200, json: async () => ({ ok: true, reason: '' }) }
     }
+    // Counted so a test can prove the panel **re-fetched** after a nudge (e.g. the OAuth
+    // callback's BroadcastChannel message) instead of waiting for its poll.
+    doc.runtimeFetches = (doc.runtimeFetches ?? 0) + 1
     return {
       ok: true, status: 200,
       json: async () => ({
@@ -190,6 +193,22 @@ export async function bootPanel(doc = emptyDoc(), options = {}) {
       }),
     }
   })
+  /**
+   * Minimal `BroadcastChannel`: the panel subscribes to the OAuth channel and reloads on a
+   * message. Captured so a test can *deliver* that message — the real Channel would need two
+   * live pages, which this harness does not have.
+   */
+  const channels = []
+  const realBroadcastChannel = globalThis.BroadcastChannel
+  globalThis.BroadcastChannel = class {
+    constructor(name) { this.name = name; this.listeners = []; channels.push(this) }
+    addEventListener(_type, fn) { this.listeners.push(fn) }
+    removeEventListener(_type, fn) { this.listeners = this.listeners.filter((item) => item !== fn) }
+    close() {}
+    /** Test-only: deliver a message to this page. */
+    emit(data) { for (const fn of this.listeners) fn({ data }) }
+  }
+
   const realInterval = globalThis.setInterval
   const realTimeout = globalThis.setTimeout
   globalThis.setInterval = (fn, ms) => { options.onInterval?.(fn, ms); return 0 }
@@ -371,7 +390,9 @@ export async function bootPanel(doc = emptyDoc(), options = {}) {
     globalThis.setTimeout = realTimeout
     delete globalThis.window
     delete globalThis.location
+    if (realBroadcastChannel === undefined) delete globalThis.BroadcastChannel
+    else globalThis.BroadcastChannel = realBroadcastChannel
   }
 
-  return { doc, runtime, settle, find, findAll, byClass, byText, byPlaceholder, click, change, toggle, switchNamed, flip, text, openMenu, restore }
+  return { doc, runtime, settle, find, findAll, byClass, byText, byPlaceholder, click, change, toggle, switchNamed, flip, text, openMenu, restore, channels }
 }

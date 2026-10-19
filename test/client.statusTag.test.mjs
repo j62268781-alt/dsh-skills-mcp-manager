@@ -515,3 +515,43 @@ test('需要授权：已有凭据但服务器仍拒绝时，按钮说「重新�
     panel.restore()
   }
 })
+
+test('授权回调的广播会立刻重拉运行时状态（不等 5 秒轮询）', { skip: skipWithoutBundle() }, async () => {
+  /**
+   * 授权在**另一个标签页**里完成，面板没办法知道用户什么时候回来 —— 只能等每 5 秒的
+   * 轮询。那几秒里卡片停在「需要授权」上，看着就像没生效。
+   *
+   * 回调页与面板同源，所以回调页广播一声、面板立刻重拉一次就够了。这条测试钉住
+   * 「收到了就真的去拉了」——否则那段代码可以一直静默失效而没人发现（它没有可见输出）。
+   */
+  const panel = await bootPanel(emptyDoc({
+    profileServers: [profileServer()], rowOpsReady: true, reconnectReady: true,
+    oauthState: { ready: true, reason: '', detail: '', sdkVersion: '2.2.0', redirectUri: 'http://127.0.0.1:3080/cb' },
+    oauthServers: { protected: { present: true, refreshable: true, waiting: false, authorizeUrl: '', expiresAt: '', expired: false, at: '' } },
+    serverStatus: [statusEntry({ serverName: 'protected', tier: 'global', scope: '', status: 'connected', detail: '' })],
+  }))
+  try {
+    const channel = panel.channels.find((item) => item.name === 'dsh-skills-mcp-manager/oauth')
+    assert.ok(channel, '面板必须订阅授权回调的广播频道')
+    const before = panel.doc.runtimeFetches ?? 0
+    channel.emit('authorized')
+    await panel.settle()
+    assert.ok((panel.doc.runtimeFetches ?? 0) > before, '收到广播后必须立刻重拉 /runtime')
+  } finally {
+    panel.restore()
+  }
+})
+
+test('广播里的其它消息不触发重拉（只有授权完成才算数）', { skip: skipWithoutBundle() }, async () => {
+  const panel = await bootPanel(emptyDoc({ profileServers: [profileServer()], rowOpsReady: true }))
+  try {
+    const channel = panel.channels.find((item) => item.name === 'dsh-skills-mcp-manager/oauth')
+    assert.ok(channel)
+    const before = panel.doc.runtimeFetches ?? 0
+    channel.emit('something-else')
+    await panel.settle()
+    assert.equal(panel.doc.runtimeFetches ?? 0, before, '无关消息不该让面板重新拉取')
+  } finally {
+    panel.restore()
+  }
+})

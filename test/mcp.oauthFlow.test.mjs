@@ -488,6 +488,15 @@ test('callback：state 匹配后完成授权并记住结果', async (t) => {
   const response = await callRoute(ctx.routes[0], { url: `${CALLBACK_PATH}?code=the-code&state=good-state` })
   assert.equal(response.statusCode, 200)
   assert.match(response.body, /授权完成/)
+  /**
+   * 成功页要**叫醒面板**：授权是在另一个标签页里做的，面板没有别的办法知道用户什么时候
+   * 回来。回调页与面板同源，所以用一个 BroadcastChannel 广播一次就够了 —— 没有它，卡片
+   * 会在「需要授权」上再停最多 5 秒（下一个轮询），那几秒里什么都没发生，看着就像没生效。
+   */
+  assert.match(response.body, /BroadcastChannel/, '成功页要广播「授权完成」，好让面板立刻刷新')
+  assert.match(response.body, /dsh-skills-mcp-manager\/oauth/, '频道名必须与面板一致')
+  // 文案里不该再让用户去点「重连」——Host 现在会自动重连
+  assert.doesNotMatch(response.body, /点一次「重连」/, '自动重连之后不该再让用户手动点')
   // stdio 服务器不该被问（它没有 HTTP 状态码可挑战）——它的 url 为空，会被跳过
   assert.equal(remembered.get('github').ok, true)
   assert.deepEqual(authorized, ['github'])
@@ -896,4 +905,18 @@ test('prepareAuth：自己刷新也失败时，退回一次新的授权', async 
 
   const plan = await flow.prepareAuth('gitnexus', 'http://sz-00575123-01/mcp/coding')
   assert.deepEqual(plan, { forceReauthorization: true })
+})
+
+test('callback：失败页**不**广播（说「完成了」会让面板白刷一次）', async (t) => {
+  const ctx = fakeCtx()
+  registerOAuthCallback(ctx, {
+    servers: () => [{ serverName: 'github', transport: 'streamable-http', url: 'https://x/mcp' }],
+    flow: {
+      checkCallback: async () => ({ ok: true, code: 'c' }),
+      complete: async () => ({ ok: false, reason: 'token-exchange-rejected', detail: 'invalid_grant', text: '换令牌失败' }),
+    },
+    log: noopLog,
+  })
+  const response = await callRoute(ctx.routes[0], { url: `${CALLBACK_PATH}?code=c&state=s` })
+  assert.equal(response.body.includes('BroadcastChannel'), false, '失败页不该广播授权完成')
 })
