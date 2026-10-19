@@ -287,6 +287,30 @@ test('MCP 表单：两个布尔设置是开关，不是勾选框', { skip: skipW
     const hints = panel.findAll((node) => String(node.props.className ?? '') === 'smp-switchRowHint')
     assert.equal(hints.length, 2, '两条说明应各自是独立元素')
     assert.match(textOf(hints[1]), /明文/, '安全降级的后果说明必须写出来')
+
+    /**
+     * 两个开关分属不同概念（连接策略 / OAuth 安全），中间必须有一条分隔线。
+     * 没有它时两块文字挨在一起，读起来像一个开关组里的两行，而不是两项独立设置。
+     *
+     * 同时钉住**位置**：分隔线要在第 1 个开关之后、第 2 个开关之前 —— 只在页面里
+     * 存在一条线是看不出它到底隔开了什么的。
+     */
+    // 按渲染顺序收集两个关注点，再看它们谁先谁后 —— 位置断言比「存在」强，
+    // 一条落在表单别处的分隔线同样能通过「存在」检查。
+    const sequence = []
+    const walk = (node) => {
+      if (node === null || typeof node !== 'object') return
+      const cls = String(node.props?.className ?? '')
+      if (cls === 'smp-switchRow') sequence.push('row')
+      if (cls === 'smp-divider') sequence.push('divider')
+      for (const child of Array.isArray(node.children) ? node.children : [node.children]) walk(child)
+    }
+    walk(panel.runtime.tree)
+    assert.deepEqual(
+      sequence,
+      ['row', 'divider', 'row'],
+      `分隔线必须恰好落在两个开关之间，实际顺序 ${JSON.stringify(sequence)}`,
+    )
   } finally {
     panel.restore()
   }

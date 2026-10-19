@@ -286,6 +286,20 @@ div[role='dialog']:has(.smp-skillDialogBody),
   margin-left: 6px;
 }
 
+/* Horizontal rule between two independent settings in the form grid.
+
+   The grid is two columns, so the rule has to span both. Zero height plus the grid's own
+   `gap` gives the separation — no margins, which would add to the gap and make the two
+   sides look like different sections rather than siblings. */
+.smp-divider {
+  grid-column: 1 / -1;
+  /* `1px` rather than the `.5px` used for card borders: a hairline that disappears on a
+     non-retina display is worse than a slightly heavier rule here, and this one is the only
+     thing separating two settings that would otherwise read as one group. */
+  border-top: 1px solid var(--dsw-alias-border-l2);
+  height: 0;
+}
+
 /* Boolean setting inside a form field: a switch plus its explanatory text.
 
    The old checkbox row had a **fixed `height: 32px`**, which was fine for a one-line label and
