@@ -470,3 +470,48 @@ test('需要授权：展开时如果没有 Host 说明，也要给出一个默�
     panel.restore()
   }
 })
+
+test('需要授权：已有凭据但服务器仍拒绝时，按钮说「重新授权」并解释原因', { skip: skipWithoutBundle() }, async () => {
+  /**
+   * 真机撞到的自相矛盾：`…` 菜单说「重新授权」（因为凭据确实在磁盘上），正文按钮却说
+   * 「授权」—— 同一个动作两个名字，用户会以为按钮要重新走一遍全新的流程。
+   *
+   * 两个入口必须用**同一个判据**（`oauthServers[s].present`）。而且此时不该再暗示
+   * 「还没授权」：凭据在、服务器仍 401，说明是**服务器不接受这份令牌**，要单独说清楚，
+   * 否则用户重试到天亮也不会好。
+   */
+  const panel = await bootPanel(emptyDoc({
+    profileServers: [profileServer()], rowOpsReady: true, reconnectReady: true,
+    oauthState: { ready: true, reason: '', detail: '', sdkVersion: '2.2.0', redirectUri: 'http://127.0.0.1:3080/dsh-skills-mcp-manager/oauth/callback' },
+    oauthServers: {
+      protected: {
+        present: true, refreshable: true, waiting: false, authorizeUrl: '',
+        // 一小时后过期 —— 令牌本身是有效的
+        expiresAt: new Date(Date.now() + 3600_000).toISOString(), expired: false, at: '',
+      },
+    },
+    serverStatus: [statusEntry({
+      serverName: 'protected', tier: 'global', scope: '', status: 'needs-auth',
+      detail: '服务器要求先授权（OAuth）才能连接，这不是故障',
+    })],
+  }))
+  try {
+    panel.click(panel.find((node) => String(node.props.className ?? '').includes('smp-cardToggle')))
+    const buttons = panel.findAll((node) => String(node.props.className ?? '').includes('smp-button'))
+      .map((node) => textOf(node))
+    assert.ok(buttons.includes('重新授权'), `有凭据时按钮应说「重新授权」：${JSON.stringify(buttons)}`)
+    assert.equal(buttons.includes('授权'), false, '不该同时出现一个「授权」按钮')
+
+    const text = bodyText(panel)
+    assert.match(text, /仍然拒绝了连接/, '要说明是服务器不接受这份令牌，而不是「还没授权」')
+    assert.match(text, /重新授权通常能解决/)
+
+    // 菜单里的入口用同一个判据
+    const menu = panel.openMenu(0)
+    assert.ok(menu !== null)
+    const labels = panel.findAll((node) => String(node.props.className ?? '') === 'smp-menuItem').map((node) => textOf(node).trim())
+    assert.ok(labels.includes('重新授权'), `菜单也应说「重新授权」：${JSON.stringify(labels)}`)
+  } finally {
+    panel.restore()
+  }
+})
