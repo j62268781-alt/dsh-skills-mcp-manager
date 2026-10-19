@@ -181,3 +181,23 @@ test('serverRows 对空/非法输入是空列表，不抛错', () => {  assert.d
   assert.deepEqual(serverRows(42), [])
   assert.deepEqual(serverRows('nonsense'), [])
 })
+
+test('serverRows：allowInsecureTokenEndpoint 必须原样带出来（默认 false）', () => {
+  /**
+   * 这条字段曾经在**下游的手写投影**里被丢掉：面板开关把 true 写进了行，
+   * `candidateServers()` 的 `.map((row) => ({ serverName, transport, url, scope }))`
+   * 把它扔了，于是换令牌那一步报「允许明文 token 端点没有打开」，而开关明明是勾上的。
+   *
+   * 现在 `candidateServers()` 直接返回 serverRows 的结果，不再重列字段。这里守住源头：
+   * 行里写了什么，投影就必须带出什么。
+   */
+  const row = (config) => ({
+    id: 'mcp-x',
+    options: { name: '@deepseek-ai/dsh-mcp-client', config: { serverName: 'x', transport: 'streamable-http', url: 'http://x/mcp', ...config } },
+  })
+  assert.equal(serverRows([row({ allowInsecureTokenEndpoint: true })])[0].allowInsecureTokenEndpoint, true)
+  // 默认必须是 false：一份没有这个键的旧配置绝不能意外打开明文传输。
+  assert.equal(serverRows([row({})])[0].allowInsecureTokenEndpoint, false)
+  // 只认真正的 true —— 字符串 "true" 不算（配置可以被人手改成字符串）。
+  assert.equal(serverRows([row({ allowInsecureTokenEndpoint: 'true' })])[0].allowInsecureTokenEndpoint, false)
+})

@@ -289,7 +289,30 @@ OAuth 的便利给日常应用埋一个「打不开」的雷，不划算。
 - **只清注册产物**（`clientInformation` / `pending` / `codeVerifier`），**令牌不动**：
   令牌可能仍然有效，清掉等于让一台本来能用的服务器掉线。
 
-### 16. 测试
+### 16. 勾上的「允许明文 token 端点」没生效（手写字段清单第三次漏项）
+
+真机反馈：开关勾上了，换令牌那一步仍然报「允许明文 token 端点没有打开」。
+
+根因在下游的**手写投影**：
+
+```js
+// candidateServers()（修前）
+return rows.map((row) => ({ serverName: row.serverName, transport: row.transport, url: row.url, scope: row.scope }))
+```
+
+面板把 `allowInsecureTokenEndpoint: true` 写进了行，`serverRows` 也如实带出来了 —— 但
+`candidateServers()` 在交给 OAuth 之前把它扔了。于是 `allowInsecure` 永远拿到 `undefined`，
+`=== true` 恒为假。
+
+**这个仓库已经是第三次栽在同一个模式上**：`toolCallTimeoutMs` 的投影漏过、`connectionChanged`
+的比较清单漏过、现在是这个。共同的教训不是「记得加字段」，而是**别再重列字段**。
+所以 `candidateServers()` 现在直接返回 `serverRows` 的结果，消费方各取所需 —— 结构上
+没有可漏的清单了。
+
+测试在源头守住：行里写了 `true`，投影必须带出 `true`；没写是 `false`；字符串 `"true"`
+不算（配置可以被人手改成字符串）。
+
+### 17. 测试
 
 新增 78 个用例（399 → 454 全绿），四个文件，**都不 import 宿主包**（CI 上没有宿主
 `node_modules`，导入宿主包会让测试只在 CI 上炸）：

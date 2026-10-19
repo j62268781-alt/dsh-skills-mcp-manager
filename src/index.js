@@ -938,10 +938,23 @@ export function apply(ctx, config) {
   }
 
   /** Every configured server, both tiers. Rows are the single source of truth. */
+  /**
+   * Every configured MCP server, as `serverRows` produced it.
+   *
+   * **Deliberately not a hand-written projection.** It used to be
+   * `rows.map((row) => ({ serverName, transport, url, scope }))`, and when the OAuth half
+   * later needed `allowInsecureTokenEndpoint`, that field was silently missing — the switch
+   * in the panel wrote `true` to the row, `candidateServers()` dropped it on the way out, and
+   * the exchange refused with 「允许明文 token 端点没有打开」while the box was visibly ticked.
+   *
+   * This repo has now shipped that same mistake three times (a hand-written field list left
+   * out `toolCallTimeoutMs`, the `connectionChanged` comparison, and this one). The fix that
+   * stops it recurring is not "remember to add the field" — it is to stop re-listing fields.
+   * Consumers read what they need off the row.
+   */
   const candidateServers = () => {
     try {
-      const rows = serverRows([...(loaderOf(ctx)?.entries?.() ?? [])])
-      return rows.map((row) => ({ serverName: row.serverName, transport: row.transport, url: row.url, scope: row.scope }))
+      return serverRows([...(loaderOf(ctx)?.entries?.() ?? [])])
     } catch {
       return []
     }
