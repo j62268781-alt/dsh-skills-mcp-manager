@@ -149,6 +149,10 @@ export function reconnectBudgetMs(raw) {
  * @param input.graceMs - 实例出现前的宽限期（启动瞬间不闪告警）。
  * @param input.authChallenge - 该服务器的鉴权挑战（`{ kind, ... }`，见 `src/mcp/auth.js`）；
  *   null/undefined = 没观测到挑战。只有在**未连接**时才参与判定。
+ * @param input.hasCredentials - 磁盘上是否已经有一份（未过期的）授权凭据。
+ *   有凭据却仍然 401，说明**服务器不认这份令牌**，那不是一个「去授权就好」的状态 ——
+ *   再点一次授权也不会好。这种时候让「未连接/重试中」的判定说话，而不是贴一个会误导
+ *   用户的「需要授权」。
  * @returns 状态取值之一。
  */
 export function deriveStatus(input) {
@@ -163,6 +167,7 @@ export function deriveStatus(input) {
     budgetMs = 0,
     graceMs = 15000,
     authChallenge = null,
+    hasCredentials = false,
   } = input ?? {}
   if (!enabled) return SERVER_STATUS.disabled
   if (observed !== true) return SERVER_STATUS.unknown
@@ -176,7 +181,7 @@ export function deriveStatus(input) {
   //     到放弃，如果按预算推导就会显示「已放弃重试」，把「去授权就好」说成「它坏了」，
   //     这正是这个状态要修的那个谎。
   // 但仍然要求 `expected`：项目级条目在没有对应会话时压根没挂载，此时不该谈授权。
-  if (authChallenge !== null && authChallenge !== undefined && expected === true) {
+  if (authChallenge !== null && authChallenge !== undefined && expected === true && hasCredentials !== true) {
     return SERVER_STATUS.needsAuth
   }
   if (expected !== true) return SERVER_STATUS.unmounted

@@ -347,7 +347,46 @@ return rows.map((row) => ({ serverName: row.serverName, transport: row.transport
 重试没有意义。文案改成「已经保存了授权凭据，但这台服务器仍然拒绝了连接……若反复失败，
 请检查服务器是否还要求其它的请求头」。这不是故障提示，是让人别再无效重试。
 
-### 19. 测试
+### 19. 明文端点上「重新授权」必然失败（SDK 刷新路径的 TLS 检查）
+
+真机点「重新授权」得到：
+
+```
+authorization-could-not-start：Refusing to send credentials to non-https token endpoint…
+```
+
+根因在 SDK 的 `authInternal`：
+
+```js
+if (tokens?.refresh_token && !forceReauthorization) {
+  try { newTokens = await refreshAuthorization(...) }
+  catch (error) { if (error instanceof InsecureTokenEndpointError) throw error }
+}
+```
+
+两件事叠在一起：**只要存在 `refresh_token` 就一定会尝试刷新**（与是否过期无关），
+而刷新走的 `executeTokenRequest` 里 TLS 检查无条件执行，且这个错误被**原样上抛、不吞掉**。
+所以「已授权 + 明文端点」之后，点重新授权永远炸在 refresh 上，根本走不到授权链接。
+
+修法：明文端点下 `begin` 传 `forceReauthorization: true` 让 SDK **跳过**它自己的刷新。
+用户点的是「重新授权」，本来就该拿一次新的授权。例外没开时则直接给出「去开哪个开关」的
+说明，而不是把 SDK 的英文原文丢给用户。
+
+transport 那条路径（撞 401）语义不同 —— 那里**刷新才是对的动作**，不该因为令牌过期把
+用户弹去登录。所以新增 `prepareAuth`：先让 flow 用自己的实现换一次令牌，成功就让连接
+重试；换不了才退回一次新的授权。
+
+### 20. 有凭据却仍显示「需要授权」
+
+鉴权挑战是**缓存值**（TTL 两分钟）。服务器不认这份令牌时（比如它的鉴权配置变了），缓存的
+401 会一直把状态钉在「需要授权」上 —— 而用户再点一次授权也不会好，因为问题不在「有没有
+授权」。
+
+`deriveStatus` 增加 `hasCredentials`：**有凭据时，缓存的 401 不再产出 `needs-auth`**，
+让它按连接的实际情况落到「重试中 / 已放弃」。重新授权的入口一直在 `…` 菜单里，并没有
+因此消失。缺省值仍是「没有凭据」—— 不能让漏传参数变成「永远不提示授权」。
+
+### 21. 测试
 
 新增 78 个用例（399 → 454 全绿），四个文件，**都不 import 宿主包**（CI 上没有宿主
 `node_modules`，导入宿主包会让测试只在 CI 上炸）：

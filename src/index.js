@@ -930,7 +930,22 @@ export function apply(ctx, config) {
       }
       if (made === undefined || made === null) return null
       return {
-        provider: makeAuthProvider({ sdk: oauthSdk.sdk, oauthProvider: made.provider, log: { warn: (message) => ctx.logger.warn(message) }, serverName }),
+        provider: makeAuthProvider({
+          sdk: oauthSdk.sdk,
+          oauthProvider: made.provider,
+          log: { warn: (message) => ctx.logger.warn(message) },
+          serverName,
+          /**
+           * 明文端点的 401 处理：先让 flow 自己换一次令牌。
+           *
+           * SDK 的 `auth()` 在存在 refresh_token 时无条件走它的刷新，而那条路上的 TLS
+           * 检查会抛 InsecureTokenEndpointError 且不吞掉 —— 结果是「令牌过期 → 每次重试
+           * 都以一个与令牌无关的错失败」。刷新成功就不用麻烦用户；失败才去要一次授权。
+           *
+           * 只在 flow 已经建好时提供；没有 flow 就没有 OAuth，这条路径本来也走不到。
+           */
+          prepareAuth: oauthFlow === null ? undefined : () => oauthFlow.prepareAuth(serverName, rowUrl),
+        }),
         oauthProvider: made.provider,
       }
     }
@@ -1456,6 +1471,12 @@ export function apply(ctx, config) {
         elapsedMs,
         budgetMs,
         authChallenge,
+        /**
+         * 有凭据时，401 不再是「需要授权」：那是服务器不认这份令牌（或者端点根本不看
+         * 这个头），点一百次授权也不会好。让它落到「未连接/重试中/已放弃」，用户才会去
+         * 查服务器侧；而重新授权的入口一直在 `…` 菜单里，并没有因此消失。
+         */
+        hasCredentials: oauthStatusCache.get(target.serverName)?.present === true,
       })
       const cached = probeCache.get(target.serverName)
       reported.push({

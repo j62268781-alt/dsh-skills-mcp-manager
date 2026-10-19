@@ -189,3 +189,24 @@ test('需要授权不算「可重连」状态', () => {
     assert.ok(SERVER_STATUS_TEXT[value].length > 0, `${value} 标题为空`)
   }
 })
+
+test('deriveStatus：已有凭据时，缓存的 401 不再判为「需要授权」', () => {
+  /**
+   * 真机现象：明明已经授权（凭据在磁盘上、令牌也有效），卡片却时不时显示「需要授权」。
+   *
+   * 原因是鉴权挑战是**缓存值**（TTL 两分钟）。服务器不认这份令牌时（比如它的鉴权配置
+   * 变了），缓存的 401 会一直把状态钉在「需要授权」上 —— 而用户再点一次授权也不会好。
+   * 有凭据却仍 401，说明问题在服务器侧，如实落到「未连接」那几档才对。
+   */
+  const challenge = { kind: 'required', resourceMetadataUrl: 'http://x/.well-known/oauth-protected-resource' }
+  const base = {
+    enabled: true, expected: true, observed: true, phase: 'active', hasInstance: true,
+    connected: false, elapsedMs: 90_000, budgetMs: 30_000, authChallenge: challenge,
+  }
+  // 没有凭据：这才是真的需要授权
+  assert.equal(deriveStatus({ ...base, hasCredentials: false }), SERVER_STATUS.needsAuth)
+  // 有凭据：不该再说「需要授权」，按连接的实际情况给出「已放弃重试」
+  assert.equal(deriveStatus({ ...base, hasCredentials: true }), SERVER_STATUS.gaveUp)
+  // 缺省也是「没有凭据」——不能让漏传参数变成「永远不提示授权」
+  assert.equal(deriveStatus(base), SERVER_STATUS.needsAuth)
+})

@@ -210,6 +210,27 @@ export function createOAuthFlow({ store, getSdk, makeProvider, allowInsecure, cu
     return true
   }
 
+  /**
+   * 这台服务器是不是「明文 token 端点」情形，以及例外有没有开。
+   *
+   * @returns `{ applicable, allowed, hasRefresh, tokenEndpoint }`。
+   *   `applicable` = 端点非 https 且非回环（SDK 会硬拒的那一类）。
+   */
+  const insecureGate = async (serverName, url) => {
+    const record = await store.read(serverName, url)
+    const tokenEndpoint = String(record?.discoveryState?.authorizationServerMetadata?.token_endpoint ?? '')
+    if (tokenEndpoint === '') return { applicable: false, allowed: false, hasRefresh: false, tokenEndpoint }
+    if (insecureTokenEndpoint(tokenEndpoint).insecure !== true) {
+      return { applicable: false, allowed: false, hasRefresh: false, tokenEndpoint }
+    }
+    return {
+      applicable: true,
+      allowed: allowInsecure?.(serverName) === true,
+      hasRefresh: String(record?.tokens?.refresh_token ?? '') !== '',
+      tokenEndpoint,
+    }
+  }
+
   const providerFor = (serverName, url) => {
     const cached = providers.get(serverName)
     if (cached !== undefined && cached.url === url) return cached
@@ -233,6 +254,84 @@ export function createOAuthFlow({ store, getSdk, makeProvider, allowInsecure, cu
     }
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return { ok: false, reason: FLOW_ERRORS.notHttp }
     return { ok: true, url: parsed }
+  }
+
+  /**
+   * 用 refresh_token 换一份新令牌。
+   *
+   * `refresh`（面板主动刷新、预刷新扫描）与 `prepareAuth`（transport 撞 401 之后）共用
+   * 同一份实现 —— 两条路径各写一遍必然漂移，而漂移出来的差异正是「刷新成功了但下一次
+   * 连接读不到」这类最难查的 bug。
+   */
+  const refreshTokens = async (serverName, url) => {
+  const target = assertHttpUrl(url)
+  if (target.ok !== true) return { ok: false, reason: target.reason, detail: '', text: flowReasonText(target.reason) }
+  const record = await store.read(serverName, target.url)
+  const refreshToken = String(record?.tokens?.refresh_token ?? '')
+  if (refreshToken === '') {
+    return { ok: false, reason: FLOW_ERRORS.notRefreshable, detail: '', text: flowReasonText(FLOW_ERRORS.notRefreshable) }
+  }
+  const metadata = record?.discoveryState?.authorizationServerMetadata
+  const tokenEndpoint = String(metadata?.token_endpoint ?? '')
+  const asUrl = String(record?.discoveryState?.authorizationServerUrl ?? '')
+  const clientId = String(record?.clientInformation?.client_id ?? '')
+  const resource = String(record?.resourceUrl ?? '')
+  const { provider, snapshot } = providerFor(serverName, target.url)
+
+  const gate = tokenEndpoint === '' ? { insecure: false } : insecureTokenEndpoint(tokenEndpoint)
+  if (gate.insecure === true) {
+    if (allowInsecure?.(serverName) !== true) {
+      return {
+        ok: false,
+        reason: FLOW_ERRORS.insecureNotAllowed,
+        detail: tokenEndpoint,
+        text: flowReasonText(FLOW_ERRORS.insecureNotAllowed),
+      }
+    }
+    const exchanged = await exchangeInsecureToken({
+      tokenEndpoint,
+      clientId,
+      log,
+      params: { grant_type: 'refresh_token', refresh_token: refreshToken, resource },
+    })
+    if (exchanged.ok !== true) {
+      return { ok: false, reason: FLOW_ERRORS.refreshFailed, detail: exchanged.detail, text: flowReasonText(FLOW_ERRORS.refreshFailed) }
+    }
+    try {
+      await provider.saveTokens({ ...exchanged.tokens, issuer: asUrl })
+    } catch (error) {
+      return { ok: false, reason: FLOW_ERRORS.refreshFailed, detail: String(error?.message ?? error), text: flowReasonText(FLOW_ERRORS.refreshFailed) }
+    }
+    const saved = await snapshot()
+    return { ok: true, reason: '', detail: '', text: '令牌已刷新', ...tokenStatus(saved) }
+  }
+
+  const sdkResult = getSdk()
+  if (sdkResult?.ok !== true) {
+    return {
+      ok: false,
+      reason: FLOW_ERRORS.noSdk,
+      detail: String(sdkResult?.detail ?? sdkResult?.reason ?? ''),
+      text: flowReasonText(FLOW_ERRORS.noSdk),
+    }
+  }
+  const { sdk } = sdkResult
+  if (typeof sdk.refreshAuthorization !== 'function') {
+    return { ok: false, reason: FLOW_ERRORS.noSdk, detail: 'SDK 没有导出 refreshAuthorization', text: flowReasonText(FLOW_ERRORS.noSdk) }
+  }
+  try {
+    const tokens = await sdk.refreshAuthorization(asUrl, {
+      metadata,
+      clientInformation: record?.clientInformation,
+      refreshToken,
+    })
+    await provider.saveTokens({ ...tokens, issuer: asUrl })
+    const saved = await snapshot()
+    return { ok: true, reason: '', detail: '', text: '令牌已刷新', ...tokenStatus(saved) }
+  } catch (error) {
+    log?.warn?.(`dsh-skills-mcp-manager: 刷新 ${serverName} 的令牌失败：${String(error?.message ?? error)}`)
+    return { ok: false, reason: FLOW_ERRORS.refreshFailed, detail: describeFlowError(error), text: flowReasonText(FLOW_ERRORS.refreshFailed) }
+  }
   }
 
   return {
@@ -276,6 +375,36 @@ export function createOAuthFlow({ store, getSdk, makeProvider, allowInsecure, cu
         }
       }
       const { sdk } = sdkResult
+      /**
+       * 明文端点必须先过这道门。
+       *
+       * SDK 的 `authInternal` 里有这一句：
+       *
+       *     if (tokens?.refresh_token && !forceReauthorization) {
+       *       try { newTokens = await refreshAuthorization(...) }
+       *       catch (error) { if (error instanceof InsecureTokenEndpointError) throw error }
+       *     }
+       *
+       * 也就是说：**只要存在 refresh_token 就一定会尝试刷新**（与是否过期无关），而刷新
+       * 走的 `executeTokenRequest` 里 TLS 检查是无条件的，且这个错误被原样上抛。所以
+       * 「已授权 + 明文端点」点重新授权必然炸在 refresh 上，而不是走到授权链接。
+       *
+       * 两条出路：
+       *   · 例外没开 → 直接给出可执行的说明（去开那个开关），而不是把 SDK 的英文原文
+       *     丢给用户；
+       *   · 例外开了 → 用 `forceReauthorization: true` 让 SDK **跳过**它自己的刷新，
+       *     直接走授权码流程。用户点的是「重新授权」，本来就该拿一次新的授权。
+       */
+      const gate = await insecureGate(serverName, target.url)
+      if (gate.applicable === true && gate.allowed !== true) {
+        return {
+          kind: 'error',
+          reason: FLOW_ERRORS.insecureNotAllowed,
+          detail: gate.tokenEndpoint,
+          text: flowReasonText(FLOW_ERRORS.insecureNotAllowed),
+        }
+      }
+
       let { provider, snapshot } = providerFor(serverName, url)
       /**
        * 缓存的 client 是否还绑在当前的回调地址上。
@@ -291,7 +420,11 @@ export function createOAuthFlow({ store, getSdk, makeProvider, allowInsecure, cu
       const boundRedirect = await dropStaleClientBinding({ serverName, url: target.url, forget })
       if (boundRedirect === true) ({ provider, snapshot } = providerFor(serverName, url))
       try {
-        const result = await sdk.auth(provider, { serverUrl: target.url })
+        const result = await sdk.auth(provider, {
+          serverUrl: target.url,
+          // 明文端点：跳过 SDK 内部那次必然抛错的刷新（见上面 gate 的注释）。
+          ...(gate.applicable === true ? { forceReauthorization: true } : {}),
+        })
         if (result === 'AUTHORIZED') {
           const record = await snapshot()
           // 内存实例里的缓存是「授权前」那份；丢掉它，下一次请求重新读盘才看得到新令牌。
@@ -437,76 +570,30 @@ export function createOAuthFlow({ store, getSdk, makeProvider, allowInsecure, cu
      * @param url - 该服务器的 MCP 地址（定位凭据记录用）。
      * @returns `{ ok, reason, detail, text, ...tokenStatus }`。永不抛错。
      */
-    refresh: async (serverName, url) => {
+    /**
+     * transport 在 401 上要用的「先自己刷新」判定。
+     *
+     * @returns `{ done: true }`（令牌已换好，直接重试）、`{ forceReauthorization: true }`
+     *   （换不了，让 SDK 跳过它自己那次必然抛错的刷新），或 `null`（安全端点，不干预）。
+     */
+    prepareAuth: async (serverName, url) => {
       const target = assertHttpUrl(url)
-      if (target.ok !== true) return { ok: false, reason: target.reason, detail: '', text: flowReasonText(target.reason) }
-      const record = await store.read(serverName, target.url)
-      const refreshToken = String(record?.tokens?.refresh_token ?? '')
-      if (refreshToken === '') {
-        return { ok: false, reason: FLOW_ERRORS.notRefreshable, detail: '', text: flowReasonText(FLOW_ERRORS.notRefreshable) }
-      }
-      const metadata = record?.discoveryState?.authorizationServerMetadata
-      const tokenEndpoint = String(metadata?.token_endpoint ?? '')
-      const asUrl = String(record?.discoveryState?.authorizationServerUrl ?? '')
-      const clientId = String(record?.clientInformation?.client_id ?? '')
-      const resource = String(record?.resourceUrl ?? '')
-      const { provider, snapshot } = providerFor(serverName, target.url)
-
-      const gate = tokenEndpoint === '' ? { insecure: false } : insecureTokenEndpoint(tokenEndpoint)
-      if (gate.insecure === true) {
-        if (allowInsecure?.(serverName) !== true) {
-          return {
-            ok: false,
-            reason: FLOW_ERRORS.insecureNotAllowed,
-            detail: tokenEndpoint,
-            text: flowReasonText(FLOW_ERRORS.insecureNotAllowed),
-          }
-        }
-        const exchanged = await exchangeInsecureToken({
-          tokenEndpoint,
-          clientId,
-          log,
-          params: { grant_type: 'refresh_token', refresh_token: refreshToken, resource },
-        })
-        if (exchanged.ok !== true) {
-          return { ok: false, reason: FLOW_ERRORS.refreshFailed, detail: exchanged.detail, text: flowReasonText(FLOW_ERRORS.refreshFailed) }
-        }
-        try {
-          await provider.saveTokens({ ...exchanged.tokens, issuer: asUrl })
-        } catch (error) {
-          return { ok: false, reason: FLOW_ERRORS.refreshFailed, detail: String(error?.message ?? error), text: flowReasonText(FLOW_ERRORS.refreshFailed) }
-        }
-        const saved = await snapshot()
-        return { ok: true, reason: '', detail: '', text: '令牌已刷新', ...tokenStatus(saved) }
-      }
-
-      const sdkResult = getSdk()
-      if (sdkResult?.ok !== true) {
-        return {
-          ok: false,
-          reason: FLOW_ERRORS.noSdk,
-          detail: String(sdkResult?.detail ?? sdkResult?.reason ?? ''),
-          text: flowReasonText(FLOW_ERRORS.noSdk),
-        }
-      }
-      const { sdk } = sdkResult
-      if (typeof sdk.refreshAuthorization !== 'function') {
-        return { ok: false, reason: FLOW_ERRORS.noSdk, detail: 'SDK 没有导出 refreshAuthorization', text: flowReasonText(FLOW_ERRORS.noSdk) }
-      }
-      try {
-        const tokens = await sdk.refreshAuthorization(asUrl, {
-          metadata,
-          clientInformation: record?.clientInformation,
-          refreshToken,
-        })
-        await provider.saveTokens({ ...tokens, issuer: asUrl })
-        const saved = await snapshot()
-        return { ok: true, reason: '', detail: '', text: '令牌已刷新', ...tokenStatus(saved) }
-      } catch (error) {
-        log?.warn?.(`dsh-skills-mcp-manager: 刷新 ${serverName} 的令牌失败：${String(error?.message ?? error)}`)
-        return { ok: false, reason: FLOW_ERRORS.refreshFailed, detail: describeFlowError(error), text: flowReasonText(FLOW_ERRORS.refreshFailed) }
-      }
+      if (target.ok !== true) return null
+      const gate = await insecureGate(serverName, target.url)
+      if (gate.applicable !== true) return null
+      // 例外没开：刷新同样会被拒，交给 complete/begin 去给出可执行的说明。
+      if (gate.allowed !== true) return { forceReauthorization: true }
+      // 没有 refresh_token：只能走一次新的授权。
+      if (gate.hasRefresh !== true) return { forceReauthorization: true }
+      // 传**原始字符串**：`assertHttpUrl` 返回的 `url` 是 URL 对象，而 refreshTokens 自己
+      // 也做一次校验（要求字符串），传对象会得到 server-has-no-url。
+      const refreshed = await refreshTokens(serverName, url)
+      if (refreshed.ok === true) return { done: true }
+      log?.warn?.(`dsh-skills-mcp-manager: ${serverName} 在 401 后自行刷新失败（${refreshed.reason}），将走一次新的授权`)
+      return { forceReauthorization: true }
     },
+
+    refresh: (serverName, url) => refreshTokens(serverName, url),
 
     logout: async (serverName) => {
       forget(serverName)

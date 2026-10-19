@@ -80,7 +80,7 @@ export const PATCH_REASONS = Object.freeze({
  * （provider 的 `redirectToAuthorization` 已经记下），然后抛一个可辨识的错误让
  * 客户端停止重试 —— 继续重试只会把 10 次预算耗尽，然后显示「已放弃重试」。
  */
-export function makeAuthProvider({ sdk, oauthProvider, log, serverName }) {
+export function makeAuthProvider({ sdk, oauthProvider, log, serverName, prepareAuth }) {
   const { auth, extractWWWAuthenticateParams } = sdk
   return {
     async token() {
@@ -89,10 +89,26 @@ export function makeAuthProvider({ sdk, oauthProvider, log, serverName }) {
     },
     async onUnauthorized(ctx) {
       const { resourceMetadataUrl, scope } = extractWWWAuthenticateParams(ctx.response)
+      /**
+       * 明文端点需要先自己换一次令牌。
+       *
+       * `auth()` 在存在 refresh_token 时**无条件**走 SDK 的刷新，而那一处的 TLS 检查会
+       * 直接抛 InsecureTokenEndpointError 并且**不吞掉**。对 transport 这条路径来说刷新
+       * 才是对的动作（用户不该因为令牌过期被弹一次登录），所以让 flow 先用自己的实现
+       * 换新令牌；成功了这次重试就会带上有效令牌。
+       *
+       * `prepareAuth` 返回：
+       *   · `{ done: true }`            —— 已经换好令牌，直接返回让连接重试；
+       *   · `{ forceReauthorization }` —— 换不了，跳过 SDK 刷新去走授权码流程；
+       *   · `null` / 未提供             —— 安全端点，维持 SDK 原有行为。
+       */
+      const plan = typeof prepareAuth === 'function' ? await prepareAuth() : null
+      if (plan?.done === true) return
       const result = await auth(oauthProvider, {
         serverUrl: ctx.serverUrl,
         resourceMetadataUrl,
         scope,
+        ...(plan?.forceReauthorization === true ? { forceReauthorization: true } : {}),
         fetchFn: ctx.fetchFn,
       })
       if (result === 'AUTHORIZED') return
