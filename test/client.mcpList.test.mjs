@@ -282,3 +282,44 @@ test('MCP：OAuth 不可用时菜单里**没有**「授权」（假按钮比没�
     panel.restore()
   }
 })
+
+test('MCP：已连接且凭据有效时，菜单里**不**出现「重新授权」', { skip: skipWithoutBundle() }, async () => {
+  /**
+   * 「重新授权」不是永远有用的：已连接 + 凭据有效就证明这套凭据能用，此时把「替换凭据」
+   * 摆在手边只会让菜单变长，而它是个会动凭据的动作。
+   *
+   * 但它也没有因此失去入口 —— 服务器一旦没连上（或还没凭据），它就该回来。
+   */
+  const rowOf = {
+    entryId: 'include:mcp-gitnexus', serverName: 'gitnexus', scope: 'global',
+    transport: 'streamable-http', target: 'http://sz-00575123-01/mcp/coding',
+    command: '', args: '', env: '', headersText: '', failOnStartupError: false,
+    reconnectInitialDelayMs: '', reconnectMaxDelayMs: '', reconnectMaxAttempts: '',
+    toolCallTimeoutMs: '', enabled: true, phase: '',
+  }
+  const doc = (status) => ({
+    profileServers: [rowOf],
+    oauthState: { ready: true, reason: '', detail: '', sdkVersion: '2.2.0', redirectUri: 'http://127.0.0.1:1/cb' },
+    oauthServers: { gitnexus: { present: true, refreshable: true, waiting: false, authorizeUrl: '', expiresAt: '', expired: false, at: '' } },
+    serverStatus: [{ serverName: 'gitnexus', tier: 'global', scope: '', status, detail: '' }],
+  })
+
+  const connected = await bootPanel(emptyDoc(doc('connected')))
+  try {
+    connected.openMenu(0)
+    const labels = connected.findAll((node) => String(node.props.className ?? '') === 'smp-menuItem').map((node) => textOf(node).trim())
+    assert.equal(labels.includes('重新授权'), false, `已连接时不该出现「重新授权」：${JSON.stringify(labels)}`)
+  } finally {
+    connected.restore()
+  }
+
+  // 有凭据但没连上：这时它才是排障入口，必须回来
+  const broken = await bootPanel(emptyDoc(doc('gave-up')))
+  try {
+    broken.openMenu(0)
+    const labels = broken.findAll((node) => String(node.props.className ?? '') === 'smp-menuItem').map((node) => textOf(node).trim())
+    assert.ok(labels.includes('重新授权'), `没连上时「重新授权」必须可用：${JSON.stringify(labels)}`)
+  } finally {
+    broken.restore()
+  }
+})
