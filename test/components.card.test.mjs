@@ -84,21 +84,32 @@ test('rowDetailPairs：http 行只给地址，不出现命令/参数/环境变�
   const map = Object.fromEntries(pairs)
   assert.equal(map['行 id'], 'mcp-context7')
   assert.equal(map['地址'], 'https://mcp.context7.com/mcp')
-  assert.equal(map['状态'], '已启用')
-  // 「范围」改成「作用域」并带上真实值：两档统一成一个列表之后，卡片本身必须说清
-  // 这台服务器对谁可用（全局 / 某个工作区），否则用户无从分辨。
-  assert.equal(map['作用域'], '全局（所有工作区）')
+  // 没有「状态」行：右侧开关就是启停状态的唯一真源，再用文字写一遍会让两处漂移
+  // （开关是乐观更新的，文字来自投影）。
+  assert.ok(!('状态' in map), '启停已由开关表达，不该再有「状态」行')
+  // 「作用域」带真实值：两档统一成一个列表之后，卡片必须说清这台服务器对谁可用。
+  // 键已经是「作用域」，值里不再重复「工作区」——否则这一列读成「作用域 | 工作区：…」。
+  assert.equal(map['作用域'], '全局')
   // 无关字段整条省略，而不是显示占位符
   assert.ok(!('命令' in map), 'http 行不该出现「命令」')
   assert.ok(!('参数' in map), 'http 行不该出现「参数」')
   assert.ok(!('环境变量' in map), 'http 行不该出现「环境变量」')
 })
 
-test('rowDetailPairs：带 scope 的行把作用域显示为工作区路径', () => {
-  const map = Object.fromEntries(rowDetailPairs({
+test('rowDetailPairs：作用域只给路径，不重复「工作区」三个字', () => {
+  /**
+   * 键已经写了「作用域」，值再带「工作区：」前缀等于把同一件事说两遍，而且把真正要看
+   * 的路径推向右边。全局档同理只写「全局」。
+   */
+  const project = Object.fromEntries(rowDetailPairs({
     entryId: 'mcp-gitnexus', transport: 'streamable-http', target: 'http://x/mcp', scope: '/p/tcl', enabled: true,
   }))
-  assert.equal(map['作用域'], '工作区：/p/tcl')
+  assert.equal(project['作用域'], '/p/tcl')
+  assert.equal(project['作用域'].includes('工作区'), false, '值里不该再出现「工作区」')
+  const global = Object.fromEntries(rowDetailPairs({
+    entryId: 'mcp-x', transport: 'streamable-http', target: 'http://y/mcp',
+  }))
+  assert.equal(global['作用域'], '全局')
 })
 
 test('rowDetailPairs：http 行有请求头才显示，且已打码', () => {
@@ -118,7 +129,8 @@ test('rowDetailPairs：stdio 行只给命令，不出现地址', () => {
   assert.equal(map['命令'], 'npx')
   assert.equal(map['参数'], '-y pkg')
   assert.equal(map['环境变量'], 'TOKEN=***')
-  assert.equal(map['状态'], '已停用')
+  // 停用状态不再出现在详情里：开关（在卡片右侧）才是它的唯一真源。
+  assert.ok(!('状态' in map), '停用状态由开关表达，不该再有「状态」行')
   assert.ok(!('地址' in map), 'stdio 行不该出现「地址」')
   assert.ok(!('请求头' in map), 'stdio 行不该出现「请求头」')
 })

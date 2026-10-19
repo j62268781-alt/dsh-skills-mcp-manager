@@ -65,12 +65,22 @@ test('MCP：卡片自己说明作用域（全局 / 工作区路径）', { skip: 
 
     // 展开全局那张
     panel.click(toggles[0])
-    assert.ok(texts(panel).some((x) => x.includes('全局（所有工作区）')), '全局卡片没说明作用域')
+    // 值只写「全局」：键已经是「作用域」，值里再带「（所有工作区）」是同义反复。
+    assert.ok(texts(panel).some((x) => x === '全局'), '全局卡片没说明作用域')
 
     // 再展开项目那张（点第一张会收起它）
     const toggles2 = panel.findAll((node) => String(node.props?.className ?? '').includes('smp-cardToggle'))
     panel.click(toggles2[1])
-    assert.ok(texts(panel).some((x) => x.includes('工作区：/p/tcl')), '项目卡片没说明作用域')
+    assert.ok(texts(panel).some((x) => x === '/p/tcl'), '项目卡片没说明作用域（应直接给路径）')
+    /**
+     * 只钉「详情值里」不再出现「工作区」——不能对整个面板断言，因为导入卡片的
+     * 「选工作区」、表单里的「作用域（哪个工作区可用）」都是**解释性**文案，那里
+     * 说清「工作区」是必要的，删掉反而更难懂。
+     */
+    const detailValues = panel.findAll((node) => String(node.props.className ?? '') === 'smp-detailsValue')
+    for (const node of detailValues) {
+      assert.equal(textOf(node).includes('工作区'), false, `详情值里不该出现「工作区」：${textOf(node)}`)
+    }
   } finally {
     panel.restore()
   }

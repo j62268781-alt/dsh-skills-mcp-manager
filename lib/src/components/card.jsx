@@ -113,7 +113,8 @@ export function rowDetailPairs(row = {}) {
     // agent sees it; an absolute path means this plugin mounts it for the agent whose
     // working directory falls under it. One row, one list — so the card states which.
     ['作用域', scopeLabelOf(row.scope)],
-    ['状态', row.enabled === false ? '已停用' : '已启用'],
+    // 没有「状态」行：卡片右侧的开关就是启用状态的唯一真源。再写一行字等于同一件事有
+    // 两个出处，而它们会漂移（开关是乐观更新的，文字来自投影，中间必然有一段时间不一致）。
   ]
 }
 
@@ -121,11 +122,15 @@ export function rowDetailPairs(row = {}) {
  * A row's scope as the card should read it.
  *
  * `global` (or a missing value) is the every-agent case; anything else is a project path.
+ *
+ * The key already says 「作用域」, so the value must not repeat the word 「工作区」 — repeating
+ * the label inside its own value makes the column read as `作用域 | 工作区：…`, i.e. the same
+ * fact twice, and pushes the actual path further right where it is harder to scan.
  */
 export function scopeLabelOf(scope) {
   const value = typeof scope === 'string' ? scope : ''
-  if (value === '' || value === 'global') return '全局（所有工作区）'
-  return `工作区：${value}`
+  if (value === '' || value === 'global') return '全局'
+  return value
 }
 
 /** Detail pairs for a project-level entry (managed by the panel itself). */
@@ -142,7 +147,7 @@ export function entryDetailPairs(server = {}, scopeLabel = '') {
       headers: headersText(server.headers),
     }),
     ['范围', scopeLabel !== '' ? scopeLabel : '项目级'],
-    ['状态', server.enabled === false ? '已停用' : '已启用'],
+    // 同上：项目条目也有自己的开关，不再用文字重复一遍启停状态。
   ]
 }
 
