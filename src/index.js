@@ -804,12 +804,26 @@ export function apply(ctx, config) {
    * the server rejects.
    */
   const oauthRedirectUri = () => {
+    // `ctx.get('webServer')`, NOT `ctx.webServer`.
+    //
+    // This plugin's `inject` list is `['loader']`, so a bare `ctx.webServer` is always
+    // undefined at this level — the service is only reachable through `ctx.get()`, or inside
+    // one of the `ctx.inject([...])` callbacks. Reading `.webServer` directly returned '' and
+    // the projection published an empty `redirectUri`, which makes the SDK treat the flow as
+    // **non-interactive** (`redirectUrl === undefined` → it skips the whole authorization-code
+    // branch). That failure is silent: `ready` still says true and the button still appears.
+    //
+    // Re-resolved on every call rather than captured once, for the same reason
+    // `src/mcp/probe.js` does it: the profile recreates services on recomposition, and a
+    // captured instance would go stale while still looking installed.
     try {
-      const origin = ctx.webServer?.getOrigin?.()
+      const service = ctx.get?.('webServer') ?? null
+      if (service === null || service === undefined) return ''
+      const origin = service.getOrigin?.()
       if (typeof origin !== 'string' || origin === '') return ''
       return `${origin}${CALLBACK_PATH}`
     } catch {
-      // `getOrigin()` throws before the listener binds a port.
+      // `getOrigin()` throws before the listener binds a port — expected during startup.
       return ''
     }
   }

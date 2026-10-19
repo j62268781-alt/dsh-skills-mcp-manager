@@ -375,6 +375,30 @@ try {
     if (res.statusCode !== 200) throw new Error(`runtime HTTP ${res.statusCode}`)
     return JSON.parse(body)
   }
+  /**
+   * The `webServer` service, shared by `ctx.get('webServer')` and `ctx.inject([...])`.
+   *
+   * Both are the *same* service in the real runtime, so the stub must expose one object the
+   * same two ways. Exposing it only through `inject` was not the real shape, and that mismatch
+   * hid a real bug: `oauthRedirectUri()` reads it via `ctx.get('webServer')` (this plugin only
+   * injects `loader`), so it published `redirectUri: ''` while `ready` still said true — and an
+   * empty `redirect_url` makes the SDK treat the flow as non-interactive and silently skip the
+   * authorization-code branch entirely.
+   *
+   * `getOrigin()` must exist for the same reason: the callback URL is built from it. The real
+   * service throws before the listener binds a port, so this stub answers with a bound origin.
+   */
+  const webServer = {
+    getOrigin: () => 'http://127.0.0.1:3080',
+    register: (route) => {
+      if (route.path === RUNTIME_PATH) runtimeRoute = route
+      if (route.path === ROWS_PATH) rowsRoute = route
+      if (route.path === SKILLS_PATH) skillsRoute = route
+      if (route.path === OAUTH_PATH) oauthRoute = route
+      if (route.path === CALLBACK_PATH) oauthCallbackRoute = route
+      return noop
+    },
+  }
   const ctx = {
     logger: { info: noop, warn: noop, error: (...args) => problems.push('host logger.error: ' + args.map(String).join(' ')) },
     get: (name) => {
@@ -382,6 +406,7 @@ try {
       if (name === 'tools') return toolsService
       if (name === 'mcpResources') return mcpResourcesService
       if (name === 'agents') return agentsService
+      if (name === 'webServer') return webServer
       return undefined
     },
     loader: {
@@ -401,16 +426,7 @@ try {
       // The real webServer keeps one route per (kind, path), so the stub must too: the Host now
       // registers **two** (`/runtime` and `/rows`), and a single slot would let the second
       // overwrite the first — which is what made the smoke run fail with "runtime HTTP 405".
-      webServer: {
-        register: (route) => {
-          if (route.path === RUNTIME_PATH) runtimeRoute = route
-          if (route.path === ROWS_PATH) rowsRoute = route
-          if (route.path === SKILLS_PATH) skillsRoute = route
-          if (route.path === OAUTH_PATH) oauthRoute = route
-          if (route.path === CALLBACK_PATH) oauthCallbackRoute = route
-          return noop
-        },
-      },
+      webServer,
       connection: { requestRejection: () => undefined },
       logger: { warn: noop },
       effect: (fn) => { fn(); return noop },
@@ -568,6 +584,16 @@ try {
   note(typeof live.oauthState?.ready === 'boolean', 'OAuth 支持状态有明确的 ready 布尔值')
   if (live.oauthState?.ready === false) {
     note(String(live.oauthState?.detail ?? '') !== '', 'OAuth 不可用时给出了原因，而不是静默关闭这项能力')
+  }
+  // The `redirect_uri` must be a real absolute URL ending at the callback route. An empty one
+  // is the failure mode that hides best: `oauthState.ready` still says true, the button still
+  // renders, and the SDK silently takes the non-interactive branch because `redirectUrl` is
+  // undefined. (This actually shipped once — `ctx.webServer` instead of `ctx.get('webServer')`.)
+  const redirectUri = String(live.oauthState?.redirectUri ?? '')
+  if (live.oauthState?.ready === true) {
+    note(redirectUri !== '', 'OAuth 已就绪时 redirectUri 不能为空（空值会让 SDK 走非交互分支）')
+    note(redirectUri.endsWith(CALLBACK_PATH), `redirectUri 指向回调路由（收到 ${redirectUri}）`)
+    note(/^https?:\/\//.test(redirectUri), `redirectUri 是绝对 URL（收到 ${redirectUri}）`)
   }
   note(typeof live.oauthServers === 'object' && live.oauthServers !== null, '逐服务器的授权状态已发布')
   note(!JSON.stringify(live.oauthServers ?? {}).includes('access_token'), '授权状态投影里不含令牌本体')
