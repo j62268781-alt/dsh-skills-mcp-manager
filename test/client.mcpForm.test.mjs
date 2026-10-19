@@ -344,3 +344,77 @@ test('MCP 表单：打开明文 token 端点会写进行操作', { skip: skipWit
     panel.restore()
   }
 })
+
+test('新增服务器后立刻出现第三张卡片（不等投影回传）', { skip: skipWithoutBundle() }, async () => {
+  /**
+   * 真机反馈「新增了但页面还是 2 个」。Host 侧实测：HTTP 写入 5ms 完成，但投影要等
+   * Loader 重载 patch（约 4 秒）才会出现新行 —— 这中间面板必须有东西可看。
+   *
+   * 所以这条钉住：**点保存后，卡片立刻就在**，而不是靠投影回传。乐观卡片一直留到真实行
+   * 落地（`hasSettled` 对 add 的判据是「投影里出现了」），所以它不会先出现再消失。
+   */
+  const panel = await bootPanel(emptyDoc({
+    profileServers: [
+      { entryId: 'include:mcp-context7', serverName: 'context7', scope: 'global', transport: 'streamable-http', target: 'https://mcp.context7.com/mcp', command: '', args: '', env: '', headersText: '', failOnStartupError: false, reconnectInitialDelayMs: '', reconnectMaxDelayMs: '', reconnectMaxAttempts: '', toolCallTimeoutMs: '', enabled: true, phase: '' },
+    ],
+    rowOpsReady: true, reconnectReady: true,
+  }))
+  try {
+    const before = panel.findAll((node) => String(node.props.className ?? '').includes('smp-cardToggle')).length
+    openAddForm(panel)
+    panel.change(panel.byPlaceholder('例如 test，最多 32 字符'), 'gitnexus')
+    panel.change(panel.byPlaceholder('https://…/mcp'), 'http://sz-00575123-01/mcp/coding')
+    panel.click(panel.byText('保存'))
+    await panel.settle()
+
+    const op = (panel.doc.rowCommands ?? [])[0]
+    assert.ok(op, '没有把命令发给 Host')
+    assert.equal(op.op, 'add')
+
+    const after = panel.findAll((node) => String(node.props.className ?? '').includes('smp-cardToggle')).length
+    assert.equal(after, before + 1, `保存后应立刻多出一张卡片（投影还没回传）：${before} → ${after}`)
+    const text = panel.text()
+    assert.match(text, /gitnexus/, '乐观卡片要显示用户刚填的名称')
+  } finally {
+    panel.restore()
+  }
+})
+
+test('保存遇到 500 时必须报失败，不能当成「换旧通道」', { skip: skipWithoutBundle() }, async () => {
+  /**
+   * 原来写的是 `if (!response.ok) throw ...`，而那个 throw 被外层 catch 接住、落进
+   * `queue()` 并返回 `{ ok: true, queued: true }` —— Host 写文件真的失败时，面板显示的是
+   * 「已排队」。乐观卡片就留在那里等一个永远不会来的投影，看起来就是「新增了但没反应」。
+   *
+   * 只有 404/405/401/403 才意味着「这条路没通」；5xx / 400 是这次命令被拒了，必须让用户看见。
+   */
+  // `fetch` 是 bootPanel 的**第二个参数**（options），不是文档字段。
+  const panel = await bootPanel(emptyDoc({ profileServers: [], rowOpsReady: true, reconnectReady: true }), {
+    fetch: async (url) => {
+      if (String(url).endsWith('/rows')) {
+        return {
+          ok: false, status: 500,
+          json: async () => ({ ok: false, reason: 'patch 被占用，写入失败' }),
+        }
+      }
+      return { ok: true, status: 200, json: async () => ({ serverTools: [], serverStatus: [], servers: [], serverToolsError: { reason: '', detail: '' } }) }
+    },
+  })
+  try {
+    openAddForm(panel)
+    panel.change(panel.byPlaceholder('例如 test，最多 32 字符'), 'broken')
+    panel.change(panel.byPlaceholder('https://…/mcp'), 'https://x.invalid/mcp')
+    panel.click(panel.byText('保存'))
+    await panel.settle()
+
+    // 不该退到队列通道（那会写 rowOps）
+    assert.deepEqual(panel.doc.rowOps ?? [], [], `500 不该被当成「换旧通道」：${JSON.stringify(panel.doc.rowOps)}`)
+    // 失败原因必须显示出来。**只查元素文本**：`panel.text()` 连内联样式表一起返回，
+    // 拿它做断言永远不会失败（本仓库已经踩过一次）。
+    const errorNode = panel.find((node) => String(node.props.className ?? '') === 'smp-error')
+    assert.ok(errorNode, '必须显示一条错误')
+    assert.match(textOf(errorNode), /patch 被占用/, '必须把 Host 的失败原因显示出来')
+  } finally {
+    panel.restore()
+  }
+})

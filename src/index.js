@@ -1736,7 +1736,17 @@ export function apply(ctx, config) {
     projection.toolsError = inventory.ok ? null : `${serverToolsError.reason}: ${serverToolsError.detail}`
     const toolCounts = new Map(serverTools.map((entry) => [entry.serverName, entry.tools.length]))
     const serverStatus = computeServerStatus({ rows: plain, entries: readServers(), toolCounts })
-    return { serverTools, serverToolsError, serverStatus }
+    /**
+     * The row list travels with the runtime answer too.
+     *
+     * 面板原来只从 settings 文档里读 `profileServers`。那条路上有一层我们无法观察的缓存
+     * （`ConfigForm` → settings describe 镜像），真机上出现过「Host 已经写好了投影，面板
+     * 却要重开设置页才看见」—— 而面板的乐观卡片 15 秒后会超时消失，于是列表退回旧值。
+     *
+     * `/runtime` 是**每次请求现算**的普通 HTTP 应答，没有中间缓存；面板本来就在轮询它。
+     * 把行数据也放进来，面板就有一条不依赖 settings 镜像的收敛路径。
+     */
+    return { serverTools, serverToolsError, serverStatus, servers: plain }
   }
   // Optional injection keeps non-web profiles usable; never fall back to writing tools.
   ctx.inject(['webServer', 'connection'], (inner) => registerRuntimeRoute(inner, readRuntime))
@@ -2025,14 +2035,32 @@ export function apply(ctx, config) {
           try { tick(); publish() } catch (error) { console.error('[dsh-skills-mcp-manager] post-drain refresh failed:', error) }
           applying = false
           beat({ ...lastBeat, at: new Date().toISOString(), rowOps })
-          // The Loader hot-reloads the patch a moment after the write; republish
-          // then, so the panel list reflects the change without a page switch.
-          setTimeout(() => { try { publish() } catch { /* projection retries on the tick */ } }, 800)
+          // The Loader hot-reloads the patch a moment after the write; keep republishing
+          // until it has, so the panel list reflects the change without a page switch.
+          republishSoon()
         })
     }
     drain()
     const opTimer = setInterval(drain, 500)
     inner.effect(() => () => clearInterval(opTimer))
+
+    /**
+     * 一行改动之后，追着发布几次投影，直到 Loader 把新 patch 读进来。
+     *
+     * 为什么单次不够：`publish()` 的行数据来自 **Loader 的 entries**，而 Loader 走文件监听
+     * 重载 patch，实测要 4 秒左右（真机时间线：11:05:25.993 写入完成 → 11:05:32.007 才
+     * 投影出第 3 行）。写完之后立刻 publish 一次，读到的仍是旧的 2 行，`key` 没变于是
+     * **什么都不写**；面板就只能等下一个 5 秒定时器，最坏 6 秒才看到新行。
+     *
+     * `publish()` 自己按 `key` 去重，所以多调几次的代价只是几次字符串比较 —— 一旦投影
+     * 真的变了就立刻写出去，之后的重试全部空转。这比「把定时器改成 1 秒」好：那是空转，
+     * 这是按需。
+     */
+    const republishSoon = () => {
+      for (const delay of [300, 800, 1500, 2500, 4000]) {
+        setTimeout(() => { try { publish() } catch { /* 下一次重试，或 5 秒定时器兜底 */ } }, delay)
+      }
+    }
 
     /**
      * Row commands over HTTP — the short path, beside the queue above.
@@ -2058,6 +2086,8 @@ export function apply(ctx, config) {
         try { tick(); publish() } catch (error) {
           routeCtx.logger.warn('dsh-skills-mcp-manager: post-command refresh failed: %s', String(error?.message ?? error))
         }
+        // 第一次 publish 多半还读不到新行（Loader 尚未重载），继续追几次。
+        republishSoon()
         return { ok: true, reason: '' }
       },
     }))

@@ -190,6 +190,11 @@ export async function bootPanel(doc = emptyDoc(), options = {}) {
       json: async () => ({
         serverTools: doc.serverTools ?? [], serverStatus: doc.serverStatus ?? [],
         serverToolsError: doc.serverToolsError ?? { reason: '', detail: '' },
+        // Mirrors the real Host: `/runtime` carries the row list so the panel has a path
+        // that does not depend on the settings document.
+        // `runtimeServers` lets a test diverge the two sources on purpose (that is
+        // exactly the settings-document staleness this field exists to route around).
+        servers: doc.runtimeServers ?? doc.profileServers ?? [],
       }),
     }
   })

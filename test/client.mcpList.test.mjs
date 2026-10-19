@@ -323,3 +323,60 @@ test('MCP：已连接且凭据有效时，菜单里**不**出现「重新授权�
     broken.restore()
   }
 })
+
+test('MCP 列表以 /runtime 为准：settings 文档滞后时仍然显示新行', { skip: skipWithoutBundle() }, async () => {
+  /**
+   * 真机问题：Host 已经写好投影，面板却要**重开设置页**才看见新服务器。
+   *
+   * 根因在 settings 文档那条路上的镜像缓存（`ConfigForm` → settings describe 镜像），
+   * 那是框架层、我们观察不到。所以列表改以 `/runtime` 为准 —— 它是每次请求现算的普通
+   * HTTP 应答，没有中间缓存，面板本来就在轮询它。
+   *
+   * 这条模拟两边不一致：settings 文档还是旧的两条，`/runtime` 已经是三条。
+   */
+  const row = (name, scope = 'global') => ({
+    entryId: `include:mcp-${name}`, serverName: name, scope,
+    transport: 'streamable-http', target: `https://${name}.invalid/mcp`,
+    command: '', args: '', env: '', headersText: '', failOnStartupError: false,
+    reconnectInitialDelayMs: '', reconnectMaxDelayMs: '', reconnectMaxAttempts: '',
+    toolCallTimeoutMs: '', enabled: true, phase: 'active',
+  })
+  const panel = await bootPanel(emptyDoc({
+    // settings 文档：滞后的旧值
+    profileServers: [row('context7'), row('deepwiki')],
+    // /runtime：Host 现算的真相
+    runtimeServers: [row('context7'), row('deepwiki'), row('gitnexus')],
+    rowOpsReady: true, reconnectReady: true,
+  }))
+  try {
+    // `smp-cardIdentity` 也用在「导入 MCP」那张卡上，所以按服务器名做前缀匹配。
+    const names = panel.findAll((node) => String(node.props.className ?? '') === 'smp-cardIdentity')
+      .map((node) => textOf(node).trim())
+      .filter((text) => text !== '导入 MCP')
+    assert.equal(names.length, 3, `列表应以 /runtime 为准显示 3 台：${JSON.stringify(names)}`)
+    assert.ok(names.some((text) => text.startsWith('gitnexus')), `新加的那台必须出现：${JSON.stringify(names)}`)
+  } finally {
+    panel.restore()
+  }
+})
+
+test('MCP 列表：老 Host 的 /runtime 不带 servers 时回落到 settings 投影', { skip: skipWithoutBundle() }, async () => {
+  // 两条路都要在：新版 Host 走 runtime，旧版 Host（没有这个字段）仍然能用。
+  const panel = await bootPanel(emptyDoc({
+    profileServers: [{
+      entryId: 'include:mcp-context7', serverName: 'context7', scope: 'global',
+      transport: 'streamable-http', target: 'https://mcp.context7.com/mcp',
+      command: '', args: '', env: '', headersText: '', failOnStartupError: false,
+      reconnectInitialDelayMs: '', reconnectMaxDelayMs: '', reconnectMaxAttempts: '',
+      toolCallTimeoutMs: '', enabled: true, phase: 'active',
+    }],
+    runtimeServers: [], rowOpsReady: true, reconnectReady: true,
+  }))
+  try {
+    const names = panel.findAll((node) => String(node.props.className ?? '') === 'smp-cardIdentity')
+      .map((node) => textOf(node).trim())
+    assert.ok(names.some((text) => text.startsWith('context7')), `没有 servers 字段时要回落到投影：${JSON.stringify(names)}`)
+  } finally {
+    panel.restore()
+  }
+})
