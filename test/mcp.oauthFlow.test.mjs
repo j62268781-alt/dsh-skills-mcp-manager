@@ -528,3 +528,127 @@ test('escapeHtml：服务器名与错误文本不能注入页面', () => {
   assert.equal(escapeHtml('a & b'), 'a &amp; b')
   assert.equal(escapeHtml(`"'`), '&quot;&#39;')
 })
+
+test('refresh：没有 refresh_token 时如实说「需要重新授权」', async (t) => {
+  // 不能拿一个空 refresh_token 去请求 —— 那会换来服务器的 invalid_grant，然后把
+  // 「这份凭据本来就不支持刷新」说成「服务器拒绝了刷新」，指错方向。
+  const home = await tempHome(t)
+  const store = createOAuthStore({ dshHome: home })
+  const flow = createOAuthFlow({
+    store,
+    getSdk: () => ({ ok: true, sdk: fakeSdk().sdk }),
+    makeProvider: (serverName, url) => createOAuthProvider({ store, serverName, url, redirectUri: 'http://127.0.0.1:1/cb', log: noopLog }),
+    allowInsecure: () => true,
+    log: noopLog,
+  })
+  await store.update('gitnexus', 'http://sz-00575123-01/mcp/coding', (record) => {
+    record.tokens = { access_token: 'a', token_type: 'Bearer' }
+  })
+  const result = await flow.refresh('gitnexus', 'http://sz-00575123-01/mcp/coding')
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, FLOW_ERRORS.notRefreshable)
+  assert.match(result.text, /重新授权/)
+})
+
+test('refresh：明文端点未开例外时拒绝，并指出是哪个开关', async (t) => {
+  const home = await tempHome(t)
+  const store = createOAuthStore({ dshHome: home })
+  const flow = createOAuthFlow({
+    store,
+    getSdk: () => ({ ok: true, sdk: fakeSdk().sdk }),
+    makeProvider: (serverName, url) => createOAuthProvider({ store, serverName, url, redirectUri: 'http://127.0.0.1:1/cb', log: noopLog }),
+    allowInsecure: () => false,
+    log: noopLog,
+  })
+  await store.update('gitnexus', 'http://sz-00575123-01/mcp/coding', (record) => {
+    record.tokens = { access_token: 'a', token_type: 'Bearer', refresh_token: 'r' }
+    record.discoveryState = {
+      authorizationServerUrl: 'http://sz-00575123-01',
+      authorizationServerMetadata: { issuer: 'http://sz-00575123-01', token_endpoint: 'http://sz-00575123-01/oauth/token' },
+    }
+    record.clientInformation = { client_id: 'cid' }
+  })
+  const result = await flow.refresh('gitnexus', 'http://sz-00575123-01/mcp/coding')
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, FLOW_ERRORS.insecureNotAllowed)
+  assert.match(result.text, /允许明文 token 端点/)
+})
+
+test('refresh：明文端点开了例外就换新令牌并落盘', async (t) => {
+  /**
+   * 这条覆盖「到期前主动刷新」真正会走的那段：不是 SDK 的编排，而是我们自己发的那个
+   * refresh_token 表单。落盘必须走 provider.saveTokens —— 两条路径写出来的凭据语义
+   * 一致，才不会出现「刷新成功了但下一次连接读不到」。
+   */
+  const home = await tempHome(t)
+  const store = createOAuthStore({ dshHome: home })
+  const flow = createOAuthFlow({
+    store,
+    getSdk: () => ({ ok: true, sdk: fakeSdk().sdk }),
+    makeProvider: (serverName, url) => createOAuthProvider({ store, serverName, url, redirectUri: 'http://127.0.0.1:1/cb', log: noopLog }),
+    allowInsecure: () => true,
+    log: noopLog,
+  })
+  await store.update('gitnexus', 'http://sz-00575123-01/mcp/coding', (record) => {
+    record.tokens = { access_token: 'old', token_type: 'Bearer', refresh_token: 'r1', expires_in: 60 }
+    record.tokensSavedAt = new Date(Date.now() - 3600_000).toISOString()
+    record.discoveryState = {
+      authorizationServerUrl: 'http://sz-00575123-01',
+      authorizationServerMetadata: { issuer: 'http://sz-00575123-01', token_endpoint: 'http://sz-00575123-01/oauth/token' },
+    }
+    record.clientInformation = { client_id: 'cid' }
+  })
+
+  const originalFetch = globalThis.fetch
+  let seenBody = null
+  globalThis.fetch = async (_url, init) => {
+    seenBody = new URLSearchParams(String(init.body))
+    return new Response(JSON.stringify({ access_token: 'new', token_type: 'Bearer', expires_in: 3600, refresh_token: 'r2' }), {
+      status: 200, headers: { 'content-type': 'application/json' },
+    })
+  }
+  t.after(() => { globalThis.fetch = originalFetch })
+
+  const result = await flow.refresh('gitnexus', 'http://sz-00575123-01/mcp/coding')
+  assert.equal(result.ok, true, JSON.stringify(result))
+  assert.equal(seenBody.get('grant_type'), 'refresh_token', '必须用 refresh_token grant')
+  assert.equal(seenBody.get('refresh_token'), 'r1')
+  assert.equal(seenBody.get('client_id'), 'cid')
+
+  const saved = await store.read('gitnexus', 'http://sz-00575123-01/mcp/coding')
+  assert.equal(saved.tokens.access_token, 'new', '新令牌必须落盘')
+  assert.equal(saved.tokens.refresh_token, 'r2', '轮换后的 refresh_token 也要存下来')
+})
+
+test('refresh：服务器拒绝刷新时给出 refreshFailed 而不是谎报成功', async (t) => {
+  const home = await tempHome(t)
+  const store = createOAuthStore({ dshHome: home })
+  const flow = createOAuthFlow({
+    store,
+    getSdk: () => ({ ok: true, sdk: fakeSdk().sdk }),
+    makeProvider: (serverName, url) => createOAuthProvider({ store, serverName, url, redirectUri: 'http://127.0.0.1:1/cb', log: noopLog }),
+    allowInsecure: () => true,
+    log: noopLog,
+  })
+  await store.update('gitnexus', 'http://sz-00575123-01/mcp/coding', (record) => {
+    record.tokens = { access_token: 'a', token_type: 'Bearer', refresh_token: 'r' }
+    record.discoveryState = {
+      authorizationServerUrl: 'http://sz-00575123-01',
+      authorizationServerMetadata: { issuer: 'http://sz-00575123-01', token_endpoint: 'http://sz-00575123-01/oauth/token' },
+    }
+    record.clientInformation = { client_id: 'cid' }
+  })
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => new Response(JSON.stringify({ error: 'invalid_grant', error_description: 'refresh token expired' }), {
+    status: 400, headers: { 'content-type': 'application/json' },
+  })
+  t.after(() => { globalThis.fetch = originalFetch })
+
+  const result = await flow.refresh('gitnexus', 'http://sz-00575123-01/mcp/coding')
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, FLOW_ERRORS.refreshFailed)
+  assert.match(result.detail, /invalid_grant/)
+  // 旧令牌不能被清掉：清掉等于让用户立刻失去连接，而重新授权本来也还要走一遍。
+  const saved = await store.read('gitnexus', 'http://sz-00575123-01/mcp/coding')
+  assert.equal(saved.tokens.access_token, 'a')
+})

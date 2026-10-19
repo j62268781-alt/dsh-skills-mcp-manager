@@ -230,3 +230,55 @@ test('MCP：页签计数是列表里服务器的数量', { skip: skipWithoutBund
     panel.restore()
   }
 })
+
+test('MCP：`…` 菜单里始终有「授权」入口（OAuth 可用且是 http 传输时）', { skip: skipWithoutBundle() }, async () => {
+  /**
+   * 授权入口必须在**菜单**里，而不是只在「需要授权」那张卡的状态注记里。
+   *
+   * 状态注记是按当前状态条件渲染的：一旦这台服务器被判成别的状态（或用户想换账号重新
+   * 授权），入口就消失了。菜单是「对这台服务器能做什么」的固定清单，授权属于那一类。
+   */
+  const withOauth = {
+    profileServers: [{
+      entryId: 'include:mcp-gitnexus', serverName: 'gitnexus', scope: 'global',
+      transport: 'streamable-http', target: 'http://sz-00575123-01/mcp/coding',
+      command: '', args: '', env: '', headersText: '', failOnStartupError: false,
+      reconnectInitialDelayMs: '', reconnectMaxDelayMs: '', reconnectMaxAttempts: '',
+      toolCallTimeoutMs: '', enabled: true, phase: '',
+    }],
+    oauthState: { ready: true, reason: '', detail: '', sdkVersion: '2.2.0', redirectUri: 'http://127.0.0.1:1/cb' },
+    oauthServers: { gitnexus: { present: false, refreshable: false, waiting: false, authorizeUrl: '', expiresAt: '', expired: false, at: '' } },
+  }
+  const panel = await bootPanel(emptyDoc(withOauth))
+  try {
+    const menu = panel.openMenu(0)
+    assert.ok(menu !== null, '没打开卡片菜单')
+    const labels = panel.findAll((node) => String(node.props.className ?? '') === 'smp-menuItem').map((node) => textOf(node).trim())
+    assert.ok(labels.includes('授权'), `菜单里缺少「授权」：${JSON.stringify(labels)}`)
+    // 已有凭据时应当说「重新授权」，否则用户不知道自己是在覆盖一份可用凭据。
+    assert.equal(labels.includes('重新授权'), false, '没有凭据时不该说「重新授权」')
+  } finally {
+    panel.restore()
+  }
+})
+
+test('MCP：OAuth 不可用时菜单里**没有**「授权」（假按钮比没有更糟）', { skip: skipWithoutBundle() }, async () => {
+  const noOauth = {
+    profileServers: [{
+      entryId: 'include:mcp-gitnexus', serverName: 'gitnexus', scope: 'global',
+      transport: 'streamable-http', target: 'http://sz-00575123-01/mcp/coding',
+      command: '', args: '', env: '', headersText: '', failOnStartupError: false,
+      reconnectInitialDelayMs: '', reconnectMaxDelayMs: '', reconnectMaxAttempts: '',
+      toolCallTimeoutMs: '', enabled: true, phase: '',
+    }],
+    oauthState: { ready: false, reason: 'sdk-missing', detail: '找不到 SDK', sdkVersion: '', redirectUri: '' },
+  }
+  const panel = await bootPanel(emptyDoc(noOauth))
+  try {
+    panel.openMenu(0)
+    const labels = panel.findAll((node) => String(node.props.className ?? '') === 'smp-menuItem').map((node) => textOf(node).trim())
+    assert.equal(labels.includes('授权'), false, `OAuth 不可用时不该有「授权」：${JSON.stringify(labels)}`)
+  } finally {
+    panel.restore()
+  }
+})

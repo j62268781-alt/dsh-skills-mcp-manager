@@ -43,6 +43,7 @@ import { installShadow, isMcpName, judge, liveToolNames } from './mcp/filter.js'
 import { PROBE_STATE, createConnectionProbe } from './mcp/probe.js'
 import { authDetailText } from './mcp/auth.js'
 import { createAuthProbe } from './mcp/authprobe.js'
+import { openExternalUrl } from './mcp/oauth/browser.js'
 import { SERVER_STATUS, deriveStatus, reconnectBudgetMs, remainingSeconds } from './mcp/status.js'
 import { createOAuthStore } from './mcp/oauth/store.js'
 import { createOAuthProvider, tokenStatus } from './mcp/oauth/provider.js'
@@ -1056,10 +1057,30 @@ export function apply(ctx, config) {
     }
     if (action === 'authorize') {
       const result = await oauthFlow.begin(serverName, String(server.url ?? ''))
-      oauthResultCache.set(serverName, { ...result, at: new Date().toISOString() })
+      /**
+       * 拿到授权链接就**直接拉起系统浏览器**。
+       *
+       * 这是用户点「授权」时的全部期望：点一下，浏览器开了，登录完回来就好。让用户先
+       * 复制一段 URL 再自己粘到地址栏，是把这个流程里唯一需要机器做的事留给人工。
+       *
+       * 打开失败**不让授权失败**：链接依然是有效的，会照常返回给面板显示（用户还能手动
+       * 复制）。但失败原因必须回传，否则「点了没反应」就无从排查 —— 这个仓库已经在
+       * 「装上了但没生效」上踩过两次。
+       */
+      let opened = null
+      if (result.kind === 'redirect' && typeof result.authorizeUrl === 'string' && result.authorizeUrl !== '') {
+        opened = openExternalUrl({ url: result.authorizeUrl, log: { warn: (message) => ctx.logger.warn(message) } })
+      }
+      oauthResultCache.set(serverName, { ...result, opened, at: new Date().toISOString() })
       kickProjection()
       const finished = result.kind === 'redirect' || result.kind === 'authorized'
-      return { ok: finished, reason: finished ? '' : String(result.detail || result.reason || ''), text: String(result.text ?? ''), ...result }
+      return {
+        ok: finished,
+        reason: finished ? '' : String(result.detail || result.reason || ''),
+        text: String(result.text ?? ''),
+        opened,
+        ...result,
+      }
     }
     if (action === 'logout') {
       const result = await oauthFlow.logout(serverName)
@@ -1184,6 +1205,18 @@ export function apply(ctx, config) {
    * Deliberately silent about tokens: the cache holds only the four facts the panel needs.
    */
   const OAUTH_STATUS_TTL_MS = 15000
+  /**
+   * 到期前多久开始主动刷新。
+   *
+   * 5 分钟是「足够久，不会因为一次失败就断档」与「足够近，刷新出来的令牌还有意义」之间
+   * 的折中：短于它，一次网络抖动就可能让令牌过期；长于它，等于不停地换新令牌，把
+   * refresh_token 的轮换次数（有些服务器每次刷新都会作废旧 refresh_token）翻倍。
+   */
+  const OAUTH_REFRESH_BEFORE_MS = 5 * 60 * 1000
+  /** 检查间隔。比「提前量」小一个数量级，才可能在窗口内动手。 */
+  const OAUTH_REFRESH_SWEEP_MS = 60 * 1000
+  /** 正在刷新的服务器，避免同一台被连点几次刷出多个并发刷新。 */
+  const oauthRefreshing = new Set()
   const refreshOAuthStatus = (serverName, url) => {
     if (oauthFlow === null) return
     const cached = oauthStatusCache.get(serverName)
@@ -1203,6 +1236,50 @@ export function apply(ctx, config) {
         ctx.logger.warn('dsh-skills-mcp-manager: cannot read OAuth state for %s: %s', serverName, String(error?.message ?? error))
       })
       .finally(() => oauthStatusPending.delete(serverName))
+  }
+
+  /**
+   * 在令牌到期前主动刷新。
+   *
+   * 为什么不能只靠 401 触发：那要等到**下一次请求已经失败**才动手。对 MCP 来说，一次
+   * 失败不是一个请求的失败 —— 客户端会退避重试，最终把整个服务器标成「已放弃」并把
+   * 工具全部下掉，用户这时才看到问题，而且看到的是一台「坏了的服务器」。
+   *
+   * 所以：在窗口内先换新令牌，下一次连接自然就是有效的。
+   *
+   * 只处理「有 refresh_token 且知道到期时间」的服务器 —— 不知道到期时间的令牌无法预判，
+   * 那类仍然只能等 401。
+   */
+  const sweepOAuthRefresh = () => {
+    if (oauthFlow === null) return
+    const now = Date.now()
+    for (const { serverName, transport, url } of candidateServers()) {
+      if (transport !== 'streamable-http' || url === '') continue
+      if (oauthRefreshing.has(serverName)) continue
+      const cached = oauthStatusCache.get(serverName)
+      if (cached === undefined || cached.present !== true || cached.refreshable !== true) continue
+      const expiresAt = Date.parse(String(cached.expiresAt ?? ''))
+      // 没有到期时间 / 解析不了：不猜。猜错的代价是拿一个还有效的令牌去换新的，
+      // 而有些服务器会因此作废旧的那份。
+      if (!Number.isFinite(expiresAt)) continue
+      if (expiresAt - now > OAUTH_REFRESH_BEFORE_MS || expiresAt - now <= 0) continue
+      oauthRefreshing.add(serverName)
+      Promise.resolve(oauthFlow.refresh(serverName, url))
+        .then((result) => {
+          if (result.ok === true) {
+            ctx.logger.info('dsh-skills-mcp-manager: %s 的令牌已在到期前刷新', serverName)
+            // 让卡片立刻看到新的到期时间，而不是等下一个 15 秒的 TTL。
+            oauthStatusCache.delete(serverName)
+            kickProjection()
+            return
+          }
+          ctx.logger.warn('dsh-skills-mcp-manager: %s 的令牌预刷新失败（%s）：%s', serverName, result.reason, result.detail)
+        })
+        .catch((error) => {
+          ctx.logger.warn('dsh-skills-mcp-manager: %s 的令牌预刷新异常：%s', serverName, String(error?.message ?? error))
+        })
+        .finally(() => oauthRefreshing.delete(serverName))
+    }
   }
 
   /**
@@ -2044,6 +2121,16 @@ export function apply(ctx, config) {
     inner.effect(() => () => clearInterval(reconnectTimer))
 
     /**
+     * 令牌预刷新。
+     *
+     * 放在这里（而不是 `apply` 顶层）和 `reconnectTimer` 同样的理由：它需要 `kickProjection`，
+     * 而那个函数由 settings 注入赋值。用 `unref` 不需要：cordis 的 effect disposer 会在
+     * 卸载时 clearInterval，Host 自己的生命周期本来就长于插件。
+     */
+    const refreshSweepTimer = setInterval(sweepOAuthRefresh, OAUTH_REFRESH_SWEEP_MS)
+    inner.effect(() => () => clearInterval(refreshSweepTimer))
+
+    /**
      * Apply one skill write, shared by the HTTP route and the settings-queue fallback.
      *
      * Extracted so the two channels cannot drift: they used to differ in ways that mattered
@@ -2182,10 +2269,33 @@ export function apply(ctx, config) {
           },
         },
         onAuthorized: async (serverName) => {
-          // Do not auto-reconnect: a global row needs a Loader rebuild (disable → enable),
-          // which is what the reconnect button does, and doing it behind the user's back
-          // while they are looking at a browser tab would be a surprise. The page tells them.
-          ctx.logger.info('dsh-skills-mcp-manager: %s finished OAuth authorization', serverName)
+          /**
+           * 授权一完成就**自己重连**，不等用户回面板再点一次。
+           *
+           * 用户的期望是「点授权 → 浏览器 → 登录 → 就能用了」。中间插一步「回到面板点重连」
+           * 是把机器该做的事推给人工，而且那一步的时机用户并不知道（回调页和面板是两个地方）。
+           *
+           * 重连复用既有的任务机（`reconnectTask` + 500 ms 的 drain）：项目级行重新挂载，
+           * 全局行走「停用 → 等 Loader 卸载 → 启用」，两条路径本来就已经写好并有测试。
+           * 这里只是把任务放进去，不新写一套。
+           */
+          ctx.logger.info('dsh-skills-mcp-manager: %s finished OAuth authorization, reconnecting', serverName)
+          const target = candidateServers().find((entry) => entry.serverName === serverName)
+          const tier = target !== undefined && String(target.scope ?? '') === 'global' ? 'global' : 'project'
+          /**
+           * 已经在跑的 reconnect 任务不抢占：它的 nonce 已经发给请求方，换掉会让那一侧
+           * 永远等不到结果。授权成功后状态会自己投影刷新，用户在面板上也会看到结果。
+           */
+          if (reconnectTask === null) {
+            reconnectTask = {
+              nonce: `oauth:${Date.now()}`,
+              serverName,
+              tier,
+              entryId: '',
+              stage: tier === 'project' ? 'project' : 'stop',
+              sentAt: Date.now(),
+            }
+          }
           kickProjection()
         },
         snapshot: () => oauthResultCache,

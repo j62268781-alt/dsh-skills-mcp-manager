@@ -40,6 +40,10 @@ export const FLOW_ERRORS = Object.freeze({
   completeFailed: 'authorization-could-not-complete',
   /** 非 https 且非回环的 token 端点，且这台服务器没有勾选明文例外。 */
   insecureNotAllowed: 'insecure-token-endpoint-not-allowed',
+  /** 没有 refresh_token，只能让用户重新授权。 */
+  notRefreshable: 'no-refresh-token',
+  /** 刷新被授权服务器拒绝（refresh_token 过期/被撤销）。 */
+  refreshFailed: 'refresh-rejected',
 })
 
 /** 失败原因的中文说明。面板直接展示，所以要说「下一步做什么」。 */
@@ -63,6 +67,10 @@ export function flowReasonText(reason) {
       return '完成授权失败'
     case FLOW_ERRORS.insecureNotAllowed:
       return 'token 端点不是 https，而「允许明文 token 端点」没有为这台服务器打开。明文传输令牌会把凭据暴露给同网段，因此默认拒绝'
+    case FLOW_ERRORS.notRefreshable:
+      return '这份凭据没有 refresh_token，刷新不了；需要重新授权一次'
+    case FLOW_ERRORS.refreshFailed:
+      return '刷新令牌被授权服务器拒绝（refresh_token 可能已过期或被撤销），需要重新授权'
     default:
       return '授权失败'
   }
@@ -376,6 +384,89 @@ export function createOAuthFlow({ store, getSdk, makeProvider, allowInsecure, lo
     },
 
     /** 登出：删掉凭据文件并丢掉内存缓存。 */
+    /**
+     * 用 refresh_token 换一份新令牌。
+     *
+     * 两条路径，与 `complete` 同源：https / 回环端点走 SDK 自己的 `refreshAuthorization`
+     * （它的编排最成熟），非回环的明文端点走 `exchangeInsecureToken`（那一处 TLS 检查是
+     * 无条件的，没法绕，只能自己发那一个表单）。落盘都走 `provider.saveTokens`，所以两种
+     * 路径写出来的凭据语义完全一致。
+     *
+     * @param serverName - 服务器名。
+     * @param url - 该服务器的 MCP 地址（定位凭据记录用）。
+     * @returns `{ ok, reason, detail, text, ...tokenStatus }`。永不抛错。
+     */
+    refresh: async (serverName, url) => {
+      const target = assertHttpUrl(url)
+      if (target.ok !== true) return { ok: false, reason: target.reason, detail: '', text: flowReasonText(target.reason) }
+      const record = await store.read(serverName, target.url)
+      const refreshToken = String(record?.tokens?.refresh_token ?? '')
+      if (refreshToken === '') {
+        return { ok: false, reason: FLOW_ERRORS.notRefreshable, detail: '', text: flowReasonText(FLOW_ERRORS.notRefreshable) }
+      }
+      const metadata = record?.discoveryState?.authorizationServerMetadata
+      const tokenEndpoint = String(metadata?.token_endpoint ?? '')
+      const asUrl = String(record?.discoveryState?.authorizationServerUrl ?? '')
+      const clientId = String(record?.clientInformation?.client_id ?? '')
+      const resource = String(record?.resourceUrl ?? '')
+      const { provider, snapshot } = providerFor(serverName, target.url)
+
+      const gate = tokenEndpoint === '' ? { insecure: false } : insecureTokenEndpoint(tokenEndpoint)
+      if (gate.insecure === true) {
+        if (allowInsecure?.(serverName) !== true) {
+          return {
+            ok: false,
+            reason: FLOW_ERRORS.insecureNotAllowed,
+            detail: tokenEndpoint,
+            text: flowReasonText(FLOW_ERRORS.insecureNotAllowed),
+          }
+        }
+        const exchanged = await exchangeInsecureToken({
+          tokenEndpoint,
+          clientId,
+          log,
+          params: { grant_type: 'refresh_token', refresh_token: refreshToken, resource },
+        })
+        if (exchanged.ok !== true) {
+          return { ok: false, reason: FLOW_ERRORS.refreshFailed, detail: exchanged.detail, text: flowReasonText(FLOW_ERRORS.refreshFailed) }
+        }
+        try {
+          await provider.saveTokens({ ...exchanged.tokens, issuer: asUrl })
+        } catch (error) {
+          return { ok: false, reason: FLOW_ERRORS.refreshFailed, detail: String(error?.message ?? error), text: flowReasonText(FLOW_ERRORS.refreshFailed) }
+        }
+        const saved = await snapshot()
+        return { ok: true, reason: '', detail: '', text: '令牌已刷新', ...tokenStatus(saved) }
+      }
+
+      const sdkResult = getSdk()
+      if (sdkResult?.ok !== true) {
+        return {
+          ok: false,
+          reason: FLOW_ERRORS.noSdk,
+          detail: String(sdkResult?.detail ?? sdkResult?.reason ?? ''),
+          text: flowReasonText(FLOW_ERRORS.noSdk),
+        }
+      }
+      const { sdk } = sdkResult
+      if (typeof sdk.refreshAuthorization !== 'function') {
+        return { ok: false, reason: FLOW_ERRORS.noSdk, detail: 'SDK 没有导出 refreshAuthorization', text: flowReasonText(FLOW_ERRORS.noSdk) }
+      }
+      try {
+        const tokens = await sdk.refreshAuthorization(asUrl, {
+          metadata,
+          clientInformation: record?.clientInformation,
+          refreshToken,
+        })
+        await provider.saveTokens({ ...tokens, issuer: asUrl })
+        const saved = await snapshot()
+        return { ok: true, reason: '', detail: '', text: '令牌已刷新', ...tokenStatus(saved) }
+      } catch (error) {
+        log?.warn?.(`dsh-skills-mcp-manager: 刷新 ${serverName} 的令牌失败：${String(error?.message ?? error)}`)
+        return { ok: false, reason: FLOW_ERRORS.refreshFailed, detail: describeFlowError(error), text: flowReasonText(FLOW_ERRORS.refreshFailed) }
+      }
+    },
+
     logout: async (serverName) => {
       forget(serverName)
       const removed = await store.remove(serverName)
