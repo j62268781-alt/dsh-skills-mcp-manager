@@ -60,7 +60,9 @@
     "prepare": "npm run build",
     "smoke": "node scripts/host-smoke.mjs",
     "check:names": "node scripts/undefined-check.mjs",
-    "oauth:live": "node scripts/oauth-live-check.mjs"
+    "oauth:live": "node scripts/oauth-live-check.mjs",
+    "oauth:mock": "node scripts/oauth-mock-server.mjs",
+    "oauth:e2e": "node scripts/oauth-e2e.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-mcp-client": "*",

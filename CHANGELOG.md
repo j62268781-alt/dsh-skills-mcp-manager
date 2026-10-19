@@ -84,7 +84,37 @@ SDK 的私有字段（`_authProvider`、`_commonHeaders`、`start`）会随版�
   `discoveryInfo.at` 老毛病，被现有的「空闲扫描与连接倒计时不触发 settings 写盘」断言当场抓住。
   现在发布的是**凭据本身**的变更时间，读取时刻只用于 TTL。
 
-### 7. 测试
+### 7. 真机验证暴露并修掉的两个问题
+
+**a) `redirectUri` 一直是空的。** 重启后 `oauthState.ready` 是 true、SDK 2.2.0 已加载、补丁验过，
+但投影里 `redirectUri: ""`。根因：`oauthRedirectUri()` 读的是 `ctx.webServer`，而本插件的
+`inject` 只有 `['loader']`，顶层根本拿不到那个服务（只能 `ctx.get('webServer')`）。
+空 `redirect_uri` 的后果比看起来严重：SDK 的 `provider.redirectUrl` 为 `undefined` 时会把流程
+判定为**非交互**，直接跳掉授权码分支 —— 而且完全静默，`ready` 仍说 true、按钮仍渲染。
+
+**b) transport 与 flow 各持一份 provider。** `oauthLookup` 每次调用 `makeOAuthProvider` 新建
+实例，而 flow 用它自己 Map 里的另一个。两份内存缓存互不可见：用户授权后 `flow.complete()` 把
+令牌写进它那份，transport 仍读自己那份「没有令牌」的快照 —— 服务器永远 401，面板却显示
+「已授权」。现在 `oauthLookup` 通过 `flow.providerFor()` 取**同一个实例**，并有单测钉住
+「同一 (serverName, url) 必须返回同一个 provider」。
+
+这两个都是由**真机/真协议**发现的，单元测试与冒烟都看不见：前者的冒烟桩把 `webServer` 只挂在
+`ctx.inject` 上（不是宿主真实形状），后者的失败需要「授权成功之后再连接」才会出现。
+
+### 8. 本机即可跑通 OAuth（新增两个脚本）
+
+公网那几台当前都直接返回 200、不要求授权；内网明文 `http://` 又过不了 SDK 的 TLS 检查
+（只豁免回环地址）。所以新增：
+
+- `scripts/oauth-mock-server.mjs`（`npm run oauth:mock`）—— 一个**真的会 401** 的 mock MCP
+  服务器，实现 PRM / AS 元数据 / DCR / PKCE 授权 / 令牌 / refresh，挂在 127.0.0.1。
+- `scripts/oauth-e2e.mjs`（`npm run oauth:e2e`）—— 用**真 SDK + 真 HTTP** 跑完整条链路：
+  401 → 发现 → DCR → PKCE → 换令牌 → 带 Bearer 连上 → 调用工具。
+
+回环地址是协议层面允许的明文 OAuth 路径（RFC 8252 §7.3，SDK 的 `isLoopbackHost` 明确豁免），
+所以这条验证不受内网 TLS 限制影响。没有 mock 在跑时**跳过并说明原因**。
+
+### 9. 测试
 
 新增 78 个用例（399 → 454 全绿），四个文件，**都不 import 宿主包**（CI 上没有宿主
 `node_modules`，导入宿主包会让测试只在 CI 上炸）：
@@ -94,7 +124,7 @@ SDK 的私有字段（`_authProvider`、`_commonHeaders`、`start`）会随版�
 | `test/mcp.oauthState.test.mjs` | `state` 定长比较、长度不等不抛错、多字节按字节比、重复参数拒绝 |
 | `test/mcp.oauthStore.test.mjs` | 凭据落盘/权限 0600/坏文件隔离/`tokens()` 无参调用/`expires_in` 换算 |
 | `test/mcp.oauthPatch.test.mjs` | 注入生效、lookup 抛错不影响连接、HMR 不叠 wrapper、冻结原型如实失败、`verify()` 能验出「注入了却没进请求头」 |
-| `test/mcp.oauthFlow.test.mjs` | 两段式跑通、伪造 state 拒绝、超时、PKCE 跨段存活、回调路由只接受 GET、响应体不含令牌 |
+| `test/mcp.oauthFlow.test.mjs` | 两段式跑通、伪造 state 拒绝、超时、PKCE 跨段存活、**provider 必须单实例共享**、回调路由只接受 GET、响应体不含令牌 |
 
 每条关键断言都验证过**在修复前会失败**（例如把 `isValidServerName` 的 `.`/`..` 判断去掉、
 把补丁的注入点短路掉），而不是只在绿的时候跑过一遍。

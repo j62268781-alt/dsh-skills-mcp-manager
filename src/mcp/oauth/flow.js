@@ -88,6 +88,20 @@ export function createOAuthFlow({ store, getSdk, makeProvider, log } = {}) {
   /** 每个服务器一个 provider 实例：内存缓存要在多次请求之间保持，否则每请求都读盘。 */
   const providers = new Map()
 
+  /**
+   * The one provider instance per server.
+   *
+   * **There must be exactly one.** Both the transport patch (`_authProvider.token()` on every
+   * request) and this flow read through it, and each provider caches the credential record in
+   * memory. Two instances means two caches: the flow saves a token, the transport keeps
+   * reading its own stale "no tokens" snapshot, and the server keeps answering 401 forever
+   * while the panel says 「已授权」. That is a silent, extremely confusing failure, so the
+   * cache is created here and handed out — never duplicated.
+   *
+   * @param serverName - the server whose credentials this provider owns.
+   * @param url - the MCP endpoint; a changed URL invalidates the cached instance because the
+   *   saved credentials may belong to the old server.
+   */
   const providerFor = (serverName, url) => {
     const cached = providers.get(serverName)
     if (cached !== undefined && cached.url === url) return cached
@@ -115,6 +129,8 @@ export function createOAuthFlow({ store, getSdk, makeProvider, log } = {}) {
 
   return {
     forget,
+    /** The shared provider for one server. See {@link providerFor} for why it must be shared. */
+    providerFor,
 
     /** 面板读状态用：有没有令牌、会不会过期、是不是正等着用户去授权。 */
     status: async (serverName, url) => {

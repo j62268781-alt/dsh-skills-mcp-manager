@@ -214,6 +214,51 @@ test('complete：SDK 抛错收敛成 completeFailed，带上错误码', async (t
   assert.match(result.detail, /invalid_grant/)
 })
 
+test('providerFor：同一台服务器只给一个实例（两份缓存会让授权静默失效）', async (t) => {
+  // 这条钉的是一个真出过的 bug：宿主侧 oauthLookup 曾经自己 makeProvider 一个新的，
+  // 而 flow 用的是它 Map 里的另一个。于是授权完成后 flow.complete() 把令牌写进它那份缓存，
+  // transport 仍在读自己那份「没有令牌」的快照 —— 服务器永远 401，而面板显示「已授权」。
+  // 失败无声、现象矛盾，是最难查的一类。
+  const home = await tempHome(t)
+  const { sdk } = fakeSdk()
+  const { flow } = makeFlow({ home, sdk, t })
+  const first = flow.providerFor('github', 'https://api.example.com/mcp')
+  const second = flow.providerFor('github', 'https://api.example.com/mcp')
+  assert.equal(first, second, '同一 (serverName, url) 必须返回同一个实例')
+  assert.equal(first.provider, second.provider, 'provider 本身也要是同一个')
+
+  // URL 变了要给新实例：旧凭据可能属于旧服务器。
+  const moved = flow.providerFor('github', 'https://other.example.com/mcp')
+  assert.notEqual(moved, first, 'URL 变更必须换实例')
+
+  // 通过一个实例写入的令牌，另一个读得到（因为它们本来就是同一个）。
+  await first.provider.saveTokens({ access_token: 'shared-token', token_type: 'Bearer' })
+  const tokens = await second.provider.tokens()
+  assert.equal(tokens.access_token, 'shared-token', '共享实例才能让 transport 看到 flow 写下的令牌')
+})
+
+test('providerFor：forget 只丢内存实例；真正的登出还必须删盘上的凭据', async (t) => {
+  // 两个动作是分开的，这里把区别钉住：
+  //   · `forget()` 只丢内存缓存 —— 新实例会从磁盘重新读，所以**令牌仍在**，这是对的：
+  //     它的用途是「凭据可能变了，重新读一次」，不是登出。
+  //   · `logout()` 才删磁盘文件，此后新实例读不到任何东西。
+  // 曾经想过让 forget 就清空令牌，那样会让一次普通的缓存失效变成静默登出。
+  const home = await tempHome(t)
+  const { sdk } = fakeSdk()
+  const { flow } = makeFlow({ home, sdk, t })
+  const before = flow.providerFor('github', 'https://api.example.com/mcp')
+  await before.provider.saveTokens({ access_token: 'persisted', token_type: 'Bearer' })
+
+  flow.forget('github')
+  const reloaded = flow.providerFor('github', 'https://api.example.com/mcp')
+  assert.notEqual(reloaded, before, 'forget 之后必须是新实例')
+  assert.equal((await reloaded.provider.tokens()).access_token, 'persisted', '磁盘上的凭据还在，新实例应该读得到')
+
+  await flow.logout('github')
+  const afterLogout = flow.providerFor('github', 'https://api.example.com/mcp')
+  assert.equal(await afterLogout.provider.tokens(), undefined, 'logout 删了盘上的凭据，之后读到 undefined')
+})
+
 test('logout：删掉凭据并让内存 provider 失效', async (t) => {
   const home = await tempHome(t)
   const { sdk } = fakeSdk()

@@ -876,11 +876,19 @@ export function apply(ctx, config) {
       if (serverName === '') continue
       let made
       try {
-        made = makeOAuthProvider(serverName, rowUrl)
+        // The **flow's** instance, not a new one.
+        //
+        // Each provider caches the credential record in memory. Building a second instance
+        // here gave the transport its own stale "no tokens" snapshot: after the user
+        // authorized, `flow.complete()` wrote the token through its instance, the transport
+        // kept reading the other one, and the server answered 401 forever while the panel
+        // showed 「已授权」. One server must have exactly one provider.
+        made = oauthFlow.providerFor(serverName, rowUrl)
       } catch (error) {
         ctx.logger.warn('dsh-skills-mcp-manager: cannot build an OAuth provider for %s: %s', serverName, String(error?.message ?? error))
         return null
       }
+      if (made === undefined || made === null) return null
       return {
         provider: makeAuthProvider({ sdk: oauthSdk.sdk, oauthProvider: made.provider, log: { warn: (message) => ctx.logger.warn(message) }, serverName }),
         oauthProvider: made.provider,

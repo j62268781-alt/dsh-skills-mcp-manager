@@ -143,7 +143,32 @@ ls -l ~/.dsh/dsh-skills-mcp-manager/oauth/
 
 ---
 
-## 6. 已知限制
+## 6. 本机验证（不需要浏览器）
+
+内网明文 `http://` 的 MCP 端点过不了 SDK 的 TLS 检查（见下节），而公网那几台当前都直接返回
+200、不要求授权 —— 所以「跑通一次 OAuth」需要自己造一个确实会 401 的服务器。回环地址是协议
+允许的明文 OAuth 路径（RFC 8252 §7.3，SDK 的 `isLoopbackHost` 也豁免它），因此：
+
+```bash
+# 终端 1：一个真的会 401 的 MCP 服务器（自动同意授权，不弹登录页）
+npm run oauth:mock
+
+# 终端 2：完整跑一遍协议
+npm run oauth:e2e
+```
+
+`oauth:e2e` 用的是**真 SDK + 真 HTTP**，串起：
+401 挑战 → 资源元数据 → 授权服务器元数据 → 动态注册 → PKCE 授权 → 换令牌 →
+transport 自动带上 Bearer → 真的连上 → 真的调用一个工具。
+
+它补的是单测与实机自检都覆盖不到的部分：单元测试用结构等价的假 SDK，证明不了「我们拼的
+参数真的被一个授权服务器接受」；`oauth-live-check` 只证明请求头带上了，不跑协议。
+
+**如果要在面板里手动点一遍**：把 `http://127.0.0.1:8791/mcp` 加成一个 streamable-http
+服务器（名字随意，例如 `oauth-mock`）。卡片应显示「需要授权」→ 点「授权」→ 复制链接到浏览器
+（mock 会自动同意并跳回回调）→ 回到面板点一次「重连」。
+
+## 7. 已知限制
 
 - **只支持 `streamable-http`**。stdio 没有 HTTP 状态码可挑战，请用环境变量传凭据。
 - **不自动打开浏览器**。DSH 官方登录也是「复制登录链接」，而且 Host 侧 `open` 在无头/远程
@@ -153,3 +178,7 @@ ls -l ~/.dsh/dsh-skills-mcp-manager/oauth/
 - **设备码流程（RFC 8628）不支持** —— SDK 本身没有实现。
 - **刷新靠 401 触发**，不做时间预判。猜时间只会让令牌提前失效。
 - **不跨机器共享凭据**：回环回调 + 本机文件，这是刻意的。
+- **内网明文 `http://` 的授权服务器走不通**。SDK 的 `assertSecureTokenEndpoint` 拒绝向非
+  TLS 的 token 端点发送凭据，只豁免回环地址（`localhost` / `127.0.0.1` / `::1`）。所以
+  `http://some-intranet-host/...` 会在换令牌那一步抛 `InsecureTokenEndpointError`。
+  这是**协议要求的安全边界**，不是本插件的缺陷；给端点加 TLS 是对的方向，不要关掉这道检查。
