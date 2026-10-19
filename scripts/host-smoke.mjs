@@ -19,6 +19,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { RUNTIME_PATH } from '../src/mcp/runtime.js'
 import { ROWS_PATH } from '../src/mcp/rows.js'
 import { SKILLS_PATH } from '../src/skills/route.js'
+import { OAUTH_PATH } from '../src/mcp/oauth/route.js'
+import { CALLBACK_PATH } from '../src/mcp/oauth/callback.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const root = resolve(here, '..')
@@ -364,6 +366,8 @@ try {
   let runtimeRoute
   let rowsRoute
   let skillsRoute
+  let oauthRoute
+  let oauthCallbackRoute
   const readRuntime = async () => {
     let body = ''
     const res = { setHeader: noop, end: (value = '') => { body = value }, statusCode: 0 }
@@ -402,6 +406,8 @@ try {
           if (route.path === RUNTIME_PATH) runtimeRoute = route
           if (route.path === ROWS_PATH) rowsRoute = route
           if (route.path === SKILLS_PATH) skillsRoute = route
+          if (route.path === OAUTH_PATH) oauthRoute = route
+          if (route.path === CALLBACK_PATH) oauthCallbackRoute = route
           return noop
         },
       },
@@ -514,6 +520,57 @@ try {
     note(skillRes.statusCode === 405, `技能写入路由只接受 POST（GET 得到 ${skillRes.statusCode}）`)
     note(skillBody === '', '被拒绝的请求没有产生响应体')
   }
+
+  // Channel 3e: the OAuth command route and its browser callback.
+  //
+  // Both are load-bearing in a way the other routes are not:
+  //   · the command route returns the authorization URL the user is about to open, so it must
+  //     exist and must refuse a GET (it mutates credentials);
+  //   · the callback route is the **only** route in this plugin that cannot carry
+  //     `connection.requestRejection` — the browser arrives from the authorization server's
+  //     302 with no DSH session cookie. If it were registered behind that check, every
+  //     callback would 401 and authorization could never finish, so the smoke pins that it is
+  //     registered and that a state-less callback is refused (not accepted).
+  note(oauthRoute !== undefined, 'OAuth 命令路由已注册（POST /<name>/oauth）')
+  if (oauthRoute !== undefined) {
+    let oauthBody = ''
+    const oauthRes = { setHeader: noop, end: (value = '') => { oauthBody = value }, statusCode: 0 }
+    await oauthRoute.handler({ method: 'GET', headers: {} }, oauthRes)
+    note(oauthRes.statusCode === 405, `OAuth 命令路由只接受 POST（GET 得到 ${oauthRes.statusCode}）`)
+    note(oauthBody === '', '被拒绝的 OAuth 请求没有产生响应体')
+  }
+  note(oauthCallbackRoute !== undefined, 'OAuth 回调路由已注册（GET /<name>/oauth/callback）')
+  if (oauthCallbackRoute !== undefined) {
+    let callbackBody = ''
+    // `setHeader` must actually store: the assertion below reads `cache-control` off this
+    // object, and a `noop` reader made it look like the header was missing (a stub that cannot
+    // report is how an assertion silently stops asserting).
+    const callbackRes = {
+      statusCode: 0,
+      headers: {},
+      setHeader(name, value) { this.headers[String(name).toLowerCase()] = String(value); return this },
+      writeHead(status, headers) { this.statusCode = status; Object.assign(this.headers, headers ?? {}); return this },
+      end: (value = '') => { callbackBody = value },
+    }
+    // No `state` and no `code`: this is a forged/incorrect callback and must be refused. The
+    // response must NOT be a redirect or a 200 — accepting it would mean an attacker could
+    // hand us their own authorization code.
+    await oauthCallbackRoute.handler({ method: 'GET', url: `${CALLBACK_PATH}?code=x&state=` , headers: {} }, callbackRes)
+    note(callbackRes.statusCode === 400, `缺少 state 的回调被拒绝（得到 ${callbackRes.statusCode}）`)
+    note(/no-store/.test(String(callbackRes.headers['cache-control'] ?? '')), '回调整页不可缓存（响应里带一次性 code）')
+    note(!/access_token|refresh_token|code_verifier/.test(callbackBody), '回调响应体里没有令牌或 PKCE 材料')
+  }
+
+  // OAuth availability must be published, not silently assumed. `ready: false` with a reason
+  // is a correct outcome (CI has no app runtime to load the SDK from); what must never happen
+  // is the panel guessing.
+  note(typeof live.oauthState === 'object' && live.oauthState !== null, 'OAuth 支持状态已发布')
+  note(typeof live.oauthState?.ready === 'boolean', 'OAuth 支持状态有明确的 ready 布尔值')
+  if (live.oauthState?.ready === false) {
+    note(String(live.oauthState?.detail ?? '') !== '', 'OAuth 不可用时给出了原因，而不是静默关闭这项能力')
+  }
+  note(typeof live.oauthServers === 'object' && live.oauthServers !== null, '逐服务器的授权状态已发布')
+  note(!JSON.stringify(live.oauthServers ?? {}).includes('access_token'), '授权状态投影里不含令牌本体')
 
   // Channel 3b: the reconnect request. A server the profile does not configure cannot
   // be reconnected, so the request must still be consumed — and the failure must come

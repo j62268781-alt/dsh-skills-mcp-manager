@@ -44,6 +44,13 @@ import { PROBE_STATE, createConnectionProbe } from './mcp/probe.js'
 import { authDetailText } from './mcp/auth.js'
 import { createAuthProbe } from './mcp/authprobe.js'
 import { SERVER_STATUS, deriveStatus, reconnectBudgetMs, remainingSeconds } from './mcp/status.js'
+import { createOAuthStore } from './mcp/oauth/store.js'
+import { createOAuthProvider, tokenStatus } from './mcp/oauth/provider.js'
+import { loadSdk, oauthSdkReasonText } from './mcp/oauth/sdk.js'
+import { installTransportPatch, makeAuthProvider, patchReasonText } from './mcp/oauth/patch.js'
+import { createOAuthFlow, flowReasonText } from './mcp/oauth/flow.js'
+import { CALLBACK_PATH, registerOAuthCallback } from './mcp/oauth/callback.js'
+import { OAUTH_PATH, registerOAuthRoute } from './mcp/oauth/route.js'
 
 setMountClient(mcpClient)
 
@@ -218,6 +225,24 @@ const SkillRequest = z.object({
  */
 const SkillRequestField = SkillRequest.default({}).volatile()
 
+/**
+ * One OAuth command, as the panel sends it to `POST /<name>/oauth`.
+ *
+ * Kept as a **plain schema** (no `.volatile()`) for exactly the reason documented on
+ * `SkillRequest` above: a `.volatile()` schema returns `{}` when called, so the route's
+ * `schema(payload)` would hand `run` an empty object and every command would answer
+ * 「未知的 OAuth 操作」. This distinction has already cost this repository one full round of
+ * debugging (skill edit/delete), so it is stated here rather than rediscovered.
+ *
+ * The action set is closed: `authorize`, `status`, `logout`. Finishing an authorization is
+ * **not** a command — it arrives as the authorization server's browser redirect, which is
+ * why it lives in `src/mcp/oauth/callback.js`.
+ */
+const OAuthCommand = z.object({
+  action: z.union(['authorize', 'status', 'logout']),
+  serverName: z.string().default(''),
+})
+
 export const Config = z.object({
   servers: z.array(Server).default([]).volatile(),
   skills: z.array(Skill).default([]).volatile(),
@@ -391,6 +416,44 @@ export const Config = z.object({
     source: z.string().default(''),
     scope: z.string().default('global'),
   })).default([]).volatile(),
+
+  /**
+   * OAuth 支持自身是否装上了，以及逐服务器的授权状态。
+   *
+   * 这两个字段的存在理由与 `filterState` 完全一样：**「没装上」和「没生效的必要」长得一样**。
+   * 用户看到「需要授权」的标签时，如果 OAuth 装不上，唯一能做的是去别处手贴 header；
+   * 而如果装上了，这里会出现一个「授权」按钮。这两种情况必须能区分，否则面板会显示一个
+   * 点了永远不会成功的按钮 —— 那是这类补丁最坏的失败方式。
+   */
+  oauthState: z.object({
+    /** 补丁 + SDK 都就绪。 */
+    ready: z.boolean().default(false),
+    /** 不可用时的原因（`sdk.js` / `patch.js` 的取值）。 */
+    reason: z.string().default(''),
+    /** 给用户看的一句话。 */
+    detail: z.string().default(''),
+    /** 实际加载到的 MCP SDK 版本，便于排查「这个版本改名了」。 */
+    sdkVersion: z.string().default(''),
+    /** 回调地址；空串表示 webServer 还没绑定端口。 */
+    redirectUri: z.string().default(''),
+  }).default({ ready: false, reason: '', detail: '', sdkVersion: '', redirectUri: '' }).volatile(),
+
+  /**
+   * 逐服务器的授权状态：`{ [serverName]: { present, refreshable, waiting, authorizeUrl, expiresAt, expired, at } }`。
+   *
+   * **刻意不含任何令牌本体**。面板只需要知道「有没有、还能用多久、要不要用户去点一下」，
+   * 把 access_token 放进投影等于把它写进 profile 的 patch 文件（顺带进日志），
+   * 而那条路是本插件一再证明不可靠的地方。
+   */
+  oauthServers: z.dict(z.object({
+    present: z.boolean().default(false),
+    refreshable: z.boolean().default(false),
+    waiting: z.boolean().default(false),
+    authorizeUrl: z.string().default(''),
+    expiresAt: z.string().default(''),
+    expired: z.boolean().default(false),
+    at: z.string().default(''),
+  })).default({}).volatile(),
 })
 
 /** Bookkeeping for the skill files this plugin owns. */
@@ -689,6 +752,250 @@ export function apply(ctx, config) {
   const authCache = new Map()
   /** Servers with an auth probe in flight, so a slow server cannot pile up requests. */
   const authProbing = new Set()
+
+  // ── OAuth ────────────────────────────────────────────────────────────────────────────
+  //
+  // Everything below exists because `dsh-mcp-client` never passes an `authProvider` to the
+  // SDK: `createTransport()` gives `StreamableHTTPClientTransport` only
+  // `{ requestInit: { headers } }`, so the SDK's `if (401 && this._authProvider)` branch can
+  // never run. A protected server's 401 is therefore retried like a network fault and finally
+  // reported as "gave up" — the panel said the server was broken when all it needed was a
+  // grant. `src/mcp/auth.js` already *detects* that; this half *fixes* it.
+  //
+  // Three pieces, each of which can fail independently and is reported as a reason:
+  //   1. `sdk.js`     — resolve the SDK that ships inside the app runtime (the plugin's own
+  //                     `node_modules` has no `@modelcontextprotocol/client`).
+  //   2. `patch.js`   — inject `_authProvider` on each transport's `start()`, because
+  //                     `authProvider` can only arrive through the constructor.
+  //   3. `flow.js` + `callback.js` — run the authorization-code flow and receive the code.
+  //
+  // Loaded lazily and asynchronously: a failed *optional* capability must never stop the
+  // plugin from loading (a rejected `apply()` takes every other plugin down with it).
+  const oauthStore = createOAuthStore({ dshHome: resolveDshHome(), log: { warn: (message) => ctx.logger.warn(message) } })
+  /** Last authorize/login result per server, so the card can report what just happened. */
+  const oauthResultCache = new Map()
+  /** Last on-disk authorization state per server, refreshed off the publish path. */
+  const oauthStatusCache = new Map()
+  /** Servers whose status refresh is in flight, so a slow disk cannot pile up reads. */
+  const oauthStatusPending = new Set()
+  /**
+   * Kick a projection refresh now instead of waiting for the 5 s publish interval.
+   *
+   * Late-bound on purpose: `tick` and `publish` are declared further down in `apply()` (one
+   * at the bottom, one inside the settings injection), while the OAuth helpers that need them
+   * are declared here. A plain reference would be a TDZ error at call time. The settings
+   * injection assigns the real implementation; until then this is a no-op, which is the safe
+   * direction — the periodic publish still runs.
+   */
+  let kickProjection = () => {}
+  /** `{ ok, sdk } | { ok: false, reason, detail }` once the SDK load settles. */
+  let oauthSdk = null
+  let oauthReady = { ready: false, reason: '', detail: '', sdkVersion: '' }
+  let oauthFlow = null
+  let oauthCallbackReady = false
+  let oauthCallbackPath = ''
+
+  /**
+   * A provider factory bound to this plugin's store.
+   *
+   * `redirectUri` has to be built from the live `webServer` origin: the listener may bind a
+   * port chosen by the OS, so it cannot be known before `listen`. Rebuilt on every call
+   * rather than captured once — a different port would otherwise produce a `redirect_uri`
+   * the server rejects.
+   */
+  const oauthRedirectUri = () => {
+    try {
+      const origin = ctx.webServer?.getOrigin?.()
+      if (typeof origin !== 'string' || origin === '') return ''
+      return `${origin}${CALLBACK_PATH}`
+    } catch {
+      // `getOrigin()` throws before the listener binds a port.
+      return ''
+    }
+  }
+
+  const makeOAuthProvider = (serverName, url) => createOAuthProvider({
+    store: oauthStore,
+    serverName,
+    url,
+    redirectUri: oauthRedirectUri(),
+    onRedirect: async (authorizeUrl) => {
+      // The transport path (401 during normal operation) reaches here too. There is no panel
+      // request waiting for it, so record it where the status projection will find it.
+      oauthResultCache.set(serverName, {
+        ok: true, kind: 'redirect', reason: '', text: '这台服务器需要授权：点「授权」按钮完成登录',
+        detail: '', authorizeUrl, at: new Date().toISOString(),
+      })
+      kickProjection()
+    },
+    log: { warn: (message) => ctx.logger.warn(message) },
+  })
+
+  /**
+   * Look up the provider for a transport about to start.
+   *
+   * The patch calls this with the transport's `_url`; we map back to a configured server.
+   * Only `streamable-http` rows are candidates — stdio has no HTTP status code to challenge.
+   * Returns `null` when the server has no saved credentials, so an unauthenticated server
+   * behaves exactly as before.
+   */
+  const oauthLookup = (targetUrl) => {
+    if (oauthSdk === null || oauthSdk.ok !== true || oauthFlow === null) return null
+    let origin = ''
+    let href = ''
+    try {
+      const parsed = targetUrl instanceof URL ? targetUrl : new URL(String(targetUrl))
+      origin = parsed.origin
+      href = parsed.href
+    } catch {
+      return null
+    }
+    if (origin === '') return null
+    for (const server of candidateServers()) {
+      if (String(server?.transport ?? '') !== 'streamable-http') continue
+      const rowUrl = String(server?.url ?? '')
+      if (rowUrl === '') continue
+      let rowHref = ''
+      try { rowHref = new URL(rowUrl).href } catch { continue }
+      if (rowHref !== href) continue
+      const serverName = String(server.serverName ?? '')
+      if (serverName === '') continue
+      let made
+      try {
+        made = makeOAuthProvider(serverName, rowUrl)
+      } catch (error) {
+        ctx.logger.warn('dsh-skills-mcp-manager: cannot build an OAuth provider for %s: %s', serverName, String(error?.message ?? error))
+        return null
+      }
+      return {
+        provider: makeAuthProvider({ sdk: oauthSdk.sdk, oauthProvider: made.provider, log: { warn: (message) => ctx.logger.warn(message) }, serverName }),
+        oauthProvider: made.provider,
+      }
+    }
+    return null
+  }
+
+  /** Every configured server, both tiers. Rows are the single source of truth. */
+  const candidateServers = () => {
+    try {
+      const rows = serverRows([...(loaderOf(ctx)?.entries?.() ?? [])])
+      return rows.map((row) => ({ serverName: row.serverName, transport: row.transport, url: row.url, scope: row.scope }))
+    } catch {
+      return []
+    }
+  }
+
+  /**
+   * Load the SDK and install the transport patch, once.
+   *
+   * Ordered before anything else in `apply()` that could construct a transport: this plugin
+   * is a **bundle-layer** plugin while the MCP rows live in the profile's own patch, and the
+   * profile composes bundle patches first — so a patch installed here lands ahead of every
+   * row's `apply()`. That ordering is why the injection is possible at all.
+   */
+  const bootstrapOAuth = async () => {
+    // `import.meta.resolve` is the only way to find the host package from inside a plugin:
+    // `@deepseek-ai/dsh-mcp-client` is a peer dependency, so its own `file:` URL is the one
+    // reliable anchor for the runtime's `node_modules`.
+    let hostUrl = ''
+    try {
+      hostUrl = import.meta.resolve('@deepseek-ai/dsh-mcp-client')
+    } catch (error) {
+      oauthReady = { ready: false, reason: 'no-host-package-url', detail: String(error?.message ?? error), sdkVersion: '' }
+      ctx.logger.warn('dsh-skills-mcp-manager: OAuth support unavailable — %s', oauthReady.detail)
+      return
+    }
+    const loaded = await loadSdk(hostUrl)
+    oauthSdk = loaded
+    if (loaded.ok !== true) {
+      oauthReady = { ready: false, reason: String(loaded.reason ?? ''), detail: oauthSdkReasonText(loaded), sdkVersion: '' }
+      ctx.logger.warn('dsh-skills-mcp-manager: OAuth support unavailable — %s (%s)', oauthReady.detail, String(loaded.detail ?? ''))
+      return
+    }
+    const patched = installTransportPatch({
+      sdk: loaded.sdk,
+      lookup: oauthLookup,
+      log: { warn: (message) => ctx.logger.warn(message) },
+    })
+    if (patched.installed !== true) {
+      oauthReady = { ready: false, reason: String(patched.reason ?? ''), detail: patchReasonText(patched.reason), sdkVersion: loaded.version }
+      ctx.logger.warn('dsh-skills-mcp-manager: OAuth support unavailable — %s (%s)', oauthReady.detail, String(patched.detail ?? ''))
+      return
+    }
+    // Verify with a real instance: every step above can "succeed" while the final header is
+    // still missing, and a button that can never work is worse than no button.
+    const verified = await patched.verify()
+    if (verified.ok !== true) {
+      oauthReady = { ready: false, reason: String(verified.reason ?? ''), detail: patchReasonText(verified.reason), sdkVersion: loaded.version }
+      ctx.logger.warn('dsh-skills-mcp-manager: OAuth support unavailable — %s (%s)', oauthReady.detail, String(verified.detail ?? ''))
+      return
+    }
+    ctx.effect(() => () => { try { patched.uninstall?.() } catch { /* best effort */ } }, 'dsh-skills-mcp-manager.oauth.patch')
+    oauthFlow = createOAuthFlow({
+      store: oauthStore,
+      getSdk: () => (oauthSdk?.ok === true ? oauthSdk : { ok: false, reason: String(oauthSdk?.reason ?? ''), detail: String(oauthSdk?.detail ?? '') }),
+      makeProvider: makeOAuthProvider,
+      log: { warn: (message) => ctx.logger.warn(message) },
+    })
+    oauthReady = { ready: true, reason: '', detail: '', sdkVersion: loaded.version }
+    ctx.logger.info('dsh-skills-mcp-manager: OAuth support installed (MCP SDK %s)', loaded.version)
+  }
+
+  const oauthBootstrapped = bootstrapOAuth().catch((error) => {
+    // Never let an optional capability reject out of apply().
+    oauthReady = { ready: false, reason: 'bootstrap-failed', detail: String(error?.message ?? error), sdkVersion: '' }
+    ctx.logger.warn('dsh-skills-mcp-manager: OAuth bootstrap failed — %s', oauthReady.detail)
+  })
+
+  /*
+   * Why starting this asynchronously is safe even though the patch must land before a
+   * transport is constructed.
+   *
+   * The window is real: `apply()` is synchronous and returns before the SDK `import()`
+   * resolves, so an MCP row that activates in that window would build its transport
+   * unpatched. It is *self-healing* for the only case that matters, though:
+   *
+   *   · a server that needs authorization answers 401, so its FIRST attempt fails;
+   *   · `dsh-mcp-client` then retries with backoff, and every retry constructs a **fresh**
+   *     `Client` and a **fresh** transport (`connectGeneration` → `createTransport`), whose
+   *     `start()` our patch now covers;
+   *   · the SDK import takes single-digit milliseconds, while the first retry is ≥ 500 ms.
+   *   · a server that does NOT need authorization never consults `_authProvider`, so a
+   *     missed first injection costs nothing.
+   *
+   * Making `apply()` async to remove the window was considered and rejected: Cordis treats a
+   * plugin whose `apply` never settles as a hung load, and a hung load takes the whole profile
+   * down — a far worse failure than one extra retry.
+   */
+
+  /** OAuth commands over HTTP (see `src/mcp/oauth/route.js` for why not the settings queue). */
+  const runOAuthCommand = async (op) => {
+    await oauthBootstrapped
+    const action = String(op?.action ?? '')
+    const serverName = String(op?.serverName ?? '')
+    const server = candidateServers().find((entry) => entry.serverName === serverName)
+    if (server === undefined) return { ok: false, reason: `找不到服务器 ${serverName}`, text: '' }
+    if (oauthReady.ready !== true) return { ok: false, reason: oauthReady.detail, text: oauthReady.detail }
+    if (action === 'status') {
+      const status = await oauthFlow.status(serverName, String(server.url ?? ''))
+      return { ok: true, reason: '', text: '', ...status }
+    }
+    if (action === 'authorize') {
+      const result = await oauthFlow.begin(serverName, String(server.url ?? ''))
+      oauthResultCache.set(serverName, { ...result, at: new Date().toISOString() })
+      kickProjection()
+      const finished = result.kind === 'redirect' || result.kind === 'authorized'
+      return { ok: finished, reason: finished ? '' : String(result.detail || result.reason || ''), text: String(result.text ?? ''), ...result }
+    }
+    if (action === 'logout') {
+      const result = await oauthFlow.logout(serverName)
+      oauthResultCache.set(serverName, { ok: true, kind: 'logout', reason: '', text: result.text, detail: '', at: new Date().toISOString() })
+      kickProjection()
+      return { ok: true, reason: '', ...result }
+    }
+    return { ok: false, reason: `未知的 OAuth 操作：${action}`, text: '' }
+  }
+
   /**
    * The auth probe runs on a much slower cadence than the connection probe.
    *
@@ -792,6 +1099,37 @@ export function apply(ctx, config) {
    * would relabel a healthy server as needing authorization.
    */
   const authChallengeOf = (serverName) => authCache.get(serverName)?.challenge ?? null
+
+  /**
+   * Refresh one server's on-disk authorization state, at most once per TTL.
+   *
+   * Fire-and-forget for the same reason as {@link refreshProbe}: `publish` is synchronous
+   * and must never await a disk read. Credentials change only when the user authorizes or
+   * logs out, so a slow cadence is honest rather than lazy.
+   *
+   * Deliberately silent about tokens: the cache holds only the four facts the panel needs.
+   */
+  const OAUTH_STATUS_TTL_MS = 15000
+  const refreshOAuthStatus = (serverName, url) => {
+    if (oauthFlow === null) return
+    const cached = oauthStatusCache.get(serverName)
+    const now = Date.now()
+    if (cached !== undefined && now - Date.parse(String(cached.readAt ?? '')) < OAUTH_STATUS_TTL_MS) return
+    if (oauthStatusPending.has(serverName)) return
+    oauthStatusPending.add(serverName)
+    Promise.resolve(oauthFlow.status(serverName, url))
+      .then((status) => {
+        // `at` = when the credentials themselves last changed (stable between reads), `readAt`
+        // = when we looked. Only `readAt` drives the TTL; `at` is what gets published.
+        oauthStatusCache.set(serverName, { ...status, readAt: new Date().toISOString(), at: String(status.updatedAt ?? '') })
+      })
+      .catch((error) => {
+        // A failed read must not look like "no credentials": keep the previous answer and
+        // let it age. The alternative is a card that flips to 「需要授权」 because a read failed.
+        ctx.logger.warn('dsh-skills-mcp-manager: cannot read OAuth state for %s: %s', serverName, String(error?.message ?? error))
+      })
+      .finally(() => oauthStatusPending.delete(serverName))
+  }
 
   /**
    * Mount fibers, per server name — the project tier's equivalent of a Loader row's
@@ -910,6 +1248,16 @@ export function apply(ctx, config) {
        * *designed* not to contain project rows.
        */
       const connected = toolCount > 0 ? true : probed.connected
+      // On-disk authorization state is refreshed for every http server, connected or not:
+      // the card has to show 「已授权」 vs 「需要授权」 regardless of the connection state, and
+      // a token silently expiring is exactly the case where the label must change first.
+      //
+      // Read through `probeTarget` rather than the row: a global row's `target` is the
+      // command line for stdio rows, so `transport` is the only reliable discriminator.
+      if (String(target.probeTarget?.transport ?? '') === 'streamable-http') {
+        const oauthUrl = String(target.probeTarget?.url ?? '')
+        if (oauthUrl !== '') refreshOAuthStatus(target.serverName, oauthUrl)
+      }
       if (connected !== true) {
         refreshProbe(target.serverName, target.agent)
         // Only asked while not connected. An authorization requirement is a *reason a
@@ -1329,8 +1677,55 @@ export function apply(ctx, config) {
           detail: String(cached?.detail ?? ''),
         })),
       }
+      /*
+       * OAuth health travels with the projection for the same reason `filterState` does:
+       * "the capability is missing" and "there is nothing to authorize" must never render
+       * the same. Without this, a `needs-auth` card either shows a button that cannot work
+       * (capability broken) or no button at all (capability fine) with no way to tell why.
+       */
+      const redirectUri = oauthRedirectUri()
+      const oauthStateOut = {
+        ready: oauthReady.ready === true,
+        reason: String(oauthReady.reason ?? ''),
+        detail: String(oauthReady.detail ?? ''),
+        sdkVersion: String(oauthReady.sdkVersion ?? ''),
+        redirectUri,
+      }
+      /*
+       * Per-server authorization state. Deliberately carries **no token material**: the
+       * projection is written into the profile patch file, so an `access_token` here would
+       * land on disk in a file this plugin has proven it cannot reliably rewrite in place.
+       * The panel only needs "is there one, does it expire, do I need to click".
+       *
+       * `publish` is synchronous and credentials live on disk, so the values come from a
+       * cache filled by a fire-and-forget refresh (same pattern as `probeCache`): a slow disk
+       * can lag the label by one tick, but it can never stall the projection.
+       */
+      const oauthServersOut = {}
+      for (const server of plain) {
+        if (String(server.transport ?? '') !== 'streamable-http') continue
+        const serverName = String(server.serverName ?? '')
+        if (serverName === '') continue
+        const cached = oauthStatusCache.get(serverName)
+        oauthServersOut[serverName] = cached === undefined
+          ? { present: false, refreshable: false, waiting: false, authorizeUrl: '', expiresAt: '', expired: false, at: '' }
+          : {
+              present: cached.present === true,
+              refreshable: cached.refreshable === true,
+              waiting: cached.waiting === true,
+              authorizeUrl: String(cached.authorizeUrl ?? ''),
+              expiresAt: String(cached.expiresAt ?? ''),
+              expired: cached.expired === true,
+              // Deliberately NOT `cached.at` (when we last *read* the file): that value
+              // changes every TTL, so putting it here makes the projection key differ on every
+              // publish and the Host writes settings every 5 s forever. This repository has
+              // already been bitten by exactly that (`discoveryInfo.at`), and the smoke test
+              // catches it with 「空闲扫描与连接倒计时不触发 settings 写盘」.
+              at: String(cached.updatedAt ?? ''),
+            }
+      }
       const { at: scanAt, ...discoveryState } = discoveryInfo
-      const key = JSON.stringify([plain, filterStateOut, probeStateOut, spaces, currentWorkspace, discoveredSkills, skillDirs, discoveryState])
+      const key = JSON.stringify([plain, filterStateOut, probeStateOut, spaces, currentWorkspace, discoveredSkills, skillDirs, discoveryState, oauthStateOut, oauthServersOut])
       if (key === published) return
       // Never erase a good projection because the Loader read came back empty.
       if (plain.length === 0 && !loaderFound) {
@@ -1339,6 +1734,8 @@ export function apply(ctx, config) {
       }
       Promise.resolve(inner.settings.update(name, {
           profileServers: plain, filterState: filterStateOut, probeState: probeStateOut, workspaces: spaces, currentWorkspace, discoveredSkills, skillDirs, discoveryInfo,
+          oauthState: oauthStateOut,
+          oauthServers: oauthServersOut,
           // Re-assert every publish: this marker has been lost by a later rewrite
           // before, and losing it hides the row actions in the panel.
           rowOpsReady: true,
@@ -1358,6 +1755,24 @@ export function apply(ctx, config) {
     publish()
     const timer = setInterval(publish, 5000)
     inner.effect(() => () => clearInterval(timer))
+
+    /*
+     * Hand the OAuth helpers a way to refresh the projection immediately.
+     *
+     * Bound here because `publish` lives inside this injection while `tick` is declared at the
+     * bottom of `apply()` — the helpers that need them are declared earlier. Assigning (rather
+     * than closing over them) is what keeps those call sites from being a TDZ error, and a
+     * missing assignment only costs a 5 s delay, never correctness.
+     */
+    kickProjection = () => {
+      try {
+        tick()
+        publish()
+      } catch (error) {
+        ctx.logger.warn('dsh-skills-mcp-manager: immediate publish after an OAuth change failed: %s', String(error?.message ?? error))
+      }
+    }
+    inner.effect(() => () => { kickProjection = () => {} })
 
     // Panel commands against profile-configured rows.
     let applying = false
@@ -1656,6 +2071,58 @@ export function apply(ctx, config) {
         return result
       },
     }))
+
+    /**
+     * OAuth: the command route and the browser callback.
+     *
+     * Registered on the same `webServer` service the row/skill routes use. The callback is
+     * the only route in this plugin that **cannot** carry `connection.requestRejection`:
+     * the browser arrives from the authorization server's 302, which has no DSH session
+     * cookie, so that check would 401 every callback and authorization could never finish.
+     * Its security boundary is the one-time `state` instead (see `src/mcp/oauth/state.js`).
+     */
+    ctx.inject(['webServer', 'connection'], (oauthRouteCtx) => {
+      registerOAuthRoute(oauthRouteCtx, {
+        // Only the action and the target are accepted; everything else is ours to decide.
+        schema: (payload) => OAuthCommand(payload),
+        run: runOAuthCommand,
+      })
+      const registered = registerOAuthCallback(oauthRouteCtx, {
+        servers: () => candidateServers(),
+        flow: {
+          checkCallback: async (...args) => {
+            await oauthBootstrapped
+            if (oauthFlow === null) return { ok: false, reason: 'no-authorization-in-progress' }
+            return oauthFlow.checkCallback(...args)
+          },
+          complete: async (serverName, url, code) => {
+            await oauthBootstrapped
+            if (oauthFlow === null) return { ok: false, reason: 'oauth-sdk-unavailable', detail: '', text: 'OAuth 支持未安装' }
+            const done = await oauthFlow.complete(serverName, url, code)
+            // The client's own retry loop has already given up by the time a user authorizes
+            // (10 attempts with backoff). A fresh instance is the only way back — the same
+            // constraint the reconnect button works around.
+            try { oauthStatusCache.delete(serverName) } catch { /* cache miss is harmless */ }
+            kickProjection()
+            return done
+          },
+        },
+        onAuthorized: async (serverName) => {
+          // Do not auto-reconnect: a global row needs a Loader rebuild (disable → enable),
+          // which is what the reconnect button does, and doing it behind the user's back
+          // while they are looking at a browser tab would be a surprise. The page tells them.
+          ctx.logger.info('dsh-skills-mcp-manager: %s finished OAuth authorization', serverName)
+          kickProjection()
+        },
+        snapshot: () => oauthResultCache,
+        log: { warn: (message) => ctx.logger.warn(message) },
+      })
+      oauthCallbackReady = registered.installed === true
+      oauthCallbackPath = registered.installed === true ? CALLBACK_PATH : `unavailable: ${registered.reason}`
+      if (registered.installed !== true) {
+        ctx.logger.warn('dsh-skills-mcp-manager: OAuth callback route unavailable — %s', registered.reason)
+      }
+    })
 
     // Project MCP import: the panel posts a request, this half scans one tool's
     // project files and writes the answer back for the panel to preview.

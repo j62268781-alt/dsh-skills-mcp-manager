@@ -152,6 +152,14 @@
 .smp-field[data-wide=true]{grid-column:1 / -1}
 /* 技能对话框里「将写入 <路径>」那一行：它不属于任何字段，但要跨满两列。 */
 .smp-skillPath{grid-column:1 / -1}
+/* MCP「需要授权」块：一枚主操作 + 可选的次要操作，下面是授权链接。 */
+.smp-oauthRow{display:flex;align-items:center;gap:8px;margin-top:6px}
+/* 授权链接是只读输入框而不是纯文本：链接很长，纯文本选中会把相邻文字一起带上，
+   而它必须能被完整复制（用户要粘到浏览器里）。 */
+.smp-oauthUrl{box-sizing:border-box;flex:1 1 auto;min-width:0;height:32px;padding:0 10px;border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-l1);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.smp-oauthLinkRow{display:flex;align-items:center;gap:8px;margin-top:2px}
+/* 失败文案用错误色，但**不加粗、不放大**：它不是故障警报，只是这次操作没成功。 */
+.smp-oauthError{color:var(--dsw-alias-state-error-primary,#d92d20)}
 .smp-label{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}
 .smp-button{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;gap:4px;height:32px;padding:0 14px;border:.5px solid transparent;border-radius:var(--dsw-radius-md);background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;cursor:pointer;flex:none}
 .smp-button:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}

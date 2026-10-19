@@ -31,6 +31,31 @@ const statusEntry = (over = {}) => ({
   toolCount: 0, elapsedMs: 400000, budgetMs: 181000, remainingSeconds: 0, detail: '', ...over,
 })
 
+/**
+ * 页面**正文**（排除内联的样式表）。
+ *
+ * `panel.text()` 把 `lib/client.js` 里内联的整份 CSS 也拼进来了，而那份 CSS 的注释里就写着
+ * 「授权链接」这类词 —— 用它断言「页面上出现了授权链接」会**永远通过**，是一条不会失败的
+ * 断言。样式表是单个字符串节点，这里从第一个元素节点往下收集，跳过它。
+ */
+const bodyText = (panel) => {
+  const parts = []
+  const walk = (node) => {
+    if (Array.isArray(node)) { node.forEach(walk); return }
+    if (node === null || node === undefined || typeof node !== 'object') return
+    if (typeof node.type === 'string') {
+      for (const child of node.children ?? []) {
+        if (typeof child === 'string' || typeof child === 'number') parts.push(String(child))
+        else walk(child)
+      }
+      return
+    }
+    walk(node.children)
+  }
+  walk(panel.runtime?.tree)
+  return parts.join(' ').replace(/\s+/g, ' ')
+}
+
 /** 所有状态圆点的取值（`data-dot`），便于断言颜色档位。 */
 const dotTones = (panel) => panel.findAll((node) => node.props.className === 'smp-dot').map((node) => node.props['data-dot'])
 
@@ -287,6 +312,99 @@ test('需要授权：给黄点而不是红点（它不是故障）', { skip: ski
     assert.match(statusTextOf(panel, 'warn'), /需要授权/)
     // 红色会让人以为服务器坏了 —— 而这恰恰是「需要授权」要避免的误解
     assert.ok(!tones.includes('danger'), '需要授权不该用红色')
+  } finally {
+    panel.restore()
+  }
+})
+
+test('需要授权：OAuth 不可用时给手贴 header 的建议 + 原因，且**不给**按钮', { skip: skipWithoutBundle() }, async () => {
+  // 这是「装不上就如实说」的那一支。它比另一支更重要：一个点了永远不会成功的按钮，
+  // 会让用户以为是自己操作错了 —— 比没有按钮更糟。
+  const panel = await bootPanel(emptyDoc({
+    profileServers: [profileServer()], rowOpsReady: true, reconnectReady: true,
+    oauthState: { ready: false, reason: 'mcp-sdk-not-resolvable', detail: '当前 DSH 运行时里找不到 MCP SDK', sdkVersion: '', redirectUri: '' },
+    oauthServers: {},
+    serverStatus: [statusEntry({
+      serverName: 'protected', tier: 'global', scope: '', status: 'needs-auth',
+      detail: '服务器要求先授权（OAuth）才能连接，这不是故障',
+    })],
+  }))
+  try {
+    const toggle = panel.findAll((node) => String(node.props.className ?? '').includes('smp-cardToggle'))[0]
+    panel.click(toggle)
+    const text = bodyText(panel)
+    assert.match(text, /Authorization/, '要给出可执行的替代做法')
+    assert.match(text, /找不到 MCP SDK/, 'Host 给出的原因必须逐字显示，否则用户不知道该怎么修')
+    assert.ok(!text.includes('复制链接'), 'OAuth 不可用时不该出现授权链接')
+    const buttons = panel.findAll((node) => String(node.props.className ?? '').includes('smp-button'))
+      .map((node) => textOf(node))
+    assert.ok(!buttons.some((label) => label === '授权'), `OAuth 不可用时不该出现授权按钮：${JSON.stringify(buttons)}`)
+  } finally {
+    panel.restore()
+  }
+})
+
+test('需要授权：OAuth 可用时给授权按钮与授权链接', { skip: skipWithoutBundle() }, async () => {
+  const panel = await bootPanel(emptyDoc({
+    profileServers: [profileServer()], rowOpsReady: true, reconnectReady: true,
+    oauthState: { ready: true, reason: '', detail: '', sdkVersion: '2.2.0', redirectUri: 'http://127.0.0.1:3080/dsh-skills-mcp-manager/oauth/callback' },
+    // 这台服务器正等着用户去授权：Host 已经把链接记下来了
+    oauthServers: {
+      protected: {
+        present: false, refreshable: false, waiting: true,
+        authorizeUrl: 'https://as.example.com/authorize?client_id=cid&state=abc',
+        expiresAt: '', expired: false, at: '',
+      },
+    },
+    serverStatus: [statusEntry({
+      serverName: 'protected', tier: 'global', scope: '', status: 'needs-auth',
+      detail: '服务器要求先授权（OAuth）才能连接，这不是故障',
+    })],
+  }))
+  try {
+    const toggle = panel.findAll((node) => String(node.props.className ?? '').includes('smp-cardToggle'))[0]
+    panel.click(toggle)
+    const text = bodyText(panel)
+    const buttons = panel.findAll((node) => String(node.props.className ?? '').includes('smp-button'))
+      .map((node) => textOf(node))
+    assert.ok(buttons.includes('授权'), `OAuth 可用时应给授权按钮：${JSON.stringify(buttons)}`)
+    assert.match(text, /不是故障/, '仍然必须点明这不是故障')
+    // 授权链接来自 Host 投影（transport 自己撞上 401 时也会记录）。它在只读输入框的 `value`
+    // 里而不是文本节点里 —— 那是刻意的：链接很长，纯文本没法完整复制。
+    const urlInputs = panel.findAll((node) => node.type === 'input' && node.props.readOnly === true)
+      .map((node) => String(node.props.value ?? ''))
+    assert.ok(
+      urlInputs.some((value) => value.includes('as.example.com/authorize')),
+      `要把授权链接放进可复制的输入框：${JSON.stringify(urlInputs)}`,
+    )
+    assert.match(text, /复制链接/, 'DSH 官方登录也是「复制链接」而不是自动开浏览器')
+    // 没有令牌时不该出现「清除凭据」——那会让用户以为已经授权过
+    assert.ok(!buttons.includes('清除凭据'), `未授权时不该出现清除凭据：${JSON.stringify(buttons)}`)
+  } finally {
+    panel.restore()
+  }
+})
+
+test('需要授权：已经有可刷新令牌时给「清除凭据」', { skip: skipWithoutBundle() }, async () => {
+  const panel = await bootPanel(emptyDoc({
+    profileServers: [profileServer()], rowOpsReady: true, reconnectReady: true,
+    oauthState: { ready: true, reason: '', detail: '', sdkVersion: '2.2.0', redirectUri: '' },
+    oauthServers: {
+      protected: {
+        present: true, refreshable: true, waiting: false, authorizeUrl: '',
+        expiresAt: '2026-10-19T12:00:00.000Z', expired: false, at: '2026-10-19T11:00:00.000Z',
+      },
+    },
+    serverStatus: [statusEntry({
+      serverName: 'protected', tier: 'global', scope: '', status: 'needs-auth', detail: '',
+    })],
+  }))
+  try {
+    const toggle = panel.findAll((node) => String(node.props.className ?? '').includes('smp-cardToggle'))[0]
+    panel.click(toggle)
+    const buttons = panel.findAll((node) => String(node.props.className ?? '').includes('smp-button'))
+      .map((node) => textOf(node))
+    assert.ok(buttons.includes('清除凭据'), `有凭据时应能清除：${JSON.stringify(buttons)}`)
   } finally {
     panel.restore()
   }

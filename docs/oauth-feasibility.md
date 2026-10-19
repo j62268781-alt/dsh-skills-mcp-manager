@@ -1,7 +1,16 @@
 # MCP「点击授权」OAuth 可行性调研
 
-> 状态：**调研，未决策。** 结论倾向「暂不实现点击授权」——先看文末的**前置问题**，
-> 那里有一条会让方案 ① 连第一行 import 都跑不起来的实测发现。
+> 状态：**已实现（0.5.6）。** 本文件保留为决策依据与实测记录；使用说明见
+> [`oauth.md`](oauth.md)。文末「前置问题」里的两条技术障碍都已在实现中绕过：
+> 插件通过宿主包位置反推运行时 `node_modules` 拿到 SDK，且明确加载 **ESM** 入口
+> （CJS 那份是另一个 class，补丁打上去会静默失效）。
+>
+> **两处结论已过时**，实现时重新实测过：
+> 1. §4.3 / §5 的「静态 `Authorization` 会覆盖注入的令牌」只对 SDK **2.0.0** 成立。
+>    2.2.0 改成先用静态值建 `Headers` 再 `set()` 覆盖，两种大小写都是动态令牌获胜 ——
+>    所以注入路线**不需要**先删除行内 `Authorization`。
+> 2. §9.1「插件根本 import 不到 SDK」不再是死路：`import.meta.resolve('@deepseek-ai/dsh-mcp-client')`
+>    在 Electron 里能给出宿主包的 `file:` URL，从它可以反推出运行时根。
 >
 > 相关：[`docs/tools-persistence.md`](tools-persistence.md)（工具清单落盘的可行性，
 > 那条路不依赖任何 MCP SDK，风险低得多）。

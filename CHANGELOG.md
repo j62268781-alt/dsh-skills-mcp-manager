@@ -1,5 +1,105 @@
 # Changelog
 
+## 0.5.6 — MCP OAuth：点击授权与自动刷新
+
+> **本版没有破坏性变更。** 新增能力可以在老配置上直接生效；`needs-auth` 状态与手贴
+> `Authorization` 请求头的旧做法都保留。Host 侧改动需要**重启一次 DSH**，客户端改动刷新页面即可。
+>
+> 使用与安全说明见 [`docs/oauth.md`](docs/oauth.md)；设计取舍与逐条实测证据见
+> [`docs/oauth-feasibility.md`](docs/oauth-feasibility.md)。
+
+### 1. 受 OAuth 保护的 MCP 服务器现在能真正连上了
+
+0.5.5 及以前，面板只能把 401 **识别**成「需要授权」并如实标注 —— 因为
+`dsh-mcp-client` 构造 transport 时只传 `requestInit.headers`，从不传 `authProvider`，于是 SDK 的
+`if (status === 401 && this._authProvider)` 分支永不成立，客户端把授权要求当成网络故障重试 10 次后
+永久放弃。用户看到的是「已放弃重试」，而真相是「去授权一下就好」。
+
+现在卡片上有一个**授权**按钮：点它拿到授权链接，复制到浏览器完成登录，回调落在 DSH 自己的端口上，
+令牌随即落盘。之后每次请求前 SDK 都会读一次令牌，401 时自动用 refresh_token 续期 —— **不再需要手贴
+header，也不会因为令牌过期而静默变砖**。
+
+实现分三个部件，每一个都能独立地如实失败：
+
+| 部件 | 做法 |
+|---|---|
+| SDK 定位 | 从宿主包 `import.meta.resolve` 的位置反推运行时 `node_modules`，取 SDK 的 **ESM** 入口 |
+| 原型补丁 | 在 `StreamableHTTPClientTransport.prototype.start()` 里注入 `_authProvider` |
+| 流程 | 直接用 SDK 的 `auth()` 编排（发现 → DCR → PKCE → 换令牌 → 刷新），本插件只补两段式与回调 |
+
+**为什么打在 `start()` 上**：`Client.connect()` 必调 `start()`，而 Streamable HTTP 的 `start()`
+不发 HTTP（2.2.0 里只有两行）。首个请求在 `_startOrAuth()` / `_send()` 里，都会先
+`await _commonHeaders()` —— 那里读 `_authProvider`。
+
+**为什么必须命中 ESM 那一份**：SDK 是双包，`index.mjs` 与 `index.cjs` 给出**不同的 class 对象**
+（实测 `===` 为 false）。`dsh-mcp-client` 是 `"type": "module"`，走 ESM。补丁打在 CJS 那份上不报错，
+只是永远不生效 —— 表现是「点了授权没反应，日志里什么都没有」。
+
+### 2. 补丁必须能如实失败，否则就是一个假按钮
+
+SDK 的私有字段（`_authProvider`、`_commonHeaders`、`start`）会随版本变化，所以：
+
+- 打之前检查三者的存在性、以及原型是否可扩展；
+- 打之后**用真实例验一次** `_commonHeaders()` 真的带上了 `Authorization`；
+- 任何一步不成立 → `oauthState.ready = false` + 原因，面板显示原因并**不显示按钮**。
+
+第三点是关键：这类补丁最坏的结局不是抛错，而是「装上了但没生效」。用户会看到一个永远点不成功的
+按钮，并以为是自己操作错了 —— 比没有按钮更糟。
+
+### 3. 授权状态与令牌是两件事
+
+`oauthServers` 投影只发布「有没有令牌、能否刷新、何时过期、要不要你去点」，
+**绝不包含令牌本体**。投影会写进 profile 的 patch 文件，把 `access_token` 放进去等于把它写盘，
+并可能进日志。
+
+凭据单独存放：`$DSH_HOME/dsh-skills-mcp-manager/oauth/<serverName>.json`，
+目录 `0700`、文件 `0600`，**一台服务器一个文件**（一份坏 JSON 不会让全部授权一起消失）。
+
+### 4. 回调路由是唯一不做 `requestRejection` 的路由
+
+授权服务器把浏览器 302 到 `redirect_uri` 时**不带** DSH 的浏览器鉴权 cookie，加上那道检查的唯一
+结果是每次回调都被 401，授权永远完不成。安全边界完全落在 `state` 上：
+
+- 定长比较（`timingSafeEqual`），**按 UTF-8 字节**比长度（用字符数会让它抛错，把一次伪造回调变成 500）；
+- 一次性 + 10 分钟超时；
+- `state` / `code` 必须各出现一次（重复参数是绕过「取第一个」的经典手法）；
+- 只接受 GET，响应带 `cache-control: no-store`。
+
+### 5. 升级 DSH 0.2.1 解锁的两项优化
+
+- **SDK 2.2.0 不再让静态 `Authorization` 吃掉动态令牌**。2.0.0 的实现是
+  `new Headers({ ...dynamic, ...static })`（静态赢），2.2.0 改成先用静态值建 `Headers` 再
+  `set('Authorization', …)` 覆盖。实测：2.0.0 下 `init[Authorization]` 会覆盖动态令牌、`init[authorization]`
+  会拼成 `Bearer A, Bearer B` 的坏头；2.2.0 下两种大小写都是动态令牌获胜。**因此注入路线不需要先删除行内
+  `Authorization`** —— 调研文档里那条「必须先删 header」的前提只对 2.0.0 成立。
+- **`dsh-tools` 的 `mode` 收窄**（`native` / `ptc` / `both` → `native` / `ptc`）。本插件不依赖它，但
+  若将来要引入 PTC，只能整体切换，不能混用。
+
+### 6. 顺带修掉的两处门禁问题
+
+- **`host-smoke.mjs` 的响应桩 `setHeader` 是 `noop`**：断言读 `cache-control` 永远读不到，于是
+  「回调整页不可缓存」这条断言**永远不会失败**。改成真的存 header —— 一个不会失败的断言等于没有断言。
+- **`oauthServers` 一度把「上次读取时刻」发布进投影**：那个值每个 TTL 就变一次，会让投影的 key
+  在每次 publish 都不同，于是 Host 每 5 秒写一次 settings。这正是 0.5.3 修过的
+  `discoveryInfo.at` 老毛病，被现有的「空闲扫描与连接倒计时不触发 settings 写盘」断言当场抓住。
+  现在发布的是**凭据本身**的变更时间，读取时刻只用于 TTL。
+
+### 7. 测试
+
+新增 78 个用例（399 → 454 全绿），四个文件，**都不 import 宿主包**（CI 上没有宿主
+`node_modules`，导入宿主包会让测试只在 CI 上炸）：
+
+| 文件 | 覆盖 |
+|---|---|
+| `test/mcp.oauthState.test.mjs` | `state` 定长比较、长度不等不抛错、多字节按字节比、重复参数拒绝 |
+| `test/mcp.oauthStore.test.mjs` | 凭据落盘/权限 0600/坏文件隔离/`tokens()` 无参调用/`expires_in` 换算 |
+| `test/mcp.oauthPatch.test.mjs` | 注入生效、lookup 抛错不影响连接、HMR 不叠 wrapper、冻结原型如实失败、`verify()` 能验出「注入了却没进请求头」 |
+| `test/mcp.oauthFlow.test.mjs` | 两段式跑通、伪造 state 拒绝、超时、PKCE 跨段存活、回调路由只接受 GET、响应体不含令牌 |
+
+每条关键断言都验证过**在修复前会失败**（例如把 `isValidServerName` 的 `.`/`..` 判断去掉、
+把补丁的注入点短路掉），而不是只在绿的时候跑过一遍。
+
+
 ## 0.5.5 — 插件身份统一、MCP 配置单源化、行操作改走 HTTP
 
 > **这一版包含破坏性变更。** 升级前后请读 [`docs/MIGRATION-0.5.5.md`](docs/MIGRATION-0.5.5.md)：

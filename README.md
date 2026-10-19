@@ -244,7 +244,8 @@ cordis.patch.yml                                   声明插件行（本包自�
 | [`docs/PUBLISHING.md`](docs/PUBLISHING.md) | 维护者：npm 发包、GitHub Release、上架插件市场 |
 | [`docs/ICON.md`](docs/ICON.md) | 改图标的人：插件的绘制规范（画布 / 尺寸 / 配色）与两个易踩的坑 |
 | [`docs/ENGINEERING.md`](docs/ENGINEERING.md) | 开发手记（真机验证记录 / 事故复盘 / 踩坑清单，历史归档） |
-| [`docs/oauth-feasibility.md`](docs/oauth-feasibility.md) | 想给 MCP 做「点击授权」的人：为什么 DSH 现在做不到、要写什么、每条结论的源码出处（调研，未决策） |
+| [`docs/oauth.md`](docs/oauth.md) | 用到 OAuth 保护的 MCP 服务器的人：怎么点授权、安全边界在哪、失败了怎么排查 |
+| [`docs/oauth-feasibility.md`](docs/oauth-feasibility.md) | 想弄清 OAuth 为什么必须打补丁的人：每条结论的源码出处与实测证据（调研；0.5.6 已实现，见上一条） |
 | [`docs/tools-persistence.md`](docs/tools-persistence.md) | 工具清单为什么不该落盘：实测体积占比、每 5 秒重写的根因、三条可选路线 |
 
 ## License
