@@ -43,7 +43,7 @@ export function backupPath() {
  * needs to show.
  */
 const YAML_JS_TAG = { tag: 'tag:yaml.org,2002:js', resolve: (value) => value }
-import { insertRow, locateRow, removeRow, setRowConfigField, setRowDisabled } from './rows.js'
+import { insertRow, locateRow, removeRow, rowScopeOf, setRowConfigField, setRowDisabled } from './rows.js'
 import { dshHome, parseEnv, spawnEnv, splitArgs } from '../runtime/env.js'
 import { connectionFields } from '../mcp/connection.js'
 import { NAME, LEGACY_NAME } from '../identity.js'
@@ -187,7 +187,28 @@ export async function applyRowOp(ctx, op) {
         changed = insertRow(document, rowId, config, { disabled: projectScoped })
       }
     } else if (op.op === 'toggle') {
-      changed = setRowDisabled(document, op.entryId, op.enabled === false)
+      /**
+       * There are **two** switches, and which one to write depends on the row's tier.
+       *
+       * A project-scoped row must keep the Loader's `disabled: true` for ever (see
+       * {@link insertRow}): this plugin mounts it into the matching agent instead, so
+       * `disabled` cannot double as the user's switch there. Its switch lives in
+       * `config.enabled`.
+       *
+       * Writing the entry-level `disabled` for a project row was wrong in both directions:
+       *   · turning it **off** wrote `true` over a value that was already `true`, so nothing
+       *     changed and the op fell through to "row not found" — the switch looked dead;
+       *   · turning it **on** cleared `disabled`, so the Loader connected a row this plugin
+       *     was also mounting → two clients, two tool generations, one namespace.
+       */
+      const scope = rowScopeOf(document, op.entryId)
+      if (scope !== null && scope !== 'global') {
+        // `null` clears the key: an absent `enabled` means enabled, which keeps a config
+        // that was never toggled byte-identical to one that was toggled back on.
+        changed = setRowConfigField(document, op.entryId, 'enabled', op.enabled === false ? false : null)
+      } else {
+        changed = setRowDisabled(document, op.entryId, op.enabled === false)
+      }
     } else if (op.op === 'delete') {
       /**
        * Deleting a row that is already gone **succeeds**.

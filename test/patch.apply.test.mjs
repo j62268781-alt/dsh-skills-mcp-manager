@@ -423,3 +423,53 @@ test('migrateServerEntries：行已存在时返回 0，调用方据此仍须清�
   assert.deepEqual(result, { migrated: 0, ids: [] },
     '行已在 → 不重复写（幂等），但调用方必须据此仍然清空旧字段')
 })
+
+const PROJECT_PATCH = `- insert:
+    - id: mcp-gitnexus
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: gitnexus
+        transport: streamable-http
+        url: http://sz-00575123-01/mcp/coding
+        scope: /Users/someone/project
+      disabled: true
+`
+
+/** A patch whose only row is **project-scoped** (永久 disabled，用户开关在 config.enabled）。 */
+const freshProject = async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'smp-profile-'))
+  await writeFile(join(dir, 'cordis.patch.yml'), PROJECT_PATCH)
+  const ctx = { get: (n) => (n === 'profileContext' ? { dir } : undefined), logger: { warn() {}, info() {}, error() {} } }
+  return { dir, ctx, text: () => readFile(join(dir, 'cordis.patch.yml'), 'utf8') }
+}
+
+test('toggle：项目级行开关写 config.enabled，**不动** Loader 的 disabled', async () => {
+  /**
+   * 项目级行有两个「启用」概念，绝不能混：
+   *   · entry 级的 `disabled: true` —— 永久的，因为插件自己把行挂进匹配的 agent；
+   *     Loader 一旦连接它，同一个服务器就会有两个客户端、两套工具。
+   *   · config 级的 `enabled` —— 用户界面上那个开关。
+   *
+   * 之前 `toggle` 对所有行都写 entry 级 `disabled`，于是：关掉时写 `true` 覆盖本来就
+   * 是 `true` 的值 → 没有变化 → 落到「row not found」；打开时清掉 `disabled` →
+   * Loader 直接连接了插件也在挂载的行。前者表现为「点了没反应」。
+   */
+  const { ctx, text } = await freshProject()
+  await applyRowOp(ctx, { op: 'toggle', entryId: 'mcp-gitnexus', enabled: false })
+  const off = await text()
+  assert.match(off, /enabled: false/, '停用必须写进 config.enabled')
+  assert.match(off, /disabled: true/, 'Loader 的 disabled 必须保持 true（插件自己挂载）')
+
+  await applyRowOp(ctx, { op: 'toggle', entryId: 'mcp-gitnexus', enabled: true })
+  const on = await text()
+  assert.doesNotMatch(on, /enabled: false/, '重新启用应清掉 config.enabled')
+  assert.match(on, /disabled: true/, '重新启用后 disabled 仍然是 true')
+})
+
+test('toggle：全局行仍然写 entry 级 disabled（两种层级不能互换）', async () => {
+  // 全局行由 Loader 自己连接，所以 `disabled` 就是它的开关。
+  const { ctx, text } = await fresh()
+  await applyRowOp(ctx, { op: 'toggle', entryId: 'mcp-context7', enabled: false })
+  assert.match(await text(), /disabled: true/)
+  assert.doesNotMatch(await text(), /enabled: false/, '全局行不该写 config.enabled')
+})

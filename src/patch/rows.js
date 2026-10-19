@@ -54,6 +54,21 @@ export function setRowConfigField(document, entryId, field, value) {
   return true
 }
 
+/**
+ * The row's `config.scope`, or null when the row does not exist.
+ *
+ * An absent scope means `global` (that is what the plugin's own model assumes), so callers
+ * can compare against {@link GLOBAL_SCOPE} without special-casing the empty string.
+ */
+export function rowScopeOf(document, entryId) {
+  const found = locateRow(document, entryId)
+  if (found === null) return null
+  const config = found.item.get('config')
+  if (!isMap(config)) return 'global'
+  const scope = config.get('scope')
+  return typeof scope === 'string' && scope !== '' ? scope : 'global'
+}
+
 /** Enable/disable a whole row (the Loader's own `disabled` flag). */
 export function setRowDisabled(document, entryId, disabled) {
   const found = locateRow(document, entryId)
