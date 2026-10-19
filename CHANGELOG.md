@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.5.6 — 配置与文件分家：技能只剩磁盘，MCP 只剩文件 CRUD
+
+> **破坏性变更。** 升级前后请读 [`docs/MIGRATION-0.5.6.md`](docs/MIGRATION-0.5.6.md)。
+
+这一版删掉了插件 settings 里的**技能、命令与读模型字段**：
+
+- **技能**：`config.skills[]` 与 2s 对账镜像删除，`SKILL.md` 是唯一真源；增删改/预览全部走
+  `POST /skills` 与 `GET /skill`。
+- **MCP 行**：只有 `cordis.patch.yml` 里的 Loader 行是配置；增删改走 `POST /rows`，
+  响应直接带回写后的行列表。
+- **命令**：`rowOps` / `skillRequest` / `reconnectRequest` / `importRequest` 全部删除，
+  改成 `/rows`、`/skills`、`/reconnect`、`/import` 的请求/响应；重启不会再重放旧命令。
+- **读模型**：`profileServers` / `discoveredSkills` / `probeState` / `oauthServers` /
+  `workspaces` 等不再写进 settings，`/runtime` 每次现算；settings 只剩 `toolFilters`。
+- **迁移**：`config.servers[]` → 带 `scope` 的 Loader 行；`config.skills[]` → `SKILL.md`
+  （已存在的文件优先）；其余旧键删除。所有写入仍走文件锁 + 备份 + 原子写。
+
+验证：`npm test` 530 项（526 通过 / 4 平台跳过 / 0 失败）、`npm run check:names`、
+`npm run build`。
+
+
 ## 0.5.6 — MCP OAuth：点击授权与自动刷新
 
 > **本版没有破坏性变更。** 新增能力可以在老配置上直接生效；`needs-auth` 状态与手贴

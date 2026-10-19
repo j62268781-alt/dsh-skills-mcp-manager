@@ -14,7 +14,7 @@ import { MIN_SDK_MAJOR, OAUTH_SDK_REASONS, loadSdk, oauthSdkReasonText, resolveS
 /** The real runtime layout, expressed as paths only (no files are touched). */
 const HOST_URL = 'file:///Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh/node_modules/@deepseek-ai/dsh-mcp-client/lib/index.js'
 
-test('runtimeNodeModulesFrom：从宿主包 URL 反推进 node_modules 根', () => {
+test('runtimeNodeModulesFrom：从宿主包 URL 反推进 node_modules 根', { skip: process.platform === 'win32' ? '路径形态是 POSIX；Windows 由 fileURLToPath 转成盘符路径' : false }, () => {
   const root = runtimeNodeModulesFrom(HOST_URL)
   assert.equal(root.ok, true)
   assert.equal(root.nodeModules, '/Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh/node_modules')
@@ -29,7 +29,7 @@ test('runtimeNodeModulesFrom：非 file: URL 与空值都如实失败', () => {
   }
 })
 
-test('resolveSdkEsmEntry：路径推导不到时返回原因，而不是抛错', () => {
+test('resolveSdkEsmEntry：路径推导不到时返回原因，而不是抛错', { skip: process.platform === 'win32' ? 'POSIX 绝对路径夹具；Windows 上 file URL 会先被转成盘符路径' : false }, () => {
   // 一个不存在的运行时目录：createRequire 会失败，函数必须把失败收敛成 reason。
   const result = resolveSdkEsmEntry('file:///nonexistent-runtime/node_modules/@deepseek-ai/dsh-mcp-client/lib/index.js')
   assert.equal(result.ok, false)

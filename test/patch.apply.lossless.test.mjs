@@ -9,7 +9,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parse } from 'yaml'
@@ -224,15 +224,36 @@ test('运行时字段清理及旧标识迁移兼容顶层和 insert 行，保留
   }
 })
 
-test('没有旧运行时字段的配置也会迁移，完整保留用户配置', async () => {
+test('旧 config.servers/skills 迁移成行与 SKILL.md，并把配置键删掉', async () => {
   usePlainIO()
-  const config = { skills: [{ name: 'demo', enabled: true }], servers: [{ serverName: 'demo', command: 'node', args: 'server.js' }], toolFilters: { demo: { mode: 'deny', tools: ['private'] } } }
-  const dir = makeProfile(HAZARDOUS + `- id: ${LEGACY_NAME} # keep row comment\n  config: ${JSON.stringify(config)}\n`)
-  const path = join(dir, 'cordis.patch.yml')
-  assert.equal(await migratePanelConfig(ctxFor(dir)), 1)
-  assert.deepEqual(findRowDeep(readPatch(path), (row) => row.id === NAME).config, config)
-  assert.match(readFileSync(path, 'utf8'), /# keep row comment/)
-  assert.equal(await migratePanelConfig(ctxFor(dir)), 0)
+  const home = mkdtempSync(join(tmpdir(), 'smp-migrate-home-'))
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  try {
+    const config = {
+      skills: [{ name: 'demo', enabled: true, description: '演示', body: '# hi' }],
+      servers: [{ serverName: 'demo', transport: 'stdio', command: 'node', args: 'server.js' }],
+      toolFilters: { demo: { mode: 'deny', tools: ['private'] } },
+    }
+    const dir = makeProfile(HAZARDOUS + `- id: ${LEGACY_NAME} # keep row comment\n  config: ${JSON.stringify(config)}\n`)
+    const path = join(dir, 'cordis.patch.yml')
+    // 行标识 1 + servers 行 1 + servers 键 1 + SKILL.md 1 + skills 键 1
+    assert.equal(await migratePanelConfig(ctxFor(dir)), 5)
+    const after = readPatch(path)
+    const panel = findRowDeep(after, (row) => row.id === NAME)
+    assert.deepEqual(panel.config, { toolFilters: { demo: { mode: 'deny', tools: ['private'] } } })
+    const row = findRowDeep(after, (row) => row.id === 'mcp-demo')
+    assert.equal(row.config.serverName, 'demo')
+    assert.equal(row.config.transport, 'stdio')
+    assert.deepEqual(row.config.args, ['server.js'])
+    assert.ok(existsSync(join(home, 'skills', 'demo', 'SKILL.md')), '技能正文应写成 SKILL.md')
+    assert.match(readFileSync(path, 'utf8'), /# keep row comment/)
+    // 幂等：第二次没有可迁移的东西
+    assert.equal(await migratePanelConfig(ctxFor(dir)), 0)
+  } finally {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  }
 })
 
 // 可选：SMP_REAL_PATCH=/path/to/cordis.patch.yml 时，在真实配置的副本上跑同样的无损检查

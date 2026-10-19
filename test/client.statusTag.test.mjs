@@ -191,22 +191,22 @@ test('开关：Host 拒绝时回滚乐观状态并说明原因', { skip: skipWit
   }
 })
 
-test('重连在 popup 里：点了会把请求写进设置（带 tier/scope/nonce）', { skip: skipWithoutBundle() }, async () => {
+test('重连在 popup 里：点了 POST /reconnect（带 tier/scope）', { skip: skipWithoutBundle() }, async () => {
   const panel = await bootPanel(emptyDoc({
-    profileServers: [project()], currentWorkspace: '/p/tcl', rowOpsReady: true, reconnectReady: true,
+    profileServers: [project()], currentWorkspace: '/p/tcl',
     serverStatus: [statusEntry()],
   }))
   const { doc } = panel
   try {
-    // 重连现在收在「…」菜单里，先开菜单
+    // 重连收在「…」菜单里，先开菜单
     panel.click(panel.findAll((node) => String(node.props.className ?? '') === 'smp-moreTrigger')[0])
     panel.click(panel.byText('重连'))
-    const request = doc.reconnectRequest
-    assert.ok(request, '点击重连后没有写 reconnectRequest')
+    await panel.settle()
+    const request = (doc.reconnectCommands ?? []).at(-1)
+    assert.ok(request, '点击重连后没有 POST /reconnect')
     assert.equal(request.tier, 'project')
     assert.equal(request.serverName, 'gitnexus')
     assert.equal(request.scope, '/p/tcl', 'scope 必须带上，否则同名的全局行会被误重连')
-    assert.ok(String(request.nonce).length > 0, '缺少 nonce，结果无法路由回来')
   } finally {
     panel.restore()
   }
@@ -241,14 +241,29 @@ test('重连：已连接时菜单里没有这一项（没什么可重连的）',
   }
 })
 
-test('重连：Host 不支持时不给（避免点了没反应）', { skip: skipWithoutBundle() }, async () => {
+test('重连：Host 没有路由时，点击后把失败原因显示出来（不静默）', { skip: skipWithoutBundle() }, async () => {
   const panel = await bootPanel(emptyDoc({
-    profileServers: [project()], currentWorkspace: '/p/tcl', rowOpsReady: true,
+    profileServers: [project()], currentWorkspace: '/p/tcl',
     serverStatus: [statusEntry()],
-  }))
+  }), {
+    fetch: async (url) => {
+      if (String(url).endsWith('/runtime')) {
+        return {
+          ok: true, status: 200,
+          json: async () => ({
+            serverTools: [], serverToolsError: { reason: '', detail: '' },
+            serverStatus: [statusEntry()], servers: [project()],
+          }),
+        }
+      }
+      return { ok: false, status: 404, json: async () => ({}) }
+    },
+  })
   try {
-    // 状态是 gave-up（本该给重连），但 Host 没发布 reconnectReady → 不该给
-    assert.ok(!openMenuText(panel).includes('重连'), 'reconnectReady 缺失时不该出现重连项')
+    panel.click(panel.findAll((node) => String(node.props.className ?? '') === 'smp-moreTrigger')[0])
+    panel.click(panel.byText('重连'))
+    await panel.settle()
+    assert.match(panel.text(), /没有重连路由/, 'Host 不支持时要把原因显示出来')
   } finally {
     panel.restore()
   }

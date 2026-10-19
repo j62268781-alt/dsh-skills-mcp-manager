@@ -49,9 +49,13 @@ const collect = (dir, extensions) => {
   return out.sort()
 }
 
+const tscEntry = join(here, '..', 'node_modules', 'typescript', 'bin', 'tsc')
 const runTsc = (root, args) => {
   try {
-    return execFileSync('npx', ['tsc', ...args], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+    // `npx` is a `.cmd` shim on Windows and execFileSync refuses to launch it, which made
+    // this whole check silently pass there (it caught nothing for weeks). Run the local
+    // tsc entry through the current Node executable instead.
+    return execFileSync(process.execPath, [tscEntry, ...args], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
   } catch (error) {
     return String(error.stdout ?? '') + String(error.stderr ?? '')
   }

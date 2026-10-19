@@ -162,7 +162,12 @@ export async function bootPanel(doc = emptyDoc(), options = {}) {
    * the whole thing.
    */
   globalThis.fetch = options.fetch ?? (async (url, init) => {
-    if (String(url).endsWith('/skills')) {
+    const target = String(url)
+    if (target.includes('/skill?') || target.endsWith('/skill')) {
+      // Skill **body read** (GET). The Host validates the path against its own scan.
+      return { ok: true, status: 200, json: async () => doc.skillReadResult ?? { ok: true, body: doc.skillBody ?? '' } }
+    }
+    if (target.endsWith('/skills')) {
       // Record the write so a test can assert the HTTP path was taken, and echo the Host's
       // receipt shape. Rejections are driven by `options.fetch` or by `doc.skillCommandResult`.
       const body = init?.body === undefined ? {} : JSON.parse(String(init.body))
@@ -172,7 +177,21 @@ export async function bootPanel(doc = emptyDoc(), options = {}) {
       if (doc.skillCommandResult !== undefined) return { ok: true, status: 200, json: async () => doc.skillCommandResult }
       return { ok: true, status: 200, json: async () => ({ ok: true, reason: '', name: body.name ?? '', at: new Date().toISOString() }) }
     }
-    if (String(url).endsWith('/rows')) {
+    if (target.endsWith('/reconnect')) {
+      const body = init?.body === undefined ? {} : JSON.parse(String(init.body))
+      const commands = doc.reconnectCommands ?? []
+      commands.push(body)
+      doc.reconnectCommands = commands
+      return { ok: true, status: 200, json: async () => doc.reconnectResult ?? { ok: true, reason: '' } }
+    }
+    if (target.endsWith('/import')) {
+      const body = init?.body === undefined ? {} : JSON.parse(String(init.body))
+      const commands = doc.importCommands ?? []
+      commands.push(body)
+      doc.importCommands = commands
+      return { ok: true, status: 200, json: async () => doc.importResultPayload ?? { ok: true, ...body, files: [], servers: [] } }
+    }
+    if (target.endsWith('/rows')) {
       // Record the command so a test can assert the HTTP path was taken, and echo the Host's
       // success shape. Rejections are driven by `options.fetch` or by pre-seeding `rowCommands`.
       const body = init?.body === undefined ? {} : JSON.parse(String(init.body))
@@ -180,7 +199,10 @@ export async function bootPanel(doc = emptyDoc(), options = {}) {
       commands.push(body)
       doc.rowCommands = commands
       if (doc.rowCommandResult !== undefined) return { ok: true, status: 200, json: async () => doc.rowCommandResult }
-      return { ok: true, status: 200, json: async () => ({ ok: true, reason: '' }) }
+      return {
+        ok: true, status: 200,
+        json: async () => ({ ok: true, reason: '', servers: doc.runtimeServers ?? doc.profileServers ?? [] }),
+      }
     }
     // Counted so a test can prove the panel **re-fetched** after a nudge (e.g. the OAuth
     // callback's BroadcastChannel message) instead of waiting for its poll.
@@ -190,11 +212,16 @@ export async function bootPanel(doc = emptyDoc(), options = {}) {
       json: async () => ({
         serverTools: doc.serverTools ?? [], serverStatus: doc.serverStatus ?? [],
         serverToolsError: doc.serverToolsError ?? { reason: '', detail: '' },
-        // Mirrors the real Host: `/runtime` carries the row list so the panel has a path
-        // that does not depend on the settings document.
-        // `runtimeServers` lets a test diverge the two sources on purpose (that is
-        // exactly the settings-document staleness this field exists to route around).
+        // Mirrors the real Host: `/runtime` carries every read model.
         servers: doc.runtimeServers ?? doc.profileServers ?? [],
+        skills: doc.runtimeSkills ?? doc.discoveredSkills ?? [],
+        skillDirs: doc.skillDirs ?? { userDsh: '/tmp/smp-home/skills', userAgents: '/tmp/smp-home/.agents/skills' },
+        workspaces: doc.runtimeWorkspaces ?? doc.workspaces ?? [],
+        currentWorkspace: doc.runtimeCurrentWorkspace ?? doc.currentWorkspace ?? '',
+        filter: doc.runtimeFilter ?? doc.filterState ?? {},
+        probe: doc.runtimeProbe ?? doc.probeState ?? {},
+        oauth: { ...(doc.oauthState ?? {}), servers: doc.oauthServers ?? {} },
+        discovery: doc.discoveryInfo ?? {},
       }),
     }
   })

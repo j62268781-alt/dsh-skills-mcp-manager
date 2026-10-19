@@ -1,38 +1,38 @@
 /**
  * Host half of the Skills & MCP panel.
  *
- * State lives in this entry's own `config` (two `.volatile()` fields), so the
- * panel page edits it through the standard settings remote and every change is
- * persisted into the active profile's patch. This half turns that state into
- * reality:
+ * Two file-first sources of truth, one in-memory read model:
  *
- *   skills  → `<root>/<name>/SKILL.md` files (project root or the harness home)
- *   mcp     → one mounted `@deepseek-ai/dsh-mcp-client` instance per enabled
- *             global server, mounted in this plugin's own scope
+ *   · skills → `<root>/<name>/SKILL.md`, written by the `POST /skills` route. There is no
+ *     `config.skills[]` and no reconcile loop; the disk scan is the list.
+ *   · MCP    → the profile patch's `mcp-client` rows. The `POST /rows` route writes them
+ *     directly (lock + atomic write + backup), and `/runtime` reads the same file back.
  *
- * No profile-patch rewriting and no third-party dependencies: MCP rows are
- * mounted in-process through the shipped client package, so tool naming,
- * discovery, reconnection and image handling stay identical to a configured row.
+ * Commands (row CRUD, skill writes/read, reconnect, import) are HTTP request/response;
+ * nothing transient is persisted. The only settings field left is `toolFilters`, a real
+ * user preference. The read model (`/runtime`) is recomputed per request: rows from the
+ * file, `phase` from the Loader, tools from the live registry, status from probe caches,
+ * skills from the periodic scan.
  *
  * @module dsh-skills-mcp-manager
  */
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
-import { execFileSync } from 'node:child_process'
-import { dirname, join, resolve } from 'node:path'
+import { readFile } from 'node:fs/promises'
+import { statSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { commandEnv, parseEnv, resolveCommand, setHomeResolver, spawnEnv, splitArgs } from './runtime/env.js'
 import * as mcpClient from '@deepseek-ai/dsh-mcp-client'
 import { withFileLock, writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
-import { applyRowOp, migrateServerEntries, migratePanelConfig, setPatchIO } from './patch/apply.js'
-import { IMPORT_SOURCES, adaptImportedEntry, envLines, headerLines, importFilePath, parseJsonLoose } from './import/sources.js'
+import { applyRowOp, migratePanelConfig, setPatchIO } from './patch/apply.js'
 import { scanImportSource } from './import/scan.js'
-import { beat, beatFile } from './diagnostics/heartbeat.js'
-import { agentsHome, projectRootOf, reconcileSkills } from './skills/reconcile.js'
+import { registerImportRoute } from './import/route.js'
+import { beat } from './diagnostics/heartbeat.js'
+import { agentsHome, projectRootOf } from './skills/reconcile.js'
 import { bodyOf, discoverSkills } from './skills/discover.js'
 import { createSkill, deleteSkill, renameSkill, updateSkill, writableRoots } from './skills/write.js'
 import { registerSkillRoute } from './skills/route.js'
+import { registerSkillReadRoute } from './skills/read.js'
 import { serverMountConfig, setMountClient, workingDirectoryOf } from './project/mount.js'
 import { GLOBAL_SCOPE, projectServersFor, serverRows, serverSetKey } from './mcp/serverRows.js'
 import { readMcpRowsFromPatch } from './patch/readRows.js'
@@ -40,6 +40,7 @@ import { connectionDraftOf } from './mcp/connection.js'
 import { toolsByServer } from './mcp/tools.js'
 import { registerRuntimeRoute } from './mcp/runtime.js'
 import { registerRowRoute } from './mcp/rows.js'
+import { registerReconnectRoute } from './mcp/reconnect.js'
 import { installShadow, isMcpName, judge, liveToolNames } from './mcp/filter.js'
 import { PROBE_STATE, createConnectionProbe } from './mcp/probe.js'
 import { authDetailText } from './mcp/auth.js'
@@ -64,103 +65,6 @@ export { name }
 
 /** The Loader is core, so requiring it costs nothing and never blocks startup. */
 export const inject = ['loader']
-
-/** One MCP server the panel manages. */
-const Server = z.object({
-  /** 'global' or an absolute project directory. */
-  scope: z.string().default('global'),
-  /** Stable identity of this entry. */
-  id: z.string().required(),
-  serverName: z.string().required(),
-  transport: z.union(['streamable-http', 'stdio']).default('streamable-http'),
-  url: z.string().default(''),
-  command: z.string().default(''),
-  args: z.array(z.string()).default([]),
-  /** Extra child environment, one `KEY=VALUE` per line (tokens live here). */
-  env: z.string().default(''),
-  /** `auto` = harness runtime (pnpx), `system` = the user's own npx. */
-  runtime: z.string().default('auto'),
-  /** Where a discovered entry came from (e.g. `.mcp.json`); empty for panel entries. */
-  source: z.string().default(''),
-  /** HTTP headers, one `KEY=VALUE` per line. */
-  headers: z.string().default(''),
-  /** Reject activation when the first connection or tool sync fails. */
-  failOnStartupError: z.boolean().default(false),
-  /** Reconnect numbers, kept as the panel's text inputs ('' = client default). */
-  reconnectInitialDelayMs: z.string().default(''),
-  reconnectMaxDelayMs: z.string().default(''),
-  reconnectMaxAttempts: z.string().default(''),
-  /** Per-call tool timeout for this server ('' = the client's own default). */
-  toolCallTimeoutMs: z.string().default(''),
-  /**
-   * 这台服务器的 token 端点允许**明文 http**（非回环地址）。
-   *
-   * 默认关闭，且**这是唯一能开启它的地方**：每台服务器自己的字段，不存在全局开关。
-   * 开启后 OAuth 的 token 交换（含 refresh）会把 `access_token` / `refresh_token` 以
-   * 明文发到内网 —— 同网段任何能嗅探的设备都能读到。SDK 的 `assertSecureTokenEndpoint`
-   * 无条件拒绝这种端点（这是对的），所以本插件用 `src/mcp/oauth/insecure.js` 自己完成那一步，
-   * 每次明文请求都记一条 warning。
-   *
-   * 存在的理由：内网部署的授权服务器（如 MCPHub）常常没有 TLS，而它既不是回环地址、
-   * 也不会升级 https。没有这个例外，那类服务器在 OAuth 上完全不可用。
-   */
-  allowInsecureTokenEndpoint: z.boolean().default(false),
-  enabled: z.boolean().default(true),
-})
-
-/** One skill the panel writes to disk. */
-const Skill = z.object({
-  scope: z.string().default('global'),
-  /**
-   * Which of the two roots under `scope` this entry belongs to: `dsh` or `agents`.
-   *
-   * Both roots are real and DSH's provider reads both, so the root has to travel with the
-   * entry — `reconcileSkills` rewrites disk from this list, and without it an entry written
-   * to `~/.agents/skills` would be moved under `~/.dsh/skills` on the next pass.
-   *
-   * Defaults to `dsh`: that is what every entry created before this field existed means.
-   */
-  id: z.string().default('dsh'),
-  name: z.string().required(),
-  description: z.string().default(''),
-  body: z.string().default(''),
-  enabled: z.boolean().default(true),
-})
-
-/** One MCP row the profile already configures outside this panel (read-only here). */
-const ProfileRow = z.object({
-  entryId: z.string().default(''),
-  serverName: z.string().default(''),
-  transport: z.string().default('streamable-http'),
-  /** url (http) or `command + args` (stdio) — what the card shows. */
-  target: z.string().default(''),
-  /** Raw stdio executable: `target` merges it with `args`, so editing needs both. */
-  command: z.string().default(''),
-  args: z.string().default(''),
-  env: z.string().default(''),
-  /** Connection policy read back from the row, so the edit form can prefill it. */
-  failOnStartupError: z.boolean().default(false),
-  reconnectInitialDelayMs: z.string().default(''),
-  reconnectMaxDelayMs: z.string().default(''),
-  reconnectMaxAttempts: z.string().default(''),
-  /** Per-call tool timeout for this server ('' = the client's own default). */
-  toolCallTimeoutMs: z.string().default(''),
-  /**
-   * 这台服务器的 token 端点允许**明文 http**（非回环地址）。
-   *
-   * 默认关闭，且**这是唯一能开启它的地方**：每台服务器自己的字段，不存在全局开关。
-   * 开启后 OAuth 的 token 交换（含 refresh）会把 `access_token` / `refresh_token` 以
-   * 明文发到内网 —— 同网段任何能嗅探的设备都能读到。SDK 的 `assertSecureTokenEndpoint`
-   * 无条件拒绝这种端点（这是对的），所以本插件用 `src/mcp/oauth/insecure.js` 自己完成那一步，
-   * 每次明文请求都记一条 warning。
-   *
-   * 存在的理由：内网部署的授权服务器（如 MCPHub）常常没有 TLS，而它既不是回环地址、
-   * 也不会升级 https。没有这个例外，那类服务器在 OAuth 上完全不可用。
-   */
-  allowInsecureTokenEndpoint: z.boolean().default(false),
-  enabled: z.boolean().default(true),
-  phase: z.string().default(''),
-})
 
 /** One queued change against a row the profile itself configures. */
 const RowOp = z.object({
@@ -219,11 +123,11 @@ const RowOp = z.object({
 setHomeResolver(resolveDshHome)
 
 /**
- * One skill write request, shared by the settings-queue channel and the HTTP route.
+ * One skill write request, validated by the `POST /<name>/skills` route.
  *
- * Defining it once is the point: `mcp/rows.js` learned this the hard way — two paths that
- * validate separately drift, and the drift shows up as a field that works on one channel and
- * silently disappears on the other. Both channels now validate with *this* schema.
+ * Plain schema (no `.volatile()`): a volatile schemastery schema returns `{}` when called,
+ * which would strip `scope`/`id` and make every write answer 「未知的写入区域」. The same
+ * distinction once cost this repository a full debugging round.
  */
 const SkillRequest = z.object({
   op: z.string().default(''),
@@ -247,26 +151,6 @@ const SkillRequest = z.object({
 })
 
 /**
- * The `Config` field: the same shape, plus `.default({}).volatile()`.
- *
- * **These two roles must not share one schema**, and conflating them caused a real bug:
- *
- *   · as a **Config field** it needs `.volatile()` — the settings service only writes fields
- *     declared volatile (`isVolatilePath` in `@deepseek-ai/dsh-settings`), and `op: 'read'`
- *     still travels the settings queue;
- *   · as a **validator** (the HTTP route calls `SkillRequest(payload)`) it must **not** be
- *     volatile — calling a volatile schemastery schema returns `{}` rather than the validated
- *     input. `SkillRequest(payload)` therefore produced `scope: undefined` / `id: undefined`,
- *     `writableRoots` could not match a root, and every edit/delete answered
- *     「未知的写入区域」.
- *
- * `RowOp` (the MCP route's validator) never had `.volatile()` for exactly this reason; the two
- * halves are kept apart here too. The queue path does not call this schema at all — it reads the
- * resolved config value — so wrapping it in `.default({}).volatile()` is safe for its own use.
- */
-const SkillRequestField = SkillRequest.default({}).volatile()
-
-/**
  * One OAuth command, as the panel sends it to `POST /<name>/oauth`.
  *
  * Kept as a **plain schema** (no `.volatile()`) for exactly the reason documented on
@@ -284,128 +168,28 @@ const OAuthCommand = z.object({
   serverName: z.string().default(''),
 })
 
+/** One reconnect command (`POST /<name>/reconnect`). Plain schema: it is a validator. */
+const ReconnectRequest = z.object({
+  tier: z.string().default(''),
+  serverName: z.string().default(''),
+  scope: z.string().default(''),
+})
+
+/** One import scan request (`POST /<name>/import`). Plain schema: it is a validator. */
+const ImportRequest = z.object({
+  source: z.string().default(''),
+  scope: z.string().default('project'),
+  project: z.string().default(''),
+})
+
 export const Config = z.object({
-  servers: z.array(Server).default([]).volatile(),
-  skills: z.array(Skill).default([]).volatile(),
-  /**
-   * Queue of edits the panel issues against profile-configured rows. The client
-   * can only reach the Host through settings, so commands ride the same channel
-   * and this half clears the queue once the patch write settles.
-   */
-  rowOps: z.array(RowOp).default([]).volatile(),
-  /**
-   * Capability marker: written by this Host half once it can apply `rowOps`, so
-   * the panel only offers 编辑 / 删除 on profile rows when the running Host
-   * actually honours them (an older Host would leave a queue behind).
-   */
-  rowOpsReady: z.boolean().default(false).volatile(),
-  /** One explicit import request (the panel's "扫描项目 MCP" action). */
-  importRequest: z.object({
-    source: z.string().default(''),
-    /** `global` reads the tool's user-level file, `project` the selected workspace. */
-    scope: z.string().default('project'),
-    project: z.string().default(''),
-    /** For `op: 'read'`: the SKILL.md path, which must be in the current scan. */
-    path: z.string().default(''),
-    nonce: z.string().default(''),
-  }).default({}).volatile(),
-  /** The scan answer for the latest request. */
-  /** Skill write request from the panel (create/update/rename/delete on disk). */
-  skillRequest: SkillRequestField,
-  skillResult: z.object({
-    ok: z.boolean().default(false),
-    reason: z.string().default(''),
-    name: z.string().default(''),
-    /** Body text, only for the on-demand `read` op (never stored in the list). */
-    body: z.string().default(''),
-    /** When the Host produced this receipt; lets the client match by freshness. */
-    at: z.string().default(''),
-    nonce: z.string().default(''),
-  }).default({}).volatile(),
-  importResult: z.object({
-    nonce: z.string().default(''),
-    source: z.string().default(''),
-    scope: z.string().default('project'),
-    project: z.string().default(''),
-    at: z.string().default(''),
-    files: z.array(z.object({
-      path: z.string().default(''),
-      exists: z.boolean().default(false),
-      servers: z.array(z.string()).default([]),
-      unsupported: z.number().default(0),
-      error: z.string().default(''),
-    })).default([]),
-    servers: z.array(Server).default([]),
-    error: z.string().default(''),
-  }).default({}).volatile(),
-  /** MCP servers discovered in project-level editor files (`.mcp.json`, …). */
-  workspaceServers: z.array(z.object({
-    project: z.string().default(''),
-    file: z.string().default(''),
-    serverName: z.string().default(''),
-    transport: z.string().default('streamable-http'),
-    target: z.string().default(''),
-    args: z.string().default(''),
-    env: z.string().default(''),
-    headers: z.string().default(''),
-  })).default([]).volatile(),
-  /** cwd of the session's agent: the panel preselects that workspace. */
-  currentWorkspace: z.string().default('').volatile(),
-  /** Workspaces the registry knows: the panel's project picker reads these. */
-  workspaces: z.array(z.object({
-    id: z.string().default(''),
-    title: z.string().default(''),
-    path: z.string().default(''),
-  })).default([]).volatile(),
-  /**
-   * Projection of the MCP rows already configured in the active profile, kept
-   * current by this Host half. It is written into the settings document because
-   * a third-party bundle has no remote namespace of its own to reach the client
-   * with, and the panel should show what the profile already configures.
-   */
-  profileServers: z.array(ProfileRow).default([]).volatile(),
-  /**
-   * 面板请求重连一台服务器。
-   *
-   * 与 `rowOps` 同构：面板写、Host 排空后清空。全局行只能靠让 Loader 重建实例
-   * （停用 → 启用）才拿得到新的重试预算，项目级条目则由本插件失效挂载 key 重挂。
-   * 两条路都不需要重启 DSH。
-   */
-  reconnectRequest: z.object({
-    tier: z.string().default(''),
-    serverName: z.string().default(''),
-    scope: z.string().default(''),
-    nonce: z.string().default(''),
-    at: z.string().default(''),
-  }).default({ tier: '', serverName: '', scope: '', nonce: '', at: '' }).volatile(),
-  /** Capability marker：Host 能处理 reconnectRequest 时才为 true。 */
-  reconnectReady: z.boolean().default(false).volatile(),
-  /**
-   * 连接观测机制自身的状态，供面板如实展示。
-   *
-   * 与 `filterState` 同理：这个监听是「服务器是否还活着」的唯一事实来源，如果它没装上，
-   * 面板**必须说不知道**，而不是把「观测不到」当成「服务器死了」。`instances` 列出它
-   * 实际看到的实例名 —— 排查「标签说未连接但其实连着」这类问题时，这是唯一能区分
-   * 「真的没实例」和「监听漏了」的证据。
-   */
-  probeState: z.object({
-    installed: z.boolean().default(false),
-    reason: z.string().default(''),
-    /** 最近一轮探测的逐服务器结果，是排查「标签说未连接但其实连着」的唯一证据。 */
-    results: z.array(z.object({
-      serverName: z.string().default(''),
-      state: z.string().default(''),
-      detail: z.string().default(''),
-    })).default([]),
-  }).default({ installed: false, reason: '', results: [] }).volatile(),
-  /** 上一次重连的结果（按 nonce 回给发起的那个面板）。 */
-  reconnectResult: z.object({
-    nonce: z.string().default(''),
-    ok: z.boolean().default(false),
-    error: z.string().default(''),
-  }).default({ nonce: '', ok: false, error: '' }).volatile(),
   /**
    * 每个服务器的工具过滤规则：`{ [serverName]: { mode, tools } }`。
+   *
+   * 这是本插件**唯一**持久化的用户配置。技能与 MCP 行都不再经过 settings：
+   *   · 技能 = 磁盘上的 `SKILL.md`；
+   *   · MCP = profile patch 里的 Loader 行（面板通过 HTTP 路由直接改该文件）；
+   *   · 列表 / 工具 / 连接状态 / 授权状态 = `/runtime` 现算，不落盘。
    *
    * `mode`：`off`（不过滤，默认）/ `allow`（只保留 tools 里的）/ `deny`（只挡 tools 里的）。
    * 面板写入，Host 在注册那一刻据此决定要不要放行。见 `src/mcp/filter.js` 的取舍说明：
@@ -416,88 +200,7 @@ export const Config = z.object({
     mode: z.string().default('off'),
     tools: z.array(z.string()).default([]),
   })).default({}).volatile(),
-  /**
-   * 过滤器的实际状态，供面板如实展示。
-   *
-   * `installed` 为 false 时是「没装上」而不是「没生效的必要」——这两者在界面上必须
-   * 区分，否则用户以为过滤在工作而实际没有，正是这类插件最坏的失败方式。
-   */
-  filterState: z.object({
-    installed: z.boolean().default(false),
-    reason: z.string().default(''),
-    /** 被挡下的工具名（去重、按服务器归组在面板侧做）。 */
-    dropped: z.array(z.string()).default([]),
-    /** shadow 装上时已经注册的 MCP 工具：它们永远过滤不到。 */
-    preExisting: z.array(z.string()).default([]),
-  }).default({ installed: false, reason: '', dropped: [], preExisting: [] }).volatile(),
-  /**
-   * Resolved skill directories, so the UI can show real OS-correct paths instead
-   * of "$DSH_HOME"/"~" (Windows uses backslashes and %USERPROFILE%).
-   */
-  skillDirs: z.object({
-    userDsh: z.string().default(''),
-    userAgents: z.string().default(''),
-  }).default({ userDsh: '', userAgents: '' }).volatile(),
-  /**
-   * Diagnostics for the disk-skill scan, published so the truth is readable from
-   * the profile patch itself: which roots were scanned, how many skills came back,
-   * and the error text when the scan failed (it used to fail silently).
-   */
-  discoveryInfo: z.object({
-    at: z.string().default(''),
-    roots: z.array(z.string()).default([]),
-    count: z.number().default(0),
-    error: z.string().default(''),
-  }).default({}).volatile(),
-  /** Read-only: skills already on disk in DSH's roots (not managed by this panel). */
-  discoveredSkills: z.array(z.object({
-    name: z.string().default(''),
-    description: z.string().default(''),
-    path: z.string().default(''),
-    source: z.string().default(''),
-    scope: z.string().default('global'),
-  })).default([]).volatile(),
-
-  /**
-   * OAuth 支持自身是否装上了，以及逐服务器的授权状态。
-   *
-   * 这两个字段的存在理由与 `filterState` 完全一样：**「没装上」和「没生效的必要」长得一样**。
-   * 用户看到「需要授权」的标签时，如果 OAuth 装不上，唯一能做的是去别处手贴 header；
-   * 而如果装上了，这里会出现一个「授权」按钮。这两种情况必须能区分，否则面板会显示一个
-   * 点了永远不会成功的按钮 —— 那是这类补丁最坏的失败方式。
-   */
-  oauthState: z.object({
-    /** 补丁 + SDK 都就绪。 */
-    ready: z.boolean().default(false),
-    /** 不可用时的原因（`sdk.js` / `patch.js` 的取值）。 */
-    reason: z.string().default(''),
-    /** 给用户看的一句话。 */
-    detail: z.string().default(''),
-    /** 实际加载到的 MCP SDK 版本，便于排查「这个版本改名了」。 */
-    sdkVersion: z.string().default(''),
-    /** 回调地址；空串表示 webServer 还没绑定端口。 */
-    redirectUri: z.string().default(''),
-  }).default({ ready: false, reason: '', detail: '', sdkVersion: '', redirectUri: '' }).volatile(),
-
-  /**
-   * 逐服务器的授权状态：`{ [serverName]: { present, refreshable, waiting, authorizeUrl, expiresAt, expired, at } }`。
-   *
-   * **刻意不含任何令牌本体**。面板只需要知道「有没有、还能用多久、要不要用户去点一下」，
-   * 把 access_token 放进投影等于把它写进 profile 的 patch 文件（顺带进日志），
-   * 而那条路是本插件一再证明不可靠的地方。
-   */
-  oauthServers: z.dict(z.object({
-    present: z.boolean().default(false),
-    refreshable: z.boolean().default(false),
-    waiting: z.boolean().default(false),
-    authorizeUrl: z.string().default(''),
-    expiresAt: z.string().default(''),
-    expired: z.boolean().default(false),
-    at: z.string().default(''),
-  })).default({}).volatile(),
 })
-
-/** Bookkeeping for the skill files this plugin owns. */
 /** The shipped mcp-client plugin, re-mounted per server inside this scope. */
 const mcpPlugin = {
   name: mcpClient.name,
@@ -600,18 +303,7 @@ function loaderOf(ctx) {
   }
 }
 
-/**
- * 最近一次从 patch 文件读到的行。
- *
- * 存在的理由见 `src/patch/readRows.js`：Loader 的注册表要 4 秒才跟上一次写入，而文件是
- * 立刻变的。这里按 **mtime** 判断缓存是否还有效 —— 不按时间过期，因为「文件没变」和
- * 「文件变了但内容一样」是两件不同的事，只有 mtime 能区分。
- */
-let patchRowsCache = { file: '', mtimeMs: -1, entries: null, reading: false }
-/** 由 `apply()` 绑定：文件里出现了新行时立刻发一次投影，而不是等下一个 5 秒定时器。 */
-let onPatchRowsRefreshed = () => {}
-
-/** patch 文件的绝对路径；拿不到 profileContext 时返回空串（此时只看 Loader）。 */
+/** The active profile's `cordis.patch.yml`, or '' when the profile is not injected yet. */
 function patchFileOf(ctx) {
   try {
     const profile = ctx.get?.('profileContext') ?? ctx.profileContext
@@ -623,49 +315,46 @@ function patchFileOf(ctx) {
   }
 }
 
-/**
- * 后台读一次 patch 文件，成功就刷新缓存并立刻发投影。
- *
- * 失败不重试、不记错：读不到时本函数什么都不做，调用方继续用 Loader 的视图 ——
- * 那是原来的行为，不会更差。
- */
-function refreshPatchRows(file) {
-  if (patchRowsCache.reading === true) return
-  patchRowsCache = { ...patchRowsCache, reading: true }
-  readMcpRowsFromPatch(file)
+/** Awaitable patch-row refresh (mtime cache; the promise is shared while a read is in flight). */
+let patchRowsCache = { file: '', mtimeMs: -1, entries: null }
+let patchRowsInFlight = null
+/** 由 `apply()` 绑定：文件里出现了新行时立刻刷新运行态。 */
+let onPatchRowsRefreshed = () => {}
+
+/** Read the patch file once and cache the entries together with its mtime. */
+async function refreshPatchRows(file, { force = false } = {}) {
+  if (patchRowsInFlight !== null) {
+    if (!force) return patchRowsInFlight
+    // A write just happened: a read that started before it would cache the OLD mtime and
+    // hand the caller a list without the new row (the client then keeps its optimistic
+    // card next to the real one). Wait for that read, then read the file again.
+    await patchRowsInFlight
+  }
+  patchRowsInFlight = readMcpRowsFromPatch(file)
     .then((result) => {
-      if (result.ok !== true) {
-        patchRowsCache = { ...patchRowsCache, reading: false }
-        return
+      if (result.ok === true) {
+        patchRowsCache = { file, mtimeMs: result.mtimeMs, entries: result.entries }
+        try { onPatchRowsRefreshed() } catch { /* 下一次 refresh 会再试 */ }
       }
-      patchRowsCache = { file, mtimeMs: result.mtimeMs, entries: result.entries, reading: false }
-      try { onPatchRowsRefreshed() } catch { /* 下一次 publish 会再试 */ }
+      return result
     })
-    .catch(() => { patchRowsCache = { ...patchRowsCache, reading: false } })
+    .catch(() => ({ ok: false, reason: 'patch 读取失败' }))
+    .finally(() => { patchRowsInFlight = null })
+  return patchRowsInFlight
 }
 
 /**
- * The panel's view of every configured server, in the form its forms need.
+ * Every configured `mcp-client` entry: the file is the config fact, the Loader adds runtime.
  *
- * Built on {@link serverRows} so there is exactly one projection from rows to servers —
- * the panel used to receive a differently-shaped object than the mount path did, from a
- * different source (rows for global, `config.servers` for project), which is how the two
- * tiers drifted apart in the first place.
- *
- * `args`/`env`/`headersText` are the *form* shapes (one string, one `KEY=VALUE` per line);
- * `scope` travels with the row so the panel can split one list into its two tabs instead of
- * merging two arrays.
+ * **文件优先，Loader 补运行态。** The file already contains the row we just wrote, while the
+ * Loader may need seconds to reload it; reading the Loader first is what made a saved edit
+ * appear only after "a while". `phase` still comes from the Loader, because only it knows
+ * the fiber state. When it has not caught up, `phase` is empty and the card says 「连接中」,
+ * which is the truth.
  */
-function configuredMcpRows(ctx) {
+function configuredEntries(ctx) {
   const loader = loaderOf(ctx)
   const liveEntries = loader !== null && typeof loader.entries === 'function' ? [...(loader.entries() ?? [])] : null
-
-  /**
-   * **文件优先，Loader 补运行态。**
-   *
-   * 文件里已经有的行就是配置事实（我们自己刚写进去的）；`phase` 只有 Loader 知道，所以
-   * 按 id 从 Loader 合并。Loader 还没跟上时 `phase` 为空 —— 卡片显示「连接中」，那是真的。
-   */
   let entries = liveEntries
   const file = patchFileOf(ctx)
   if (file !== '') {
@@ -685,7 +374,30 @@ function configuredMcpRows(ctx) {
       }
     }
   }
+  return { loaderFound: entries !== null, entries }
+}
 
+/** The mount path's view (real server fields) — same source as the panel list. */
+function configuredServers(ctx) {
+  const { entries } = configuredEntries(ctx)
+  if (entries === null) return []
+  return serverRows(entries)
+}
+
+/**
+ * The panel's view of every configured server, in the form its forms need.
+ *
+ * Built on {@link serverRows} so there is exactly one projection from rows to servers —
+ * the panel used to receive a differently-shaped object than the mount path did, from a
+ * different source (rows for global, `config.servers` for project), which is how the two
+ * tiers drifted apart in the first place.
+ *
+ * `args`/`env`/`headersText` are the *form* shapes (one string, one `KEY=VALUE` per line);
+ * `scope` travels with the row so the panel can split one list into its two tabs instead of
+ * merging two arrays.
+ */
+function configuredMcpRows(ctx) {
+  const { loaderFound, entries } = configuredEntries(ctx)
   if (entries === null) return { loaderFound: false, rows: [] }
   try {
     const rows = serverRows(entries).map((server) => ({
@@ -703,9 +415,9 @@ function configuredMcpRows(ctx) {
       enabled: server.enabled,
       phase: server.phase,
     }))
-    return { loaderFound: true, rows }
+    return { loaderFound, rows }
   } catch (error) {
-    return { loaderFound: true, rows: [], error: String(error?.message ?? error) }
+    return { loaderFound, rows: [], error: String(error?.message ?? error) }
   }
 }
 
@@ -757,7 +469,6 @@ export function apply(ctx, config) {
   // unconfigured, while the projection right next to it, which spreads first, saw all of
   // them. Spread here too, and never assume `Array.isArray` on a loader return value.
   const readServers = () => serverRows([...(loaderOf(ctx)?.entries?.() ?? [])])
-  const readSkills = () => config?.skills?.get?.() ?? config?.skills ?? []
   const readFilters = () => config?.toolFilters?.get?.() ?? config?.toolFilters ?? {}
 
   /**
@@ -1595,19 +1306,9 @@ export function apply(ctx, config) {
     return reported
   }
 
-  /**
-   * Import scan state. The panel asks for one source at a time through the
-   * settings document (its only channel to the Host); the answer is written back
-   * into the same document, so no editor file is ever mounted behind the user's
-   * back — imports are explicit and land in the panel's own project entries.
-   */
-  const importState = { nonce: '', result: null }
-  /** Nonce of the last skill write we executed (the panel polls by changing it). */
-  let seenSkillNonce = ''
 
   let committedServers = []
   let committedServersKey = null
-  let skillsKey = null
   /** Live agents, with the project servers mounted into each one's scope. */
   const agents = new Map()
 
@@ -1651,19 +1352,44 @@ export function apply(ctx, config) {
    * twice — two clients, two tool generations, one namespace. What remains is the part only
    * this plugin can do: deciding which *project* rows belong to which agent, which no row
    * can express (a row is loaded once, and `!!js` sees no working directory).
+   *
+   * Mounts are tracked **per server**, not as one all-or-nothing list: editing context7's
+   * URL used to unmount and reconnect every other project server in the same workspace,
+   * because the only state was one key for the whole set. Keeping the unchanged server's
+   * disposer means an edit touches exactly the edited server.
    */
   const mountForAgent = (agent, entry) => {
     const desired = projectServersFor(committedServers, entry.cwd)
-    const key = serverSetKey(desired)
-    if (entry.key === key) return
-    unmount(entry.stops)
-    for (const server of desired) mountInto(agent.ctx, server, entry.stops, `agent scope ${entry.cwd}`)
-    entry.key = key
+    const desiredKeys = new Set()
+    for (const server of desired) {
+      const key = serverSetKey([server])
+      desiredKeys.add(key)
+      if (entry.mounted.has(key)) continue
+      // Same server, new config: drop its previous instance first so it reconnects with
+      // the new URL/headers instead of running both.
+      for (const [oldKey, old] of [...entry.mounted]) {
+        if (old.serverName === server.serverName) {
+          unmount(old.stops)
+          entry.mounted.delete(oldKey)
+        }
+      }
+      const stops = []
+      mountInto(agent.ctx, server, stops, `agent scope ${entry.cwd}`)
+      entry.mounted.set(key, { serverName: server.serverName, stops })
+    }
+    for (const [key, mounted] of [...entry.mounted]) {
+      if (desiredKeys.has(key)) continue
+      unmount(mounted.stops)
+      entry.mounted.delete(key)
+    }
   }
+
+  /** Every disposer one agent currently owns (heartbeat + cleanup). */
+  const stopsOf = (entry) => [...entry.mounted.values()].flatMap((mounted) => mounted.stops)
 
   const attachAgent = (agent) => {
     if (agent === undefined || agent === null || agents.has(agent)) return
-    const entry = { cwd: workingDirectoryOf(agent), stops: [], key: null }
+    const entry = { cwd: workingDirectoryOf(agent), mounted: new Map() }
     agents.set(agent, entry)
     mountForAgent(agent, entry)
   }
@@ -1671,7 +1397,7 @@ export function apply(ctx, config) {
   const detachAgent = (agent) => {
     const entry = agents.get(agent)
     if (entry === undefined) return
-    unmount(entry.stops)
+    for (const mounted of entry.mounted.values()) unmount(mounted.stops)
     agents.delete(agent)
   }
 
@@ -1711,22 +1437,13 @@ export function apply(ctx, config) {
     for (const agent of live) attachAgent(agent)
   }
 
-  /**
-   * Publish the profile's own MCP rows into this namespace so the panel can show
-   * them. Settings is the only client-facing channel a third-party bundle
-   * reaches (no custom remote namespace), so it doubles as the read model.
-   */
-  /** Published on every transition; the heartbeat file surfaces it for debugging. */
-  let lastBeat = { at: '', observed: { servers: [], skills: [] }, changed: {}, mounted: 0, agents: [] }
-  const projection = { loaderFound: null, rows: null, wrote: false, error: null, toolsError: null }
-  const rowOps = { pending: 0, applied: 0, error: null }
+  /** Written on every transition; the heartbeat file surfaces it for debugging. */
+  let lastBeat = { at: '', observed: { servers: [] }, changed: {}, mounted: 0, agents: [] }
   /** Latest disk-skill scan, refreshed on a timer (the scan itself is async). */
   let discoveredSkills = []
   /** Last skill/import op, surfaced on the heartbeat for outside diagnosis. */
   let lastOp = null
   let discoveryInfo = { at: '', roots: [], count: 0, error: '' }
-  /** When the projection last reached the settings document (diagnostics). */
-  let publishedAt = ''
   const refreshDiscovered = async (projectRoots) => {
     const roots = Array.isArray(projectRoots) ? projectRoots.slice(0, 12) : []
     try {
@@ -1738,12 +1455,12 @@ export function apply(ctx, config) {
       discoveryInfo = { at: new Date().toISOString(), roots, count: discoveredSkills.length, error: '' }
       // The periodic heartbeat only fires on change, and the first one happens
       // before this async scan finishes — so publish the diagnostics explicitly.
-      beat({ ...lastBeat, at: new Date().toISOString(), publishedAt, discovery: discoveryInfo })
+      beat({ ...lastBeat, at: new Date().toISOString(), discovery: discoveryInfo })
     } catch (error) {
       // A failed scan must not look like "there are no skills on disk", and the
       // reason must survive into the published diagnostics.
       discoveryInfo = { at: new Date().toISOString(), roots, count: 0, error: String(error?.message ?? error) }
-      beat({ ...lastBeat, at: new Date().toISOString(), publishedAt, discovery: discoveryInfo })
+      beat({ ...lastBeat, at: new Date().toISOString(), discovery: discoveryInfo })
       if (process.env.SMP_DEBUG) console.error('[dsh-skills-mcp-manager] skill scan failed', error)
       discoveredSkills = []
     }
@@ -1770,6 +1487,15 @@ export function apply(ctx, config) {
     return found
   }
 
+  /**
+   * The panel's complete read model. Recomputed per request — nothing here is persisted.
+   *
+   * Three kinds of data, from three different sources, deliberately in one answer because
+   * the browser has no other channel to reach the Host:
+   *   · config rows  → the profile patch file (direct read, mtime cache; Loader adds `phase`)
+   *   · tools/status → the live tool registry + probe caches (observational, TTL'd)
+   *   · skills       → the periodic disk scan
+   */
   const readRuntime = () => {
     const { rows } = configuredMcpRows(ctx)
     const plain = JSON.parse(JSON.stringify(rows))
@@ -1806,891 +1532,539 @@ export function apply(ctx, config) {
     const serverToolsError = inventory.ok
       ? { reason: '', detail: '' }
       : { reason: String(inventory.reason ?? ''), detail: String(inventory.detail ?? '') }
-    projection.toolsError = inventory.ok ? null : `${serverToolsError.reason}: ${serverToolsError.detail}`
     const toolCounts = new Map(serverTools.map((entry) => [entry.serverName, entry.tools.length]))
-    const serverStatus = computeServerStatus({ rows: plain, entries: readServers(), toolCounts })
-    /**
-     * The row list travels with the runtime answer too.
-     *
-     * 面板原来只从 settings 文档里读 `profileServers`。那条路上有一层我们无法观察的缓存
-     * （`ConfigForm` → settings describe 镜像），真机上出现过「Host 已经写好了投影，面板
-     * 却要重开设置页才看见」—— 而面板的乐观卡片 15 秒后会超时消失，于是列表退回旧值。
-     *
-     * `/runtime` 是**每次请求现算**的普通 HTTP 应答，没有中间缓存；面板本来就在轮询它。
-     * 把行数据也放进来，面板就有一条不依赖 settings 镜像的收敛路径。
-     */
-    return { serverTools, serverToolsError, serverStatus, servers: plain }
-  }
-  // Optional injection keeps non-web profiles usable; never fall back to writing tools.
-  ctx.inject(['webServer', 'connection'], (inner) => registerRuntimeRoute(inner, readRuntime))
+    const serverStatus = computeServerStatus({ rows: plain, entries: configuredServers(ctx), toolCounts })
 
-  ctx.inject(['settings'], (inner) => {
-    /**
-     * One-time migration: this plugin's own `config.servers` entries become rows.
-     *
-     * Project servers used to live in a field this plugin owned while global ones were
-     * rows — the same feature stored two ways, which is why the panel had to merge two
-     * arrays into one list and a scope-less registry read could not see project tools at
-     * all. Both tiers are rows now; this moves the leftovers and then clears the field, so
-     * exactly one source remains.
-     *
-     * Runs after a short delay: the startup projection writes the same patch file, and the
-     * two would contend for its lock. Only a non-empty field triggers it, and it is a no-op
-     * once the field is cleared.
-     */
-    inner.effect(() => {
-      /**
-       * Checked on a recurring tick, **not** on a one-shot `setTimeout`.
-       *
-       * A one-shot timer here never survived: `publish()` writes the patch immediately on
-       * startup, `dsh-hmr` reacts by reloading the profile, and the reload disposes this
-       * plugin's effects — clearTimeout() removed the pending migration before it could
-       * fire. The disposal is invisible because the *other* effect in this inject uses
-       * `setInterval`, so a reload simply re-registers it and its side effects continue,
-       * while a one-shot job is lost for good.
-       *
-       * A recurring check has neither problem: it re-arms after every reload, and it is
-       * idempotent (`migrated === 0` once the field is empty, and `migrateServerEntries`
-       * never overwrites an existing row).
-       */
-      const attempt = () => {
-        const legacy = config?.servers?.get?.() ?? config?.servers
-        serverMigrationState.source = Array.isArray(legacy) ? legacy.length : -1
-        if (!Array.isArray(legacy) || legacy.length === 0) {
-          serverMigrationState.status = 'nothing-to-do'
-          return
-        }
-        if (serverMigrationState.status === 'running') return
-        serverMigrationState.status = 'running'
-        Promise.resolve(migrateServerEntries(ctx, legacy))
-          .then((result) => {
-            serverMigrationState.migrated = result.migrated
-            serverMigrationState.status = result.migrated === 0 ? 'already-present' : 'migrated'
-            // Clear the field whenever every entry is accounted for — including when the
-            // rows were already there (`migrated === 0`).
-            //
-            // Returning early on `migrated === 0` left a trap: if the rows landed but this
-            // very write failed (it did once — "timed out waiting for the writer lock"),
-            // the next attempt would find the rows present, report `already-present`, and
-            // never clear the field. The stale entries would then be re-checked on every
-            // tick forever, and the panel would keep showing servers twice (once from the
-            // field, once from the rows).
-            //
-            // Only clearing after the rows are safely on disk is still the rule: the write
-            // above has already succeeded by the time we get here.
-            return Promise.resolve(inner.settings.update(name, { servers: [] }))
-              .then(() => ctx.logger.info('dsh-skills-mcp-manager: %d panel server(s) moved into profile rows', result.migrated))
-          })
-          .catch((error) => {
-            serverMigrationState.status = 'failed'
-            serverMigrationState.reason = String(error?.message ?? error)
-            ctx.logger.warn('dsh-skills-mcp-manager: cannot migrate panel servers into rows: %s', serverMigrationState.reason)
-          })
-      }
-      // First attempt after a short delay (the startup projection holds the patch lock),
-      // then keep re-checking until the field is empty.
-      const timer = setTimeout(attempt, 3000)
-      const repeat = setInterval(attempt, 5000)
-      return () => { clearTimeout(timer); clearInterval(repeat) }
-    }, 'dsh-skills-mcp-manager.server-migration')
+    // The filter may only judge servers the panel can see; refresh the cached name set here
+    // so a freshly added row is covered on the next registration.
+    refreshFilterServers(readServers())
+    const filter = {
+      installed: filterState.installed,
+      reason: filterState.reason,
+      dropped: [...filterState.dropped],
+      preExisting: [...filterState.preExisting],
+    }
+    // The probe's own health travels with the answer: "no server is down" and "we cannot
+    // tell" must never render the same.
+    const probeState = {
+      installed: probe.available(),
+      reason: probe.reason(),
+      results: [...probeCache.entries()].map(([serverName, cached]) => ({
+        serverName,
+        state: String(cached?.state ?? ''),
+        detail: String(cached?.detail ?? ''),
+      })),
+    }
 
-    // Seed from the value already stored in this namespace: a recomposition must
-    // not re-write identical rows, or the write would trigger the next reload.
-    const stored = config?.profileServers?.get?.() ?? config?.profileServers
-    const storedSpaces = config?.workspaces?.get?.() ?? config?.workspaces
-    let published = JSON.stringify([Array.isArray(stored) ? stored : [], Array.isArray(storedSpaces) ? storedSpaces : []])
-    inner.effect(() => {
-      const scan = () => {
-        const roots = []
-        const add = (dir) => {
-          if (typeof dir !== 'string' || dir === '') return
-          const root = projectRootOf(dir)
-          if (!roots.includes(root)) roots.push(root)
-        }
-        for (const entry of agents.values()) add(entry.cwd)
-        for (const workspace of configuredWorkspaces(ctx)) {
-          // configuredWorkspaces returns { path, title } objects
-          add(typeof workspace === "string" ? workspace : workspace?.path)
-        }
-        void refreshDiscovered(roots)
-      }
-      scan()
-      const timer = setInterval(scan, 5000)
-      return () => clearInterval(timer)
-    })
+    const spaces = configuredWorkspaces(ctx).map((workspace) => ({
+      ...workspace,
+      agentsSkillsDir: workspace.path === '' ? '' : join(workspace.path, '.agents', 'skills'),
+    }))
+    const cwds = [...agents.values()].map((entry) => entry.cwd).filter((cwd) => typeof cwd === 'string' && cwd !== '')
+    const skillDirs = {
+      userDsh: join(resolveDshHome(), 'skills'),
+      userAgents: join(agentsHome(), 'skills'),
+    }
 
-    let runtimeCleaned = false
-    let runtimeCleanupPending = false
-    let projectionAlive = true
-    inner.effect(() => () => { projectionAlive = false })
-    const publish = () => {
-      if (!projectionAlive) return
-      if (!runtimeCleaned) {
-        if (runtimeCleanupPending) return
-        runtimeCleanupPending = true
-        Promise.resolve(migratePanelConfig(ctx))
-          .then(() => { runtimeCleaned = true; publish() })
-          .catch((error) => ctx.logger.warn('dsh-skills-mcp-manager: runtime cleanup failed: %s', String(error?.message ?? error)))
-          .finally(() => { runtimeCleanupPending = false })
-        return
-      }
-      const { loaderFound, rows, error } = configuredMcpRows(ctx)
-      projection.loaderFound = loaderFound
-      projection.rows = rows.length
-      // Loader config values can be YAML nodes (Scalar & friends carry iterators);
-      // the settings validator only accepts plain JSON, so normalise first.
-      const plain = JSON.parse(JSON.stringify(rows))
-      const spaces = configuredWorkspaces(ctx).map((workspace) => ({
-        ...workspace,
-        agentsSkillsDir: workspace.path === '' ? '' : join(workspace.path, '.agents', 'skills'),
-      }))
-      const cwds = [...agents.values()].map((entry) => entry.cwd).filter((cwd) => typeof cwd === 'string' && cwd !== '')
-      const currentWorkspace = cwds[0] ?? ''
-      const currentProjectRoot = currentWorkspace === '' ? '' : projectRootOf(currentWorkspace)
+    // Per-server authorization state. Deliberately carries **no token material**: the panel
+    // only needs "is there one, does it expire, do I need to click".
+    const oauthServers = {}
+    for (const server of plain) {
+      if (String(server.transport ?? '') !== 'streamable-http') continue
+      const serverName = String(server.serverName ?? '')
+      if (serverName === '') continue
+      const cached = oauthStatusCache.get(serverName)
+      oauthServers[serverName] = cached === undefined
+        ? { present: false, refreshable: false, waiting: false, authorizeUrl: '', expiresAt: '', expired: false, at: '' }
+        : {
+            present: cached.present === true,
+            refreshable: cached.refreshable === true,
+            waiting: cached.waiting === true,
+            authorizeUrl: String(cached.authorizeUrl ?? ''),
+            expiresAt: String(cached.expiresAt ?? ''),
+            expired: cached.expired === true,
+            at: String(cached.updatedAt ?? ''),
+          }
+    }
 
-      if (error !== undefined) projection.error = error
-      const skillDirs = {
-        userDsh: join(resolveDshHome(), 'skills'),
-        userAgents: join(agentsHome(), 'skills'),
-      }
-      // Keep background probes warm even when no panel is open.
-      readRuntime()
-      // The filter may only judge servers the panel can see, so its cached name set
-      // is refreshed on the same slow tick that publishes everything else.
-      refreshFilterServers(readServers())
-      const filterStateOut = {
-        installed: filterState.installed,
-        reason: filterState.reason,
-        dropped: [...filterState.dropped],
-        preExisting: [...filterState.preExisting],
-      }
-      // The probe's own health travels with the projection: "no server is down" and
-      // "we cannot tell" must never render the same, and the per-server results are the
-      // evidence that separates a genuinely absent instance from a missed one.
-      const probeStateOut = {
-        installed: probe.available(),
-        reason: probe.reason(),
-        results: [...probeCache.entries()].map(([serverName, cached]) => ({
-          serverName,
-          state: String(cached?.state ?? ''),
-          detail: String(cached?.detail ?? ''),
-        })),
-      }
-      /*
-       * OAuth health travels with the projection for the same reason `filterState` does:
-       * "the capability is missing" and "there is nothing to authorize" must never render
-       * the same. Without this, a `needs-auth` card either shows a button that cannot work
-       * (capability broken) or no button at all (capability fine) with no way to tell why.
-       */
-      const redirectUri = oauthRedirectUri()
-      const oauthStateOut = {
+    return {
+      serverTools,
+      serverToolsError,
+      serverStatus,
+      servers: plain,
+      skills: discoveredSkills,
+      skillDirs,
+      workspaces: spaces,
+      currentWorkspace: cwds[0] ?? '',
+      filter,
+      probe: probeState,
+      oauth: {
         ready: oauthReady.ready === true,
         reason: String(oauthReady.reason ?? ''),
         detail: String(oauthReady.detail ?? ''),
         sdkVersion: String(oauthReady.sdkVersion ?? ''),
-        redirectUri,
-      }
-      /*
-       * Per-server authorization state. Deliberately carries **no token material**: the
-       * projection is written into the profile patch file, so an `access_token` here would
-       * land on disk in a file this plugin has proven it cannot reliably rewrite in place.
-       * The panel only needs "is there one, does it expire, do I need to click".
-       *
-       * `publish` is synchronous and credentials live on disk, so the values come from a
-       * cache filled by a fire-and-forget refresh (same pattern as `probeCache`): a slow disk
-       * can lag the label by one tick, but it can never stall the projection.
-       */
-      const oauthServersOut = {}
-      for (const server of plain) {
-        if (String(server.transport ?? '') !== 'streamable-http') continue
-        const serverName = String(server.serverName ?? '')
-        if (serverName === '') continue
-        const cached = oauthStatusCache.get(serverName)
-        oauthServersOut[serverName] = cached === undefined
-          ? { present: false, refreshable: false, waiting: false, authorizeUrl: '', expiresAt: '', expired: false, at: '' }
-          : {
-              present: cached.present === true,
-              refreshable: cached.refreshable === true,
-              waiting: cached.waiting === true,
-              authorizeUrl: String(cached.authorizeUrl ?? ''),
-              expiresAt: String(cached.expiresAt ?? ''),
-              expired: cached.expired === true,
-              // Deliberately NOT `cached.at` (when we last *read* the file): that value
-              // changes every TTL, so putting it here makes the projection key differ on every
-              // publish and the Host writes settings every 5 s forever. This repository has
-              // already been bitten by exactly that (`discoveryInfo.at`), and the smoke test
-              // catches it with 「空闲扫描与连接倒计时不触发 settings 写盘」.
-              at: String(cached.updatedAt ?? ''),
-            }
-      }
-      const { at: scanAt, ...discoveryState } = discoveryInfo
-      const key = JSON.stringify([plain, filterStateOut, probeStateOut, spaces, currentWorkspace, discoveredSkills, skillDirs, discoveryState, oauthStateOut, oauthServersOut])
-      if (key === published) return
-      // Never erase a good projection because the Loader read came back empty.
-      if (plain.length === 0 && !loaderFound) {
-        projection.error = projection.error ?? 'loader unavailable'
-        return
-      }
-      Promise.resolve(inner.settings.update(name, {
-          profileServers: plain, filterState: filterStateOut, probeState: probeStateOut, workspaces: spaces, currentWorkspace, discoveredSkills, skillDirs, discoveryInfo,
-          oauthState: oauthStateOut,
-          oauthServers: oauthServersOut,
-          // Re-assert every publish: this marker has been lost by a later rewrite
-          // before, and losing it hides the row actions in the panel.
-          rowOpsReady: true,
-          reconnectReady: true,
-        }))
-        .then(() => {
-          published = key
-          projection.wrote = true
-          publishedAt = new Date().toISOString()
-          projection.error = null
-        })
-        .catch((writeError) => {
-          projection.error = String(writeError?.message ?? writeError)
-          ctx.logger.warn('dsh-skills-mcp-manager: cannot publish profile rows: %s', projection.error)
-        })
+        redirectUri: oauthRedirectUri(),
+        callbackReady: oauthCallbackReady,
+        callbackPath: oauthCallbackPath,
+        servers: oauthServers,
+      },
+      discovery: discoveryInfo,
     }
-    publish()
-    const timer = setInterval(publish, 5000)
-    inner.effect(() => () => clearInterval(timer))
+  }
+  // Optional injection keeps non-web profiles usable; never fall back to writing tools.
+  ctx.inject(['webServer', 'connection'], (inner) => registerRuntimeRoute(inner, readRuntime))
 
-    /*
-     * Hand the OAuth helpers a way to refresh the projection immediately.
-     *
-     * Bound here because `publish` lives inside this injection while `tick` is declared at the
-     * bottom of `apply()` — the helpers that need them are declared earlier. Assigning (rather
-     * than closing over them) is what keeps those call sites from being a TDZ error, and a
-     * missing assignment only costs a 5 s delay, never correctness.
-     */
-    kickProjection = () => {
-      try {
-        tick()
-        publish()
-      } catch (error) {
-        ctx.logger.warn('dsh-skills-mcp-manager: immediate publish after an OAuth change failed: %s', String(error?.message ?? error))
-      }
-    }
-    inner.effect(() => () => { kickProjection = () => {} })
-
-    /**
-     * patch 文件读完、里面出现了 Loader 还没注册的行 —— 立刻发一次投影。
-     *
-     * 这一步就是「4 秒 → 几十毫秒」的全部意义：文件写入后我们马上就能知道新行，不必
-     * 等 Loader 的文件监听把整条 profile 重载完。Loader 追上之后 `phase` 会自然补上，
-     * 卡片从「连接中」变成「已连接」。
-     */
-    onPatchRowsRefreshed = () => {
-      try {
-        tick()
-        publish()
-      } catch (error) {
-        ctx.logger.warn('dsh-skills-mcp-manager: immediate publish after a patch read failed: %s', String(error?.message ?? error))
-      }
-    }
-    inner.effect(() => () => { onPatchRowsRefreshed = () => {} })
-
-    // Panel commands against profile-configured rows.
-    let applying = false
-    const drain = () => {
-      const ops = config?.rowOps?.get?.() ?? config?.rowOps
-      const queue = Array.isArray(ops) ? ops : []
-      if (applying || queue.length === 0) return
-      applying = true
-      rowOps.pending = queue.length
-      // Clear the queue BEFORE writing the patch: the clear is itself a settings
-      // write, and writing the patch first nests HMR transactions ("HMR
-      // transactions cannot be nested"), which left the queue replaying forever.
-      Promise.resolve(inner.settings.update(name, { rowOps: [] }))
-        .then(() => new Promise((resolve) => setTimeout(resolve, 1200)))
-        .then(async () => {
-          for (const op of queue) {
-            try {
-              await applyRowOp(ctx, op)
-              rowOps.applied += 1
-            } catch (error) {
-              rowOps.error = String(error?.message ?? error)
-              ctx.logger.warn('dsh-skills-mcp-manager: row %s failed: %s', op.op, rowOps.error)
-            }
-          }
+  // ── One-time migration ──────────────────────────────────────────────────────────────
+  //
+  // Everything this panel used to keep in `config` (skills, legacy servers, projections)
+  // becomes files: skills → `SKILL.md`, servers → profile rows. The write is one raw-patch
+  // pass (lock → backup → atomic write, see `migratePanelConfig`), after which those keys no
+  // longer exist in the profile patch. It must run before the first panel read; a failed
+  // attempt retries on a slow tick, because a profile lock can be held at startup.
+  ctx.effect(() => {
+    let stopped = false
+    let done = false
+    const attempt = () => {
+      if (done || stopped) return
+      serverMigrationState.status = 'running'
+      Promise.resolve(migratePanelConfig(ctx))
+        .then((changed) => {
+          done = true
+          serverMigrationState.status = changed > 0 ? 'migrated' : 'nothing-to-do'
+          serverMigrationState.migrated = changed
+          try { tick() } catch { /* tick is declared below; the 2 s timer runs it anyway */ }
         })
         .catch((error) => {
-          rowOps.error = String(error?.message ?? error)
-        })
-        .finally(() => {
-          rowOps.pending = 0
-          // Row ops change the profile; recompute and publish at once instead of
-          // waiting for the 2s tick plus the 5s publish timer (that pair made the first
-          // create look slow while the write itself had long finished).
-          try { tick(); publish() } catch (error) { console.error('[dsh-skills-mcp-manager] post-drain refresh failed:', error) }
-          applying = false
-          beat({ ...lastBeat, at: new Date().toISOString(), rowOps })
-          // The Loader hot-reloads the patch a moment after the write; keep republishing
-          // until it has, so the panel list reflects the change without a page switch.
-          republishSoon()
+          serverMigrationState.status = 'failed'
+          serverMigrationState.reason = String(error?.message ?? error)
+          ctx.logger.warn('dsh-skills-mcp-manager: migration failed: %s', serverMigrationState.reason)
         })
     }
-    drain()
-    const opTimer = setInterval(drain, 500)
-    inner.effect(() => () => clearInterval(opTimer))
+    const timer = setTimeout(attempt, 800)
+    const repeat = setInterval(attempt, 5000)
+    return () => { stopped = true; clearTimeout(timer); clearInterval(repeat) }
+  }, 'dsh-skills-mcp-manager.migration')
 
-    /**
-     * 一行改动之后，追着发布几次投影，直到 Loader 把新 patch 读进来。
-     *
-     * 为什么单次不够：`publish()` 的行数据来自 **Loader 的 entries**，而 Loader 走文件监听
-     * 重载 patch，实测要 4 秒左右（真机时间线：11:05:25.993 写入完成 → 11:05:32.007 才
-     * 投影出第 3 行）。写完之后立刻 publish 一次，读到的仍是旧的 2 行，`key` 没变于是
-     * **什么都不写**；面板就只能等下一个 5 秒定时器，最坏 6 秒才看到新行。
-     *
-     * `publish()` 自己按 `key` 去重，所以多调几次的代价只是几次字符串比较 —— 一旦投影
-     * 真的变了就立刻写出去，之后的重试全部空转。这比「把定时器改成 1 秒」好：那是空转，
-     * 这是按需。
-     */
-    const republishSoon = () => {
-      for (const delay of [300, 800, 1500, 2500, 4000]) {
-        setTimeout(() => { try { publish() } catch { /* 下一次重试，或 5 秒定时器兜底 */ } }, delay)
+  // ── Disk skill scan (memory only; served by `/runtime`) ─────────────────────────────
+  //
+  // The skills tab has no config source any more: the four roots on disk are the whole
+  // truth. The scan is periodic so `/runtime` is cheap, but it never writes anything.
+  ctx.effect(() => {
+    const scan = () => {
+      const roots = []
+      const add = (dir) => {
+        if (typeof dir !== 'string' || dir === '') return
+        const root = projectRootOf(dir)
+        if (!roots.includes(root)) roots.push(root)
       }
+      for (const entry of agents.values()) add(entry.cwd)
+      for (const workspace of configuredWorkspaces(ctx)) {
+        add(typeof workspace === 'string' ? workspace : workspace?.path)
+      }
+      void refreshDiscovered(roots)
     }
-
-    /**
-     * Row commands over HTTP — the short path, beside the queue above.
-     *
-     * The write takes ~1–5 ms (measured). The queue route wrapped 2–4 s of *waiting* around it:
-     * a 500 ms drain poll, a fixed 1200 ms pause (see the comment above `drain`), the Loader's
-     * reload of the patch, and then the panel's own poll before it saw anything. During all of
-     * that the panel could only show a spinner. Same service DSH's own plugins use for their
-     * routes, same trust check as the runtime read route, and the **same `RowOp` schema** the
-     * queue validated with — so the two channels cannot disagree about what a command means.
-     *
-     * The queue keeps draining: a panel that only knows that channel still works, and it stays
-     * the fallback when this route is unavailable (an older Host, or a profile with no web
-     * server).
-     */
-    ctx.inject(['webServer', 'connection'], (routeCtx) => registerRowRoute(routeCtx, {
-      schema: (payload) => RowOp(payload),
-      apply: async (op) => {
-        await applyRowOp(routeCtx, op)
-        // The patch changed outside the settings channel, so refresh the projection now rather
-        // than waiting for the 2 s tick: the list is built from it, and a short round-trip is
-        // the whole point of this route.
-        try { tick(); publish() } catch (error) {
-          routeCtx.logger.warn('dsh-skills-mcp-manager: post-command refresh failed: %s', String(error?.message ?? error))
-        }
-        // 第一次 publish 多半还读不到新行（Loader 尚未重载），继续追几次。
-        republishSoon()
-        return { ok: true, reason: '' }
-      },
-    }))
-
-    /**
-     * Panel requests to reconnect one MCP server.
-     *
-     * Why the instance has to be recreated instead of "nudged": the retry state lives
-     * inside the client's closure (`failedAttempts`, `reconnectTimer`) and there is no
-     * API to reset it. Worse, `dispose()` clears the pending reconnect timer, so once
-     * a server has given up only a **new plugin instance** gets a fresh budget. For a
-     * global row that means letting the Loader rebuild the row; for a project entry
-     * this plugin owns the mount and can drop it directly.
-     *
-     * The global sequence is two writes (disable, then re-enable) that are deliberately
-     * spread across ticks: `dsh-hmr` watches the patch file, and a value written and
-     * immediately restored can coalesce into "no change" and never reload at all. It
-     * also waits for the disable to actually show up in the Loader before re-enabling,
-     * so the re-enable can never land while the old instance is still alive.
-     */
-    let reconnectTask = null
-    let seenReconnectNonce = ''
-    let reconnectResult = { nonce: '', ok: false, error: '' }
-    /** How long to wait for the Loader to reflect a disable before giving up on it. */
-    const RECONNECT_STEP_TIMEOUT_MS = 25000
-
-    const clearReconnectRequest = () => Promise.resolve(inner.settings.update(name, {
-      reconnectRequest: { tier: '', serverName: '', scope: '', nonce: '', at: '' },
-      reconnectResult: { ...reconnectResult },
-    }))
-
-    const finishReconnect = (nonce, error) => {
-      reconnectResult = { nonce, ok: error === undefined, error: error === undefined ? '' : String(error) }
-      if (error !== undefined) ctx.logger.warn('dsh-skills-mcp-manager: reconnect failed: %s', reconnectResult.error)
-      reconnectTask = null
-      // Refresh first so the tag moves immediately, then clear the request so the panel
-      // stops showing it as in flight. A leftover `disabled: true` is never acceptable,
-      // so any failure path still lands here having restored the row.
-      clearReconnectRequest()
-        .then(() => {
-          try {
-            tick()
-            publish()
-          } catch (refreshError) {
-            ctx.logger.warn('dsh-skills-mcp-manager: post-reconnect refresh failed: %s', String(refreshError?.message ?? refreshError))
-          }
-        })
-        .catch((writeError) => {
-          ctx.logger.warn('dsh-skills-mcp-manager: cannot clear the reconnect request: %s', String(writeError?.message ?? writeError))
-        })
-    }
-
-    const remountProject = (serverName) => {
-      let touched = 0
-      for (const [agent, entry] of agents) {
-        const desired = projectServersFor(committedServers, entry.cwd)
-        if (!desired.some((server) => server.serverName === serverName)) continue
-        // Re-mounting is per-agent and covers that agent's whole project set: the mount
-        // bookkeeping keeps one disposer list per agent, so a single server cannot be
-        // swapped on its own. A manual reconnect is rare and every server involved gets
-        // a fresh budget, which is the safer direction.
-        entry.key = null
-        mountForAgent(agent, entry)
-        touched += 1
-      }
-      return touched
-    }
-
-    const advanceReconnect = () => {
-      const task = reconnectTask
-      if (task === null) return
-      if (task.stage === 'project') {
-        const touched = remountProject(task.serverName)
-        /**
-         * 重新挂载之后，「连接断开」这条探测结论也过期了 —— 不清掉的话，第一次投影会
-         * 拿它去贴标签（用户看到「已放弃重试」），要等到下一个 12 秒的 TTL 才会变成
-         * 「已连接」。清掉之后状态先落到「连接中」，探测落地后再变「已连接」，
-         * 每一步都是真的。
-         */
-        invalidateServerCaches(task.serverName)
-        finishReconnect(task.nonce, touched === 0 ? `没有会话正在使用项目级服务器 ${task.serverName}，无需重连` : undefined)
-        return
-      }
-      // Global row: disable → wait for the Loader to confirm → re-enable.
-      if (task.stage === 'stop') {
-        if (applying) return // never interleave patch writes with the row-op drain
-        const row = configuredMcpRows(ctx).rows.find((item) => item.serverName === task.serverName)
-        if (row === undefined || row.entryId === '') {
-          finishReconnect(task.nonce, `profile 里找不到服务器 ${task.serverName} 对应的行`)
-          return
-        }
-        if (row.enabled === false) {
-          finishReconnect(task.nonce, `服务器 ${task.serverName} 处于停用状态，先在面板里启用它`)
-          return
-        }
-        task.entryId = row.entryId
-        task.stage = 'await-stop'
-        task.sentAt = Date.now()
-        Promise.resolve(applyRowOp(ctx, { op: 'toggle', entryId: row.entryId, enabled: false }))
-          .catch((error) => finishReconnect(task.nonce, String(error?.message ?? error)))
-        return
-      }
-      if (task.stage === 'await-stop') {
-        const row = configuredMcpRows(ctx).rows.find((item) => item.entryId === task.entryId)
-        const stopped = row === undefined || row.enabled === false
-        if (!stopped && Date.now() - task.sentAt < RECONNECT_STEP_TIMEOUT_MS) return
-        task.stage = 'start'
-        // Re-enable even on timeout: leaving the row disabled would turn a failed
-        // reconnect into a worse regression than the one the user was fixing.
-        Promise.resolve(applyRowOp(ctx, { op: 'toggle', entryId: task.entryId, enabled: true }))
-          .then(() => finishReconnect(task.nonce, stopped ? undefined : '停用后未等到 Loader 卸载该行，已重新启用，请再试一次'))
-          .catch((error) => finishReconnect(task.nonce, String(error?.message ?? error)))
-      }
-    }
-
-    const drainReconnect = () => {
-      const request = config?.reconnectRequest?.get?.() ?? config?.reconnectRequest
-      const nonce = typeof request?.nonce === 'string' ? request.nonce : ''
-      if (reconnectTask === null && nonce !== '' && nonce !== seenReconnectNonce) {
-        seenReconnectNonce = nonce
-        const serverName = String(request?.serverName ?? '')
-        const tier = String(request?.tier ?? '')
-        if (serverName === '') {
-          finishReconnect(nonce, '请求里没有服务器名')
-          return
-        }
-        reconnectTask = { nonce, serverName, tier, entryId: '', stage: tier === 'project' ? 'project' : 'stop', sentAt: Date.now() }
-      }
-      advanceReconnect()
-    }
-    drainReconnect()
-    const reconnectTimer = setInterval(drainReconnect, 500)
-    inner.effect(() => () => clearInterval(reconnectTimer))
-
-    /**
-     * 令牌预刷新。
-     *
-     * 放在这里（而不是 `apply` 顶层）和 `reconnectTimer` 同样的理由：它需要 `kickProjection`，
-     * 而那个函数由 settings 注入赋值。用 `unref` 不需要：cordis 的 effect disposer 会在
-     * 卸载时 clearInterval，Host 自己的生命周期本来就长于插件。
-     */
-    const refreshSweepTimer = setInterval(sweepOAuthRefresh, OAUTH_REFRESH_SWEEP_MS)
-    inner.effect(() => () => clearInterval(refreshSweepTimer))
-
-    /**
-     * Apply one skill write, shared by the HTTP route and the settings-queue fallback.
-     *
-     * Extracted so the two channels cannot drift: they used to differ in ways that mattered
-     * (the queue path re-scanned roots, the direct path must too), and a fix in one place
-     * silently missing the other is exactly the failure mode this plugin has hit before with
-     * `serverRows.js`'s two field lists.
-     *
-     * `read` is **not** handled here — it stays on the queue (see `skills/route.js`).
-     */
-    const applySkillWrite = async (skillReq) => {
-      const at = () => new Date().toISOString()
-      const fail = (reason) => ({ ok: false, reason, name: '', body: '', nonce: String(skillReq?.nonce ?? ''), at: at() })
-      const op = String(skillReq?.op ?? '')
-      const roots = writableRoots({
-        dshHome: resolveDshHome(),
-        agentsHome: agentsHome(),
-        projectRoot: skillReq?.project === '' ? '' : projectRootOf(String(skillReq.project)),
-      })
-      const target = roots.find((entry) => entry.scope === skillReq?.scope && entry.id === skillReq?.id)
-      let result
-      if (String(skillReq?.scope ?? '') === 'project' && String(skillReq?.project ?? '') === '') {
-        // Never guess: an empty project used to fall back to the cwd and wrote
-        // the skill into the wrong workspace.
-        result = fail('未选择项目，无法写入项目级技能')
-      } else if (target === undefined) {
-        result = fail('未知的写入区域')
-      } else {
-        const payload = {
-          dir: target.dir, name: String(skillReq?.name ?? ''),
-          description: String(skillReq?.description ?? ''), body: String(skillReq?.body ?? ''),
-        }
-        // A disk op that throws (a failing copy, a permission error) must
-        // still produce an answer: without a receipt the panel's card kept
-        // spinning on 「删除中…」 forever.
-        let done
-        try {
-          done = op === 'create' ? await createSkill(payload)
-            : op === 'rename' ? await renameSkill({ ...payload, from: String(skillReq?.prevName ?? ''), to: String(skillReq?.name ?? '') })
-              : op === 'delete' ? await deleteSkill(payload)
-                : await updateSkill(payload)
-        } catch (error) {
-          done = { ok: false, reason: String(error?.message ?? error) }
-        }
-        result = { ok: done.ok === true, reason: String(done.reason ?? ''), name: String(done.name ?? ''), body: '', nonce: String(skillReq?.nonce ?? ''), at: at() }
-      }
-      if (result.ok === true) {
-        // Re-scan so the projection can show it now. A `read` never reaches here, and the
-        // periodic scan already covers every project — but a write must refresh the roots it
-        // touched, or the new skill is invisible until the next 5 s scan.
-        try {
-          const projectScopes = [...new Set(discoveredSkills
-            .map((entry) => entry.scope)
-            .filter((scope) => typeof scope === 'string' && scope !== '' && scope !== 'global'))]
-          await refreshDiscovered([...new Set([
-            ...roots.map((entry) => projectRootOf(entry.dir)),
-            ...projectScopes,
-          ])].filter((root) => typeof root === 'string' && root !== ''))
-        } catch (error) {
-          if (process.env.SMP_DEBUG) console.error('[dsh-skills-mcp-manager] post-write rescan failed', error)
-        }
-      }
-      return result
-    }
-
-    /** Record what just happened (diagnostics) and push the projection out now. */
-    const finishSkillOp = (op, skillReq, result) => {
-      lastOp = {
-        op: String(op ?? ''), name: String(skillReq?.name ?? ''),
-        nonce: String(result?.nonce ?? ''), ok: result?.ok === true,
-        at: new Date().toISOString(),
-      }
-      // Publish immediately: waiting for the 5s publish interval was the
-      // entire reason a save took ~4.6s to show up in the panel.
-      try { tick(); publish() } catch (error) { console.error('[dsh-skills-mcp-manager] immediate publish failed:', error) }
-    }
-
-    /**
-     * Skill writes over HTTP — same reasoning as the row route above.
-     *
-     * Writing one file takes **1 ms** (measured); the queue round-trip took up to **9.1 s**
-     * because it stacked four polls (600 ms request drain + the panel's settings poll + the
-     * 2 s reconcile tick + the 5 s publish). Adding a skill is a click, so it should not wait
-     * on four timers. Deleting only *felt* fast — it has an optimistic tombstone; it used the
-     * same slow channel.
-     *
-     * The queue keeps draining, so an older panel still works and this route stays an
-     * optimisation rather than a requirement.
-     */
-    ctx.inject(['webServer', 'connection'], (skillRouteCtx) => registerSkillRoute(skillRouteCtx, {
-      schema: (payload) => SkillRequest(payload),
-      apply: async (request) => {
-        const op = String(request?.op ?? '')
-        // `read` is a read: it stays on the settings channel (that is where the panel asks for
-        // it, and it is not the slow path anyone complained about). Refusing it here keeps the
-        // route's contract to "writes only", so a mis-routed request fails loudly.
-        if (op === 'read') return { ok: false, reason: 'read 不走此路由', name: '', body: '', nonce: String(request?.nonce ?? ''), at: new Date().toISOString() }
-        const result = await applySkillWrite(request)
-        finishSkillOp(op, request, result)
-        return result
-      },
-    }))
-
-    /**
-     * OAuth: the command route and the browser callback.
-     *
-     * Registered on the same `webServer` service the row/skill routes use. The callback is
-     * the only route in this plugin that **cannot** carry `connection.requestRejection`:
-     * the browser arrives from the authorization server's 302, which has no DSH session
-     * cookie, so that check would 401 every callback and authorization could never finish.
-     * Its security boundary is the one-time `state` instead (see `src/mcp/oauth/state.js`).
-     */
-    ctx.inject(['webServer', 'connection'], (oauthRouteCtx) => {
-      registerOAuthRoute(oauthRouteCtx, {
-        // Only the action and the target are accepted; everything else is ours to decide.
-        schema: (payload) => OAuthCommand(payload),
-        run: runOAuthCommand,
-      })
-      const registered = registerOAuthCallback(oauthRouteCtx, {
-        servers: () => candidateServers(),
-        flow: {
-          checkCallback: async (...args) => {
-            await oauthBootstrapped
-            if (oauthFlow === null) return { ok: false, reason: 'no-authorization-in-progress' }
-            return oauthFlow.checkCallback(...args)
-          },
-          complete: async (serverName, url, code) => {
-            await oauthBootstrapped
-            if (oauthFlow === null) return { ok: false, reason: 'oauth-sdk-unavailable', detail: '', text: 'OAuth 支持未安装' }
-            const done = await oauthFlow.complete(serverName, url, code)
-            // The client's own retry loop has already given up by the time a user authorizes
-            // (10 attempts with backoff). A fresh instance is the only way back — the same
-            // constraint the reconnect button works around.
-            try { oauthStatusCache.delete(serverName) } catch { /* cache miss is harmless */ }
-            kickProjection()
-            return done
-          },
-        },
-        onAuthorized: async (serverName) => {
-          /**
-           * 授权一完成就**自己重连**，不等用户回面板再点一次。
-           *
-           * 用户的期望是「点授权 → 浏览器 → 登录 → 就能用了」。中间插一步「回到面板点重连」
-           * 是把机器该做的事推给人工，而且那一步的时机用户并不知道（回调页和面板是两个地方）。
-           *
-           * 重连复用既有的任务机（`reconnectTask` + 500 ms 的 drain）：项目级行重新挂载，
-           * 全局行走「停用 → 等 Loader 卸载 → 启用」，两条路径本来就已经写好并有测试。
-           * 这里只是把任务放进去，不新写一套。
-           */
-          ctx.logger.info('dsh-skills-mcp-manager: %s finished OAuth authorization, reconnecting', serverName)
-          /**
-           * 先把授权前的观测结论全部丢掉，再排重连。
-           *
-           * 顺序很重要：缓存不先清，紧接着那次 `kickProjection()` 会拿「需要授权 / 没有
-           * 凭据 / 连接断开」这三条旧结论去渲染，用户看到的还是授权前的样子。
-           */
-          invalidateServerCaches(serverName)
-          const target = candidateServers().find((entry) => entry.serverName === serverName)
-          const tier = target !== undefined && String(target.scope ?? '') === 'global' ? 'global' : 'project'
-          /**
-           * 已经在跑的 reconnect 任务不抢占：它的 nonce 已经发给请求方，换掉会让那一侧
-           * 永远等不到结果。授权成功后状态会自己投影刷新，用户在面板上也会看到结果。
-           */
-          if (reconnectTask === null) {
-            reconnectTask = {
-              nonce: `oauth:${Date.now()}`,
-              serverName,
-              tier,
-              entryId: '',
-              stage: tier === 'project' ? 'project' : 'stop',
-              sentAt: Date.now(),
-            }
-          }
-          kickProjection()
-        },
-        snapshot: () => oauthResultCache,
-        log: { warn: (message) => ctx.logger.warn(message) },
-      })
-      oauthCallbackReady = registered.installed === true
-      oauthCallbackPath = registered.installed === true ? CALLBACK_PATH : `unavailable: ${registered.reason}`
-      if (registered.installed !== true) {
-        ctx.logger.warn('dsh-skills-mcp-manager: OAuth callback route unavailable — %s', registered.reason)
-      }
-    })
-
-    // Project MCP import: the panel posts a request, this half scans one tool's
-    // project files and writes the answer back for the panel to preview.
-    let seenNonce = ''
-    const importTimer = setInterval(() => {
-      {
-        const skillReq = config?.skillRequest?.get?.() ?? config?.skillRequest
-        const skillNonce = typeof skillReq?.nonce === 'string' ? skillReq.nonce : ''
-        if (skillNonce !== '' && skillNonce !== seenSkillNonce) {
-          seenSkillNonce = skillNonce
-          const op = String(skillReq?.op ?? '')
-          const roots = writableRoots({
-            dshHome: resolveDshHome(),
-            agentsHome: agentsHome(),
-            projectRoot: skillReq?.project === '' ? '' : projectRootOf(String(skillReq.project)),
-          })
-          void (async () => {
-           try {
-            let result
-            if (op === 'read') {
-              // Only ever read a file the scan actually found — but the in-memory list
-              // can lag a just-created skill, so rescan once before refusing (using the
-              // same root sources as the periodic scan).
-              const wanted = String(skillReq?.path ?? '')
-              const isKnown = () => Array.isArray(discoveredSkills) && discoveredSkills.some((entry) => entry.path === wanted)
-              const known = isKnown()
-              if (!known) {
-                try {
-                  const extra = []
-                  for (const agent of agents.values()) extra.push(projectRootOf(agent.cwd))
-                  for (const workspace of configuredWorkspaces(ctx)) extra.push(projectRootOf(String(workspace?.path ?? workspace?.dir ?? '')))
-                  const scopes = discoveredSkills.map((entry) => entry.scope).filter((scope) => typeof scope === 'string' && scope !== '' && scope !== 'global')
-                  const nextRoots = [...new Set([...roots.map((entry) => projectRootOf(entry.dir)), ...scopes, ...extra])]
-                    .filter((root) => typeof root === 'string' && root !== '')
-                  await refreshDiscovered(nextRoots)
-                } catch (error) {
-                  if (process.env.SMP_DEBUG) console.error('[dsh-skills-mcp-manager] read rescan failed', error)
-                }
-              }
-              if (!isKnown()) {
-                result = { ok: false, reason: '该技能不在当前扫描结果里', name: '', body: '', nonce: skillNonce , at: new Date().toISOString() }
-              } else {
-                try {
-                  const text = await readFile(wanted, 'utf8')
-                  result = { ok: true, reason: '', name: '', body: bodyOf(text), nonce: skillNonce , at: new Date().toISOString() }
-                } catch (error) {
-                  result = { ok: false, reason: String(error?.message ?? error), name: '', body: '', nonce: skillNonce , at: new Date().toISOString() }
-                }
-              }
-            }
-            else {
-              // Writes share one implementation with the HTTP route (`applySkillWrite`), so a
-              // fix cannot land in one channel and miss the other.
-              result = await applySkillWrite(skillReq)
-            }
-            // A skill op must never throw out of here: an exception used to escape
-            // the plugin load and DSH exited with "fatal load failure", taking the
-            // whole app (and every other plugin) down with it.
-            try {
-              await Promise.resolve(inner.settings.update(name, {
-                skillResult: result,
-                // Clear the request in the same write so a restart cannot replay it.
-                skillRequest: { op: '', scope: '', id: '', project: '', path: '', name: '', prevName: '', description: '', body: '', nonce: '' },
-              }))
-              // A `read` never touches the disk, so it must not move the projection —
-              // re-scanning from the request's own roots shrank the list to global-only,
-              // which made project skills vanish mid-preview.
-              if (op !== 'read') finishSkillOp(op, skillReq, result)
-            } catch (error) {
-              console.error('[dsh-skills-mcp-manager] skill op failed:', error)
-            }
-           } catch (error) {
-            console.error('[dsh-skills-mcp-manager] skill request failed:', error)
-           }
-          })()
-        }
-      }
-
-      const request = config?.importRequest?.get?.() ?? config?.importRequest
-      const nonce = typeof request?.nonce === 'string' ? request.nonce : ''
-      if (nonce === '' || nonce === seenNonce) return
-      seenNonce = nonce
-      const source = typeof request?.source === 'string' ? request.source : ''
-      const scope = request?.scope === 'global' ? 'global' : 'project'
-      const project = typeof request?.project === 'string' ? request.project : ''
-      let payload
-      try {
-        payload = { nonce, source, scope, project, at: new Date().toISOString(), ...scanImportSource(scope, project, source) }
-      } catch (error) {
-        payload = { nonce, source, scope, project, at: new Date().toISOString(), files: [], servers: [], error: String(error?.message ?? error) }
-      }
-      Promise.resolve(inner.settings.update(name, { importResult: payload }))
-        .catch((error) => ctx.logger.warn('dsh-skills-mcp-manager: import scan failed: %s', String(error?.message ?? error)))
-    }, 600)
-    inner.effect(() => () => clearInterval(importTimer))
+    scan()
+    const timer = setInterval(scan, 5000)
+    return () => clearInterval(timer)
   })
 
-  let lastReconcile = null
+  /**
+   * patch 文件读完 —— 刷新运行态，让 /runtime 下一次就带上新行。
+   *
+   * 这里没有 settings 写入，也没有投影：行列表由 `/runtime` 现算；`phase` 由 Loader 合并。
+   */
+  onPatchRowsRefreshed = () => {
+    try { tick() } catch { /* 下一次 tick 会再试 */ }
+  }
+
+  /** One command chain for every write route: no interleaved read-modify-write on the patch. */
+  let commandChain = Promise.resolve()
+  const serialized = (run) => {
+    const next = commandChain.then(run, run)
+    commandChain = next.catch(() => {})
+    return next
+  }
+
+  // ── Row commands over HTTP ──────────────────────────────────────────────────────────
+  //
+  // The panel owns the profile patch's mcp-client rows. There is no queue any more: a
+  // command either applies and answers with the resulting row list, or fails with a reason.
+  ctx.inject(['webServer', 'connection'], (routeCtx) => registerRowRoute(routeCtx, {
+    schema: (payload) => RowOp(payload),
+    apply: async (op) => serialized(async () => {
+      // Capture the server name(s) this command may affect **before** the write: a rename
+      // has two, a delete only the old one. Their probe/auth caches must be invalidated or
+      // the card keeps showing the old connection for up to the 12 s probe TTL.
+      const bareId = (value) => String(value ?? '').replace(/^include:/, '')
+      const targetId = bareId(op?.entryId)
+      const findRow = (rows) => rows.find((row) => bareId(row.entryId) === targetId)
+      const before = findRow(configuredMcpRows(routeCtx).rows)
+      await applyRowOp(routeCtx, op)
+      // Read the file back before answering: the client applies this list directly, so it
+      // must not be the Loader view from before the write.
+      const file = patchFileOf(routeCtx)
+      if (file !== '') await refreshPatchRows(file, { force: true })
+      const { rows } = configuredMcpRows(routeCtx)
+      const after = findRow(rows)
+      const affected = new Set([before?.serverName, after?.serverName].filter((name) => typeof name === 'string' && name !== ''))
+      for (const serverName of affected) invalidateServerCaches(serverName)
+      try {
+        // The file is the stable source after our own write, so commit immediately instead
+        // of waiting for two 2 s Loader observations. mountForAgent keeps unchanged project
+        // servers mounted, so only the edited one reconnects.
+        tick({ force: true })
+      } catch (error) {
+        routeCtx.logger.warn('dsh-skills-mcp-manager: post-command refresh failed: %s', String(error?.message ?? error))
+      }
+      return { ok: true, reason: '', servers: JSON.parse(JSON.stringify(configuredMcpRows(routeCtx).rows)) }
+    }),
+  }))
+
+  // ── Reconnect ───────────────────────────────────────────────────────────────────────
+  //
+  // Why the instance has to be recreated instead of "nudged": the retry state lives inside
+  // the client's closure (`failedAttempts`, `reconnectTimer`) and there is no API to reset
+  // it. Worse, `dispose()` clears the pending reconnect timer, so once a server has given up
+  // only a **new plugin instance** gets a fresh budget. Global rows are rebuilt by the
+  // Loader (disable → wait for it to unload → enable); project rows are remounted by us.
+  //
+  // This is a command, not state: it is an HTTP request that answers when it is done. It is
+  // never written into the profile patch, so a restart cannot replay it.
+  const RECONNECT_STEP_TIMEOUT_MS = 25000
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+  const remountProject = (serverName) => {
+    let touched = 0
+    for (const [agent, entry] of agents) {
+      const desired = projectServersFor(committedServers, entry.cwd)
+      const wanted = desired.some((server) => server.serverName === serverName)
+      let had = false
+      // Only this server's instance is dropped; the rest of the agent's project servers
+      // keep their connections (see mountForAgent's per-server bookkeeping).
+      for (const [key, mounted] of [...entry.mounted]) {
+        if (mounted.serverName !== serverName) continue
+        unmount(mounted.stops)
+        entry.mounted.delete(key)
+        had = true
+      }
+      if (!wanted && !had) continue
+      mountForAgent(agent, entry)
+      touched += 1
+    }
+    return touched
+  }
+
+  /** The Loader's own view (for "did the disable actually take effect?"). */
+  const loaderRows = () => serverRows([...(loaderOf(ctx)?.entries?.() ?? [])])
+
+  // Deliberately **not** part of the row-command chain: a global reconnect legitimately
+  // waits seconds for the Loader to unload the row, and blocking unrelated row edits for
+  // that long would be worse than letting the two writes interleave (applyRowOp takes the
+  // same file lock either way).
+  const reconnectServer = async (request) => {
+    const serverName = String(request?.serverName ?? '')
+    const tier = String(request?.tier ?? '')
+    if (serverName === '') return { ok: false, reason: '请求里没有服务器名' }
+    try {
+      if (tier === 'project') {
+        const touched = remountProject(serverName)
+        // 「连接断开」这条探测结论在重新挂载后也过期了。
+        invalidateServerCaches(serverName)
+        try { tick() } catch { /* 下一次 tick 会再试 */ }
+        return touched === 0
+          ? { ok: false, reason: `没有会话正在使用项目级服务器 ${serverName}，无需重连` }
+          : { ok: true, reason: '' }
+      }
+      const row = configuredMcpRows(ctx).rows.find((item) => item.serverName === serverName)
+      if (row === undefined || row.entryId === '') {
+        return { ok: false, reason: `profile 里找不到服务器 ${serverName} 对应的行` }
+      }
+      if (row.enabled === false) {
+        return { ok: false, reason: `服务器 ${serverName} 处于停用状态，先在面板里启用它` }
+      }
+      const entryId = row.entryId
+      await applyRowOp(ctx, { op: 'toggle', entryId, enabled: false })
+      const deadline = Date.now() + RECONNECT_STEP_TIMEOUT_MS
+      let stopped = false
+      while (Date.now() < deadline) {
+        const live = loaderRows().find((item) => item.entryId === entryId)
+        if (live === undefined || live.enabled === false) { stopped = true; break }
+        await sleep(200)
+      }
+      // Re-enable even on timeout: leaving the row disabled would turn a failed reconnect
+      // into a worse regression than the one the user was fixing.
+      await applyRowOp(ctx, { op: 'toggle', entryId, enabled: true })
+      try { tick() } catch { /* 下一次 tick 会再试 */ }
+      return stopped
+        ? { ok: true, reason: '' }
+        : { ok: false, reason: '停用后未等到 Loader 卸载该行，已重新启用，请再试一次' }
+    } catch (error) {
+      ctx.logger.warn('dsh-skills-mcp-manager: reconnect failed: %s', String(error?.message ?? error))
+      return { ok: false, reason: String(error?.message ?? error) }
+    }
+  }
+
+  ctx.inject(['webServer', 'connection'], (reconnectCtx) => registerReconnectRoute(reconnectCtx, {
+    schema: (payload) => ReconnectRequest(payload),
+    run: reconnectServer,
+  }))
+
+  /** Token pre-refresh. Runs without a panel; it only touches the credential files. */
+  ctx.effect(() => {
+    const timer = setInterval(sweepOAuthRefresh, OAUTH_REFRESH_SWEEP_MS)
+    return () => clearInterval(timer)
+  }, 'dsh-skills-mcp-manager.oauth-sweep')
+
+  // ── Skill writes over HTTP ──────────────────────────────────────────────────────────
+  //
+  // A skill is a directory on disk and nothing else. The four roots are the whole model:
+  // create/update/rename/delete go straight to `SKILL.md`, and the list is the disk scan.
+  const applySkillWrite = async (skillReq) => {
+    const at = () => new Date().toISOString()
+    const fail = (reason) => ({ ok: false, reason, name: '', body: '', nonce: String(skillReq?.nonce ?? ''), at: at() })
+    const op = String(skillReq?.op ?? '')
+    const roots = writableRoots({
+      dshHome: resolveDshHome(),
+      agentsHome: agentsHome(),
+      projectRoot: skillReq?.project === '' ? '' : projectRootOf(String(skillReq.project)),
+    })
+    const target = roots.find((entry) => entry.scope === skillReq?.scope && entry.id === skillReq?.id)
+    let result
+    if (String(skillReq?.scope ?? '') === 'project' && String(skillReq?.project ?? '') === '') {
+      // Never guess: an empty project used to fall back to the cwd and wrote
+      // the skill into the wrong workspace.
+      result = fail('未选择项目，无法写入项目级技能')
+    } else if (target === undefined) {
+      result = fail('未知的写入区域')
+    } else {
+      const payload = {
+        dir: target.dir, name: String(skillReq?.name ?? ''),
+        description: String(skillReq?.description ?? ''), body: String(skillReq?.body ?? ''),
+      }
+      // A disk op that throws (a failing copy, a permission error) must
+      // still produce an answer: without a receipt the panel's card kept
+      // spinning on 「删除中…」 forever.
+      let done
+      try {
+        done = op === 'create' ? await createSkill(payload)
+          : op === 'rename' ? await renameSkill({ ...payload, from: String(skillReq?.prevName ?? ''), to: String(skillReq?.name ?? '') })
+            : op === 'delete' ? await deleteSkill(payload)
+              : await updateSkill(payload)
+      } catch (error) {
+        done = { ok: false, reason: String(error?.message ?? error) }
+      }
+      result = { ok: done.ok === true, reason: String(done.reason ?? ''), name: String(done.name ?? ''), body: '', nonce: String(skillReq?.nonce ?? ''), at: at() }
+    }
+    if (result.ok === true) {
+      // Re-scan so `/runtime` shows the change now. The periodic scan already covers every
+      // project, but a write must refresh the roots it touched.
+      try {
+        const projectScopes = [...new Set(discoveredSkills
+          .map((entry) => entry.scope)
+          .filter((scope) => typeof scope === 'string' && scope !== '' && scope !== 'global'))]
+        await refreshDiscovered([...new Set([
+          ...roots.map((entry) => projectRootOf(entry.dir)),
+          ...projectScopes,
+        ])].filter((root) => typeof root === 'string' && root !== ''))
+      } catch (error) {
+        if (process.env.SMP_DEBUG) console.error('[dsh-skills-mcp-manager] post-write rescan failed', error)
+      }
+    }
+    return result
+  }
+
+  /** Record what just happened (diagnostics); `/runtime` refreshes on its own. */
+  const finishSkillOp = (op, skillReq, result) => {
+    lastOp = {
+      op: String(op ?? ''), name: String(skillReq?.name ?? ''),
+      nonce: String(result?.nonce ?? ''), ok: result?.ok === true,
+      at: new Date().toISOString(),
+    }
+    try { tick() } catch (error) { console.error('[dsh-skills-mcp-manager] post-skill refresh failed:', error) }
+  }
+
+  ctx.inject(['webServer', 'connection'], (skillRouteCtx) => registerSkillRoute(skillRouteCtx, {
+    schema: (payload) => SkillRequest(payload),
+    apply: async (request) => {
+      const op = String(request?.op ?? '')
+      // The route is writes-only; a read has its own GET endpoint.
+      if (op === 'read') return { ok: false, reason: 'read 不走此路由', name: '', body: '', nonce: String(request?.nonce ?? ''), at: new Date().toISOString() }
+      const result = await applySkillWrite(request)
+      finishSkillOp(op, request, result)
+      return result
+    },
+  }))
+
+  /**
+   * Resolve one skill body for the editor/preview.
+   *
+   * Only files the scanner actually found are readable — the path is a client-supplied
+   * string, so it must be proved to be one of *our* skill roots before reading it. A stale
+   * list (a skill created a moment ago) is handled by one rescan, never by widening the
+   * check.
+   */
+  const resolveSkillBody = async (wanted) => {
+    const path = String(wanted ?? '')
+    if (path === '') return { ok: false, reason: '缺少 path' }
+    const isKnown = () => Array.isArray(discoveredSkills) && discoveredSkills.some((entry) => entry.path === path)
+    if (!isKnown()) {
+      try {
+        const extra = []
+        for (const agent of agents.values()) extra.push(projectRootOf(agent.cwd))
+        for (const workspace of configuredWorkspaces(ctx)) extra.push(projectRootOf(String(workspace?.path ?? workspace?.dir ?? '')))
+        const scopes = discoveredSkills.map((entry) => entry.scope).filter((scope) => typeof scope === 'string' && scope !== '' && scope !== 'global')
+        const nextRoots = [...new Set([...scopes, ...extra])].filter((root) => typeof root === 'string' && root !== '')
+        await refreshDiscovered(nextRoots)
+      } catch (error) {
+        if (process.env.SMP_DEBUG) console.error('[dsh-skills-mcp-manager] read rescan failed', error)
+      }
+    }
+    if (!isKnown()) return { ok: false, reason: '该技能不在当前扫描结果里' }
+    try {
+      const text = await readFile(path, 'utf8')
+      return { ok: true, reason: '', name: '', body: bodyOf(text), at: new Date().toISOString() }
+    } catch (error) {
+      return { ok: false, reason: String(error?.message ?? error) }
+    }
+  }
+
+  ctx.inject(['webServer', 'connection'], (readCtx) => registerSkillReadRoute(readCtx, { resolve: resolveSkillBody }))
+
+  // ── OAuth: command route + browser callback ─────────────────────────────────────────
+  //
+  // Registered on the same `webServer` service the row/skill routes use. The callback is
+  // the only route in this plugin that **cannot** carry `connection.requestRejection`:
+  // the browser arrives from the authorization server's 302, which has no DSH session
+  // cookie, so that check would 401 every callback and authorization could never finish.
+  // Its security boundary is the one-time `state` instead (see `src/mcp/oauth/state.js`).
+  ctx.inject(['webServer', 'connection'], (oauthRouteCtx) => {
+    registerOAuthRoute(oauthRouteCtx, {
+      // Only the action and the target are accepted; everything else is ours to decide.
+      schema: (payload) => OAuthCommand(payload),
+      run: runOAuthCommand,
+    })
+    const registered = registerOAuthCallback(oauthRouteCtx, {
+      servers: () => candidateServers(),
+      flow: {
+        checkCallback: async (...args) => {
+          await oauthBootstrapped
+          if (oauthFlow === null) return { ok: false, reason: 'no-authorization-in-progress' }
+          return oauthFlow.checkCallback(...args)
+        },
+        complete: async (serverName, url, code) => {
+          await oauthBootstrapped
+          if (oauthFlow === null) return { ok: false, reason: 'oauth-sdk-unavailable', detail: '', text: 'OAuth 支持未安装' }
+          const done = await oauthFlow.complete(serverName, url, code)
+          // The client's own retry loop has already given up by the time a user authorizes
+          // (10 attempts with backoff). A fresh instance is the only way back.
+          try { oauthStatusCache.delete(serverName) } catch { /* cache miss is harmless */ }
+          return done
+        },
+      },
+      onAuthorized: async (serverName) => {
+        // 授权一完成就自己重连，不等用户回面板再点一次。重连是命令，直接走任务函数。
+        ctx.logger.info('dsh-skills-mcp-manager: %s finished OAuth authorization, reconnecting', serverName)
+        invalidateServerCaches(serverName)
+        const target = candidateServers().find((entry) => entry.serverName === serverName)
+        const tier = target !== undefined && String(target.scope ?? '') === 'global' ? 'global' : 'project'
+        void reconnectServer({ tier, serverName }).catch((error) => {
+          ctx.logger.warn('dsh-skills-mcp-manager: reconnect after OAuth failed: %s', String(error?.message ?? error))
+        })
+      },
+      snapshot: () => oauthResultCache,
+      log: { warn: (message) => ctx.logger.warn(message) },
+    })
+    oauthCallbackReady = registered.installed === true
+    oauthCallbackPath = registered.installed === true ? CALLBACK_PATH : `unavailable: ${registered.reason}`
+    if (registered.installed !== true) {
+      ctx.logger.warn('dsh-skills-mcp-manager: OAuth callback route unavailable — %s', registered.reason)
+    }
+  })
+
+  // ── MCP import: scan on request, answer with the preview ───────────────────────────
+  //
+  // A scan is a read of other tools' config files. It used to travel through settings
+  // (request field → 600 ms poll → answer field); now it is one request/response.
+  ctx.inject(['webServer', 'connection'], (importCtx) => registerImportRoute(importCtx, {
+    schema: (payload) => ImportRequest(payload),
+    scan: (request) => {
+      const source = String(request?.source ?? '')
+      const scope = request?.scope === 'global' ? 'global' : 'project'
+      const project = String(request?.project ?? '')
+      try {
+        return { ok: true, source, scope, project, at: new Date().toISOString(), ...scanImportSource(scope, project, source) }
+      } catch (error) {
+        return { ok: false, source, scope, project, at: new Date().toISOString(), files: [], servers: [], error: String(error?.message ?? error) }
+      }
+    },
+  }))
+
   let pendingServersKey = null
-  let pendingSkillsKey = null
   let firstTick = true
 
-  const tick = () => {
+  /**
+   * Reconcile project mounts with the configured rows.
+   *
+   * Reads the **file-first** view, not the Loader's: after a panel write the file is already
+   * current while the Loader may lag seconds behind, and waiting for it was why a saved edit
+   * sat on the old connection.
+   *
+   * `force` is set by the row command that just wrote the patch: the config is stable and
+   * known, so skip the "observe twice" debounce that exists only to survive transient
+   * Loader recompositions. Unchanged servers are kept mounted by {@link mountForAgent}.
+   */
+  const tick = ({ force = false } = {}) => {
     // Before anything is decided: make sure every live agent is tracked. An agent that
     // predates this plugin's subscription never fires `agent/created` here, and an untracked
     // agent is an unmounted project server (see `adoptLiveAgents`).
     adoptLiveAgents()
-    const servers = readServers()
-    const skills = readSkills()
+    const servers = configuredServers(ctx)
 
     // Act only on a state observed twice in a row. A Loader recomposition can
     // mount this row with a transient empty config; acting on that would
-    // unmount live servers and delete skill files that are still configured.
+    // unmount live servers that are still configured.
     //
-    // The debounce watches the WHOLE server list, while the global remount is
-    // gated on its own key: a config holding only project servers still has to
-    // commit, or agents would never receive them.
     // The key deliberately ignores `phase`: the Loader updates it on its own schedule, and
     // a phase change is not a reason to tear down a working connection and rebuild it.
     const observedServersKey = serverSetKey(servers)
     let serversChanged = false
-    if (observedServersKey === committedServersKey) {
+    if (force) {
+      committedServers = servers
+      committedServersKey = observedServersKey
+      pendingServersKey = null
+      serversChanged = true
+      for (const [agent, entry] of agents) mountForAgent(agent, entry)
+    } else if (observedServersKey === committedServersKey) {
       pendingServersKey = null
     } else if (observedServersKey === pendingServersKey) {
       committedServers = servers
       committedServersKey = observedServersKey
       pendingServersKey = null
       serversChanged = true
-      // Global rows are connected by the Loader itself (they *are* `mcp-client` rows), so
-      // this plugin mounts only the project tier. Mounting a global row here too would
-      // double-connect it — two clients, two tool generations, one namespace.
       for (const [agent, entry] of agents) mountForAgent(agent, entry)
     } else {
       pendingServersKey = observedServersKey
     }
 
-    const skillsKeyNext = JSON.stringify(skills)
-    let skillsChanged = false
-    if (skillsKeyNext === skillsKey) {
-      pendingSkillsKey = null
-    } else if (skillsKeyNext === pendingSkillsKey) {
-      skillsKey = skillsKeyNext
-      pendingSkillsKey = null
-      skillsChanged = true
-    } else {
-      pendingSkillsKey = skillsKeyNext
-    }
-
-    if (firstTick || serversChanged || skillsChanged) {
+    if (firstTick || serversChanged) {
       firstTick = false
+      const mountedCount = [...agents.values()].reduce((total, entry) => total + stopsOf(entry).length, 0)
       lastBeat = {
         at: new Date().toISOString(),
-        observed: { servers: servers.map((s) => s.serverName), skills: skills.map((s) => `${s.scope}:${s.name}`) },
-        changed: { servers: serversChanged, skills: skillsChanged },
+        observed: { servers: servers.map((s) => s.serverName) },
+        changed: { servers: serversChanged },
         // Only the project tier is mounted by this plugin now: global rows are connected by
         // the Loader, so counting them here would double-count what the Loader already owns.
-        // `agents[].mounted` is the number that actually reflects this plugin's work.
-        mounted: [...agents.values()].reduce((total, entry) => total + entry.stops.length, 0),
+        mounted: mountedCount,
         rootScope: Boolean(ctx.root && ctx.root !== ctx),
-        agents: [...agents.values()].map((entry) => ({ cwd: entry.cwd, mounted: entry.stops.length })),
-        projection,
-        rowOps,
-        lastReconcile,
-      }
-      // Also carry the diagnostics on the heartbeat file: it is readable straight
-      // from disk, so the truth survives even when a settings write does not land.
-      lastBeat = {
-        ...lastBeat,
-        publishedAt,
+        agents: [...agents.values()].map((entry) => ({ cwd: entry.cwd, mounted: stopsOf(entry).length })),
+        migration: { ...serverMigrationState },
         discovery: discoveryInfo,
         lastOp,
-        skillResult: config?.skillResult?.get?.() ?? config?.skillResult ?? null,
-        serverMigration: { ...serverMigrationState },
       }
+      // The heartbeat file is a diagnostic side channel: it is not the profile patch and is
+      // safe to write from the Host.
       beat(lastBeat)
-    }
-
-    if (skillsChanged) {
-      reconcileSkills(ctx, skills)
-        .then((result) => { lastReconcile = result })
-        .catch((error) => {
-          lastReconcile = { error: String(error?.message ?? error) }
-          ctx.logger.error('dsh-skills-mcp-manager: skill reconciliation failed')
-          ctx.logger.error(error)
-        })
     }
   }
 
@@ -2699,7 +2073,9 @@ export function apply(ctx, config) {
     const timer = setInterval(tick, 2000)
     return () => {
       clearInterval(timer)
-      for (const entry of agents.values()) unmount(entry.stops)
+      for (const entry of agents.values()) {
+        for (const mounted of entry.mounted.values()) unmount(mounted.stops)
+      }
       agents.clear()
     }
   })

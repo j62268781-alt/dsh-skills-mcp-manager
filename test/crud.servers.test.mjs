@@ -6,10 +6,12 @@ import {
   inflightKeyForRow, rowEntryId, toggleServerOp, updateServerOp,
 } from '../lib/src/crud/servers.js'
 
-test('rowEntryId / inflightKeyForRow：id 与投影 entryId 的对应', () => {
+test('rowEntryId / inflightKeyForRow：两种 entryId 归一成同一个键', () => {
   assert.equal(rowEntryId('12306-mcp'), 'mcp-12306-mcp')
-  assert.equal(inflightKeyForRow('mcp-x'), 'include:mcp-x')
-  assert.equal(inflightKeyForRow('include:mcp-x'), 'include:mcp-x')
+  // File rows carry `mcp-x`, Loader entries carry `include:mcp-x`; the in-flight key must
+  // be the same or an add leaves its optimistic card next to the real one.
+  assert.equal(inflightKeyForRow('mcp-x'), 'mcp-x')
+  assert.equal(inflightKeyForRow('include:mcp-x'), 'mcp-x')
 })
 
 test('addServerOp：补默认传输、参数按字符串透传', () => {

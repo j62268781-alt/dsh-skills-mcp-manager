@@ -7,7 +7,7 @@
  * can be exercised against a temp directory in tests.
  */
 import { copyFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { isMap, isSeq, parseDocument } from 'yaml'
 
 /** The directory holding this plugin's own backup artifacts. */
@@ -47,6 +47,8 @@ import { insertRow, locateRow, removeRow, rowScopeOf, setRowConfigField, setRowD
 import { dshHome, parseEnv, spawnEnv, splitArgs } from '../runtime/env.js'
 import { connectionFields } from '../mcp/connection.js'
 import { NAME, LEGACY_NAME } from '../identity.js'
+import { scopeRoot } from '../skills/reconcile.js'
+import { renderSkillMarkdown } from '../skills/write.js'
 
 let io = {
   withFileLock: (_key, run) => run(),
@@ -87,7 +89,91 @@ export async function backupPatch(before) {
   }
 }
 
-/** Rename legacy panel rows and remove obsolete runtime projections in one write. */
+/** Config keys that used to hold runtime state / read models in the profile patch. */
+const OBSOLETE_CONFIG_KEYS = [
+  'serverTools', 'serverToolsError', 'serverStatus',
+  'profileServers', 'filterState', 'probeState',
+  'workspaces', 'currentWorkspace', 'workspaceServers',
+  'discoveryInfo', 'discoveredSkills', 'skillDirs',
+  'oauthState', 'oauthServers',
+  'rowOps', 'rowOpsReady',
+  'importRequest', 'importResult',
+  'skillRequest', 'skillResult',
+  'reconnectRequest', 'reconnectResult', 'reconnectReady',
+]
+
+/**
+ * One legacy panel server entry → one profile row.
+ *
+ * Shared by the raw-patch migration and by `migrateServerEntries` (kept for tests): the
+ * conversion must not exist twice, or the two paths would produce different rows for the
+ * same entry.
+ */
+export function legacyServerRowConfig(entry) {
+  const serverName = String(entry?.serverName ?? '')
+  const id = `mcp-${serverName.replace(/[^A-Za-z0-9_-]/g, '-')}`
+  const transport = entry?.transport === 'stdio' ? 'stdio' : 'streamable-http'
+  const config = { serverName, transport }
+  if (transport === 'stdio') {
+    config.command = String(entry.command ?? '') === '' ? 'npx' : String(entry.command)
+    // The legacy entry keeps `args` as an **array**, while `splitArgs` parses the panel's
+    // space-separated *string*. Passing the array straight in produced one mangled argument.
+    config.args = Array.isArray(entry.args) ? entry.args.map((arg) => String(arg)) : splitArgs(entry.args)
+    const envLines = entry.env === null || entry.env === undefined
+      ? ''
+      : typeof entry.env === 'string'
+        ? entry.env
+        : Object.entries(entry.env).map(([key, value]) => `${key}=${String(value)}`).join('\n')
+    const env = parseEnv(envLines)
+    if (Object.keys(env).length > 0) config.env = spawnEnv(env)
+  } else {
+    config.url = String(entry?.url ?? '')
+    const headerLines = entry?.headers === null || entry?.headers === undefined
+      ? ''
+      : typeof entry.headers === 'string'
+        ? entry.headers
+        : Object.entries(entry.headers).map(([key, value]) => `${key}=${String(value)}`).join('\n')
+    const headers = parseEnv(headerLines)
+    if (Object.keys(headers).length > 0) config.headers = headers
+  }
+  Object.assign(config, connectionFields(entry ?? {}))
+  const projectScoped = typeof entry?.scope === 'string' && entry.scope !== '' && entry.scope !== 'global'
+  if (projectScoped) config.scope = entry.scope
+  return { id, config, projectScoped }
+}
+
+/** Every row id already present in the document (top level and `insert:` lists). */
+function rowIdsOf(document) {
+  const ids = new Set()
+  for (const item of document.contents?.items ?? []) {
+    if (!isMap(item)) continue
+    if (item.get('id') !== undefined) ids.add(String(item.get('id')))
+    const insert = item.get('insert')
+    if (isSeq(insert)) for (const row of insert.items) if (isMap(row) && row.get('id') !== undefined) ids.add(String(row.get('id')))
+  }
+  return ids
+}
+
+/**
+ * One-time migration of everything this plugin used to keep in its own `config`.
+ *
+ * Three moves, in one locked pass over the raw profile patch:
+ *
+ *   · `config.servers[]`  → ordinary `mcp-client` rows (the same conversion the panel's
+ *                           add path uses, so a migrated row is byte-identical to a hand
+ *                           added one);
+ *   · `config.skills[]`   → `<root>/<name>/SKILL.md` files (the old reconcile output). A
+ *                           file that already exists wins — the config is only a seed for
+ *                           the conversion, never an overwrite;
+ *   · every read-model / command / projection key → **removed**. Those values now live in
+ *                           `/runtime` (recomputed per request) or in the HTTP routes, so
+ *                           nothing transient stays in `cordis.patch.yml`.
+ *
+ * Runs while holding the same lock as every other patch write, and is idempotent: the keys
+ * are gone after the first successful pass, so the next call is a no-op.
+ *
+ * @returns the number of changed fields/entries, or 0 when there was nothing to do.
+ */
 export async function migratePanelConfig(ctx) {
   const profile = ctx.get?.('profileContext') ?? ctx.profileContext
   if (typeof profile?.dir !== 'string' || profile.dir === '') return 0
@@ -97,28 +183,87 @@ export async function migratePanelConfig(ctx) {
     const document = parseDocument(before, { customTags: [YAML_JS_TAG] })
     if (document.errors[0] !== undefined) throw document.errors[0]
     if (!isSeq(document.contents)) throw new Error('profile patch must be a YAML sequence')
-    let removed = 0
-    const clean = (row) => {
+    let changed = 0
+    const existing = rowIdsOf(document)
+
+    const clean = async (row) => {
       if (!isMap(row) || ![NAME, LEGACY_NAME].includes(row.get('id'))) return
       if (row.get('id') === LEGACY_NAME) {
         row.set('id', NAME)
-        removed += 1
+        changed += 1
       }
       const config = row.get('config')
       if (!isMap(config)) return
-      for (const key of ['serverTools', 'serverToolsError', 'serverStatus']) {
-        if (config.delete(key)) removed += 1
+
+      const servers = config.get('servers')
+      if (isSeq(servers)) {
+        for (const item of servers.items) {
+          if (!isMap(item)) continue
+          const entry = item.toJSON()
+          if (typeof entry?.serverName !== 'string' || entry.serverName === '') continue
+          const { id, config: rowConfig, projectScoped } = legacyServerRowConfig(entry)
+          if (existing.has(id)) continue
+          insertRow(document, id, rowConfig, { disabled: projectScoped })
+          existing.add(id)
+          changed += 1
+        }
+        config.delete('servers')
+        changed += 1
+      }
+
+      const skills = config.get('skills')
+      if (isSeq(skills)) {
+        let skillFailed = false
+        for (const item of skills.items) {
+          if (!isMap(item)) continue
+          const entry = item.toJSON()
+          if (entry?.enabled === false) continue
+          const name = String(entry?.name ?? '')
+          if (name === '') continue
+          const dir = scopeRoot(String(entry?.scope ?? 'global'), entry?.id === 'agents' ? 'agents' : 'dsh')
+          const target = join(dir, name, 'SKILL.md')
+          try {
+            await readFile(target, 'utf8')
+            // The file is already there: it wins over the config body.
+            continue
+          } catch {
+            // missing → write it below
+          }
+          try {
+            await mkdir(dirname(target), { recursive: true })
+            await writeFile(target, renderSkillMarkdown(entry), 'utf8')
+            changed += 1
+          } catch (error) {
+            skillFailed = true
+            ctx?.logger?.warn?.('dsh-skills-mcp-manager: cannot migrate skill %s: %s', name, String(error?.message ?? error))
+          }
+        }
+        // Keep the key when a file could not be written, so the next attempt can retry
+        // instead of losing the only copy of that body.
+        if (!skillFailed) {
+          config.delete('skills')
+          changed += 1
+        }
+      }
+
+      for (const key of OBSOLETE_CONFIG_KEYS) {
+        if (config.delete(key)) changed += 1
       }
     }
+
     for (const row of document.contents.items) {
-      clean(row)
+      await clean(row)
       const insert = isMap(row) ? row.get('insert') : undefined
-      if (isSeq(insert)) insert.items.forEach(clean)
+      if (isSeq(insert)) for (const inner of insert.items) await clean(inner)
     }
-    if (removed === 0) return 0
+
+    if (changed === 0) return 0
+    const after = document.toString()
+    parseDocument(after, { customTags: [YAML_JS_TAG] })   // gate: never write invalid YAML
     await backupPatch(before)
-    await io.writeFileAtomic(path, document.toString(), {})
-    return removed
+    await io.writeFileAtomic(path, after, {})
+    ctx.logger?.info?.('dsh-skills-mcp-manager: migrated %d legacy config item(s)', changed)
+    return changed
   })
 }
 
@@ -331,39 +476,8 @@ export async function migrateServerEntries(ctx, entries) {
     )
     const ids = []
     for (const entry of list) {
-      const id = `mcp-${String(entry.serverName).replace(/[^A-Za-z0-9_-]/g, '-')}`
+      const { id, config, projectScoped } = legacyServerRowConfig(entry)
       if (existing.has(id)) continue
-      const transport = entry.transport === 'stdio' ? 'stdio' : 'streamable-http'
-      const config = { serverName: entry.serverName, transport }
-      if (transport === 'stdio') {
-        config.command = String(entry.command ?? '') === '' ? 'npx' : String(entry.command)
-        // The legacy entry keeps `args` as an **array**, while `splitArgs` parses the
-        // panel's space-separated *string*. Passing the array straight in produced one
-        // mangled argument (`["-y,server-filesystem,/tmp"]`) — which would have broken
-        // every migrated stdio server silently. Accept both shapes explicitly.
-        config.args = Array.isArray(entry.args)
-          ? entry.args.map((arg) => String(arg))
-          : splitArgs(entry.args)
-        const envLines = entry.env === null || entry.env === undefined
-          ? ''
-          : typeof entry.env === 'string'
-            ? entry.env
-            : Object.entries(entry.env).map(([key, value]) => `${key}=${String(value)}`).join('\n')
-        const env = parseEnv(envLines)
-        if (Object.keys(env).length > 0) config.env = spawnEnv(env)
-      } else {
-        config.url = String(entry.url ?? '')
-        const headerLines = entry.headers === null || entry.headers === undefined
-          ? ''
-          : typeof entry.headers === 'string'
-            ? entry.headers
-            : Object.entries(entry.headers).map(([key, value]) => `${key}=${String(value)}`).join('\n')
-        const headers = parseEnv(headerLines)
-        if (Object.keys(headers).length > 0) config.headers = headers
-      }
-      Object.assign(config, connectionFields(entry))
-      const projectScoped = typeof entry.scope === 'string' && entry.scope !== '' && entry.scope !== 'global'
-      if (projectScoped) config.scope = entry.scope
       // Same reason as the add path: a project row is mounted by this plugin, so the
       // Loader must not instantiate it, or the server is connected twice.
       insertRow(document, id, config, { disabled: projectScoped })

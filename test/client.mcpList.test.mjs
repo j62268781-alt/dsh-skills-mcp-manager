@@ -262,6 +262,46 @@ test('MCP：`…` 菜单里始终有「授权」入口（OAuth 可用且是 http
   }
 })
 
+test('MCP：已连接且从未存过凭据的服务器不显示「授权」（公开端点不需要 OAuth）', { skip: skipWithoutBundle() }, async () => {
+  /**
+   * context7 这类公开端点连上就不需要授权。以前判据是「没凭据 → 显示授权」，于是每台
+   * 公开的 http 服务器菜单里都挂着一个点下去只会失败的 OAuth 入口。已连接本身就是
+   * 「不需要授权」的证据；只有真被判成 `needs-auth` 时才把入口放回来。
+   */
+  const row = {
+    entryId: 'mcp-context7', serverName: 'context7', scope: 'global',
+    transport: 'streamable-http', target: 'https://mcp.context7.com/mcp',
+    command: '', args: '', env: '', headersText: '', failOnStartupError: false,
+    reconnectInitialDelayMs: '', reconnectMaxDelayMs: '', reconnectMaxAttempts: '',
+    toolCallTimeoutMs: '', enabled: true, phase: 'active',
+  }
+  const doc = (status) => ({
+    profileServers: [row],
+    oauthState: { ready: true, reason: '', detail: '', sdkVersion: '2.2.0', redirectUri: 'http://127.0.0.1:1/cb' },
+    oauthServers: { context7: { present: false, refreshable: false, waiting: false, authorizeUrl: '', expiresAt: '', expired: false, at: '' } },
+    serverStatus: [{ serverName: 'context7', tier: 'global', scope: '', status, detail: '' }],
+  })
+
+  const connected = await bootPanel(emptyDoc(doc('connected')))
+  try {
+    connected.openMenu(0)
+    const labels = connected.findAll((node) => String(node.props.className ?? '') === 'smp-menuItem').map((node) => textOf(node).trim())
+    assert.equal(labels.includes('授权'), false, `已连接且无凭据时不该出现授权：${JSON.stringify(labels)}`)
+  } finally {
+    connected.restore()
+  }
+
+  // 真被判成「需要授权」时，入口必须回来 —— 这是唯一正确的下一步。
+  const needsAuth = await bootPanel(emptyDoc(doc('needs-auth')))
+  try {
+    needsAuth.openMenu(0)
+    const labels = needsAuth.findAll((node) => String(node.props.className ?? '') === 'smp-menuItem').map((node) => textOf(node).trim())
+    assert.ok(labels.includes('授权'), `需要授权时应给出入口：${JSON.stringify(labels)}`)
+  } finally {
+    needsAuth.restore()
+  }
+})
+
 test('MCP：OAuth 不可用时菜单里**没有**「授权」（假按钮比没有更糟）', { skip: skipWithoutBundle() }, async () => {
   const noOauth = {
     profileServers: [{
@@ -360,8 +400,8 @@ test('MCP 列表以 /runtime 为准：settings 文档滞后时仍然显示新行
   }
 })
 
-test('MCP 列表：老 Host 的 /runtime 不带 servers 时回落到 settings 投影', { skip: skipWithoutBundle() }, async () => {
-  // 两条路都要在：新版 Host 走 runtime，旧版 Host（没有这个字段）仍然能用。
+test('MCP 列表：不再回落 settings 投影（旧 Host 没有 /runtime.servers 就列不出来）', { skip: skipWithoutBundle() }, async () => {
+  // 0.6 起列表只认 /runtime：settings 投影已不再发布，留一条显式断言防止它被悄悄恢复。
   const panel = await bootPanel(emptyDoc({
     profileServers: [{
       entryId: 'include:mcp-context7', serverName: 'context7', scope: 'global',
@@ -370,12 +410,13 @@ test('MCP 列表：老 Host 的 /runtime 不带 servers 时回落到 settings �
       reconnectInitialDelayMs: '', reconnectMaxDelayMs: '', reconnectMaxAttempts: '',
       toolCallTimeoutMs: '', enabled: true, phase: 'active',
     }],
-    runtimeServers: [], rowOpsReady: true, reconnectReady: true,
+    runtimeServers: [],
   }))
   try {
     const names = panel.findAll((node) => String(node.props.className ?? '') === 'smp-cardIdentity')
       .map((node) => textOf(node).trim())
-    assert.ok(names.some((text) => text.startsWith('context7')), `没有 servers 字段时要回落到投影：${JSON.stringify(names)}`)
+    assert.equal(names.some((text) => text.startsWith('context7')), false,
+      `不该再回落到 settings 投影：${JSON.stringify(names)}`)
   } finally {
     panel.restore()
   }

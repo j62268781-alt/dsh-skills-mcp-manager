@@ -10,6 +10,7 @@ const payload = {
   serverTools: [{ serverName: 'wiki', tools: [{ name: 'mcp__wiki__live', description: 'runtime description' }] }],
   serverToolsError: { reason: '', detail: '' },
   serverStatus: [{ serverName: 'wiki', tier: 'global', scope: '', status: 'connected', toolCount: 1 }],
+  servers: [row],
 }
 
 test('panel reads same-origin runtime data instead of legacy settings and refreshes on expansion', { skip: skipWithoutBundle() }, async () => {

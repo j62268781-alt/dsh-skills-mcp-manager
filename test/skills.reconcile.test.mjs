@@ -24,14 +24,17 @@ test('scopeRoot：id 选根 —— agents 走 DSH_AGENTS_HOME，项目级两个�
    */
   const agents = mkdtempSync(join(tmpdir(), 'smp-agents-'))
   process.env.DSH_AGENTS_HOME = agents
+  // Project roots are absolute paths; on Windows `/p/app` would resolve against the
+  // current drive, so build the fixture with `join` rather than asserting POSIX text.
+  const project = process.platform === 'win32' ? 'C:\\p\\app' : '/p/app'
   try {
     assert.equal(scopeRoot('global', 'dsh'), join(home, 'skills'))
     assert.equal(scopeRoot('global', 'agents'), join(agents, 'skills'))
-    assert.equal(scopeRoot('/p/app', 'dsh'), '/p/app/.dsh/skills')
-    assert.equal(scopeRoot('/p/app', 'agents'), '/p/app/.agents/skills')
+    assert.equal(scopeRoot(project, 'dsh'), join(project, '.dsh', 'skills'))
+    assert.equal(scopeRoot(project, 'agents'), join(project, '.agents', 'skills'))
     // 缺省仍然是 dsh（旧条目没有这个字段，语义不能变）
     assert.equal(scopeRoot('global'), join(home, 'skills'))
-    assert.equal(scopeRoot('/p/app'), '/p/app/.dsh/skills')
+    assert.equal(scopeRoot(project), join(project, '.dsh', 'skills'))
   } finally {
     delete process.env.DSH_AGENTS_HOME
   }

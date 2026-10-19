@@ -108,16 +108,16 @@ npm run deploy     # 拷贝进 profile；部署前先跑加载冒烟，失败则
 - **没有项目筛选器**：列表跨工作区展示（全局在前，然后按工作区顺序），卡片上的标签说明归属。
   新条目要写到哪个工作区，在添加对话框里选
 - **卡片标签统一**：全局显示「全局」，项目级显示工作区名 —— MCP 与 Skills 同一套词表
-- **卡片操作收进 `…` 菜单**（预览 / 编辑 / 删除），只有启用开关留在卡片上
+- **卡片操作收进 `…` 菜单**（预览 / 编辑 / 删除）；技能没有启用开关——磁盘上有文件就是启用
 
 ### MCP
 
 | | 全局 MCP | 项目级 MCP |
 |---|---|---|
-| 存在哪 | profile `cordis.patch.yml` 的 Loader 行 | 插件自己的 settings 字段 `servers[]` |
+| 存在哪 | profile `cordis.patch.yml` 的 Loader 行 | profile `cordis.patch.yml` 里带 `scope` 的 Loader 行 |
 | 谁去连接 | 官方 `@deepseek-ai/dsh-mcp-client` 直接加载这些行 | 插件在 `agent/created` 时按项目路径挂载 |
 | 生效范围 | 所有会话（含 subagent） | 只有该项目里运行的会话 agent |
-| 增删改 | 写回配置文件（加锁 + 原子写 + 写前校验 + 自动备份） | 写进 settings 文档 |
+| 增删改 | 写回配置文件（加锁 + 原子写 + 写前校验 + 自动备份） | 同一个行命令路由，写回带 `scope` 的行 |
 
 - 卡片上的「配置文件」标签表示这一行来自 `cordis.patch.yml`；这种行可以**编辑 / 停用 / 删除**，改动通过带鉴权的 `POST /dsh-skills-mcp-manager/rows` **立即**写回（新增/删除在点击瞬间就生效，不等轮询）
 - 展开卡片能看传输方式、地址或命令、参数、环境变量（值打码）、范围与启停状态
@@ -153,13 +153,13 @@ npm run deploy     # 拷贝进 profile；部署前先跑加载冒烟，失败则
   不用去翻 `dsh-mcp-client` 的源码才知道这一行怎么重连。清空输入框会回到默认值，而不是删掉键。
   `failOnStartupError` 例外——`false` 与「键不存在」完全等价，写它只是噪音，所以只在勾选时写入。
   填了非法值（非整数、超范围）会被拒绝并提示——因为写进去会让整行加载失败
-- **导入 MCP**：选来源 → 扫描 → 预览「哪些文件存在、识别出几个、几个形态不支持」→ 确认。全局导入写成配置文件行，项目导入写进面板的项目级条目
+- **导入 MCP**：选来源 → 扫描 → 预览「哪些文件存在、识别出几个、几个形态不支持」→ 确认。全局与项目级都写成配置文件行（项目行带 `scope`）
 
 ### 技能
 
-- 列表 = **磁盘扫描结果**：`$DSH_HOME/skills`、`~/.agents/skills`、以及各项目的 `.agents/skills` / `.dsh/skills`；卡片上的 `dsh` / `agents` 标签表示它来自哪个根（早期版本写进 `config.skills[]` 的条目也会列出来，并被镜像到对应根）
+- 列表 = **磁盘扫描结果**：`$DSH_HOME/skills`、`~/.agents/skills`、以及各项目的 `.agents/skills` / `.dsh/skills`。磁盘文件是**唯一真源**，`config.skills[]` / 对账镜像已删除（旧条目会在升级时一次性写成文件）
 - 「添加技能」写入 `<根>/<名字>/SKILL.md`：区域选全局或项目，**名字同时是目录名**
-- 预览按需读取文件正文（4KB 上限，正文不进设置文档，设置文件不会越用越大）
+- 预览/编辑按需通过 `GET /<name>/skill?path=` 读取正文（只允许读扫描到的文件；正文不进 profile patch）
 - 重命名会**同时移动目录并改写 frontmatter 里的 `name`**（否则面板和文件夹会对不上）
 - 删除是两步确认：先把目录备份到同级的 `.smp-backup-<名字>-<毫秒>`，再删除；备份会保留，需要时手动改回原名即可
 
@@ -177,15 +177,25 @@ lib/src/**    Client 半（esbuild → lib/client.js） 跑在浏览器，单文
 cordis.patch.yml                                   声明插件行（本包自己的 bundle patch）
 ```
 
-**写通道**：MCP 行的增删改走 `POST /dsh-skills-mcp-manager/rows`，技能的新增/编辑/改名/删除走 `POST /dsh-skills-mcp-manager/skills`。两条路由都先过 `connection.requestRejection()` 鉴权，只接受 `POST` + `application/json`（跨站 HTML 表单发不出这个类型），body 用与设置队列**同一个** schema 校验，请求串行执行。为什么不用设置队列：写一个文件只要 1ms，而队列通道要连等四个轮询（600ms 取请求 + 面板自己的回读 + 2s 对账 + 5s 投影），实测最坏约 9 秒。**设置队列保留为回退通道**并在继续排空，所以旧面板、旧 Host 或没有 webServer 的 profile 都照旧可用。
+**写通道**：所有修改都是 HTTP 请求/响应，没有 settings 队列，也没有持久化的命令字段。
 
-**数据通道**：MCP 工具清单、描述及连接状态通过只读 `GET /dsh-skills-mcp-manager/runtime` 获取，复用 Host 的 `connection.requestRejection()` 鉴权，响应禁用缓存。面板打开 MCP 页签、展开卡片及页面恢复可见时读取，可见期间每 5 秒刷新；切换页签或卸载时取消请求。读取失败会显示原因并清除旧连接状态，不回退到 YAML 快照。清单只反映当前注册的工具，断开或未挂载时可能为空。
+| 路由 | 作用 |
+|---|---|
+| `POST /dsh-skills-mcp-manager/rows` | MCP 行增删改；Host 加锁、校验、原子写 `cordis.patch.yml`，并在响应里带回写后的行列表 |
+| `POST /dsh-skills-mcp-manager/skills` | 技能增删改；直接写/删 `<根>/<名字>/SKILL.md` |
+| `GET /dsh-skills-mcp-manager/skill?path=` | 读取一个已被扫描到的 `SKILL.md` 正文（路径必须来自扫描结果） |
+| `POST /dsh-skills-mcp-manager/reconnect` | 重连一台服务器；请求返回时命令已经跑完 |
+| `POST /dsh-skills-mcp-manager/import` | 扫描其它工具的 MCP 配置，直接返回预览 |
 
-**命名与升级**：插件行 id、settings 命名空间和运行时接口前缀统一为 `dsh-skills-mcp-manager`。启动时将旧配置行改为新 id，保留连接参数、技能和过滤规则；首次读取技能归属清单时导入旧文件，后续以新文件为准。**升级前请读 [`docs/MIGRATION-0.5.5.md`](docs/MIGRATION-0.5.5.md)** —— 这一版改动了「数据存在哪里」（插件身份、MCP 配置单源化、行操作换传输），迁移全部自动完成，但需要重启一次 DSH。
+写路由先过 `connection.requestRejection()` 鉴权，只接受 `POST` + `application/json`，请求串行执行。为什么不用 settings：写一个文件只要 1ms，而队列通道要连等四个轮询（600ms 取请求 + 面板回读 + 2s 对账 + 5s 投影），实测最坏约 9 秒。**旧 Host / 旧面板不再兼容**，请一起升级。
 
-**配置持久化**：服务器连接参数、`toolFilters` 和现有操作通道仍通过官方 settings remote 管理；`profileServers`、`discoveredSkills`、`filterState`、`probeState` 等投影暂保留原通道。启动时使用配置文件锁、备份和原子写清理本插件行里的旧 `serverTools`、`serverToolsError`、`serverStatus`。扫描时间戳不参与投影去重，因此仅扫描时间变化不会触发 settings 写入。
+**数据通道**：`GET /dsh-skills-mcp-manager/runtime` 一次返回整个读模型：MCP 行列表（Host 直接读 patch 文件，Loader 只补 `phase`）、工具清单（现读工具注册表）、连接/授权状态（探测缓存 + 重连预算）、磁盘技能扫描、工作区与过滤状态。响应禁用缓存；面板在页签打开/展开卡片/页面恢复可见时读取，可见期间每 5 秒刷新，写入成功后立刻重拉一次。读取失败会显示原因并保留上一次的行列表，只把观测状态标成「状态未知」。
 
-**技能**：面板写的、导入的、手工放进根目录的，最终都以磁盘文件为准。Host 每 2 秒读一次运行中的 `config.skills[]`，把每个条目对账成 `<根>/<名字>/SKILL.md`，并回收自己之前写过、现在不该存在的文件（清单在 `$DSH_HOME/dsh-skills-mcp-manager.state.json`）。默认技能根与 DSH 自带的文件技能提供方一致。
+**命名与升级**：插件行 id、settings 命名空间和运行时接口前缀统一为 `dsh-skills-mcp-manager`。**升级前请读 [`docs/MIGRATION-0.5.6.md`](docs/MIGRATION-0.5.6.md)** —— 0.5.6 删掉了 settings 里的技能、命令与读模型字段：`config.skills[]` 迁移成 `SKILL.md`，`config.servers[]` 迁移成带 `scope` 的 Loader 行，其余键删除。迁移全部自动完成，但需要重启一次 DSH。
+
+**配置持久化**：插件的 settings 里**只剩 `toolFilters`**（用户偏好，改过滤规则时才写）。技能、MCP 行、工具清单、连接/授权状态、命令都不再进 settings；启动时用配置文件锁、备份和原子写一次性清掉旧字段，之后扫描时间变化也不会再改写 `cordis.patch.yml`。
+
+**技能**：面板写的、导入的、手工放进根目录的，全部**只**以磁盘文件为准；Host 每 5 秒扫描一次四个根供 `/runtime` 使用，不做任何镜像或回收。升级时 `config.skills[]` 的旧条目会写成 `SKILL.md`（已存在的文件优先，不覆盖）。
 
 **项目级 MCP**：不猜项目根——用「配置里的 scope 是否为会话 cwd 的**目录前缀**」判定，命中的 agent 才挂载，`agent/disposed` 时卸载。注意 **subagent 是独立 agent，只继承 root 作用域**，所以项目级工具对 subagent 不可见（全局工具两处都可见）。
 

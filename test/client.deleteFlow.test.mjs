@@ -74,11 +74,10 @@ test('客户端删除流程：删除中不出现按钮边框，回执到达后�
 })
 
 /**
- * 回退通道：Host 没有 `/skills` 路由时（旧 Host / 无 webServer），写入必须落回设置队列。
- *
- * 三条路里这是最容易悄悄坏掉的一条 —— 它默认不会被走到，所以要有测试盯着。
+ * 路由是唯一通道：Host 没有 `/skills` 路由时（旧 Host / 无 webServer），写入必须**报错**，
+ * 不能悄悄改成写设置队列 —— 队列已经不存在了，用户需要知道升级/重启 Host。
  */
-test('技能写入回退：路由返回 404 时改走设置队列', { skip: skipWithoutBundle() }, async () => {
+test('技能写入：路由返回 404 时报错，不回退设置队列', { skip: skipWithoutBundle() }, async () => {
   const panel = await bootPanel(emptyDoc(), {
     fetch: async () => ({ ok: false, status: 404, json: async () => ({}) }),
   })
@@ -89,9 +88,9 @@ test('技能写入回退：路由返回 404 时改走设置队列', { skip: skip
     change(panel.byPlaceholder('例如 my-skill'), 'fallback-skill')
     click(byText('创建'))
     await panel.settle()
-    assert.equal(doc.skillRequest?.op, 'create', '404 时没有回退到设置队列')
-    assert.equal(doc.skillRequest?.name, 'fallback-skill')
+    assert.equal(doc.skillRequest?.op ?? '', '', '不该再写设置队列')
     assert.deepEqual(doc.skillCommands ?? [], [], '404 不该被当成写入成功')
+    assert.match(panel.text(), /没有技能写入路由/, '失败原因要显示出来')
   } finally {
     restore()
   }

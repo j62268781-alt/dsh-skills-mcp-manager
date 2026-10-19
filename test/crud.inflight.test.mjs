@@ -60,3 +60,13 @@ test('pendingAdds：只列还没出现的新增项', () => {
   const map = { 'include:mcp-new': { kind: 'add', at: 1 }, 'include:mcp-a': { kind: 'add', at: 1 }, 'include:mcp-b': { kind: 'delete', at: 1 } }
   assert.deepEqual(pendingAdds(map, rows).map(([id]) => id), ['include:mcp-new'])
 })
+
+test('两种 entryId 形状互相认得：文件行 mcp-x 与 Loader 行 include:mcp-x', () => {
+  // The Host now answers /runtime from the patch file (ids `mcp-x`), while an add is
+  // recorded as `include:mcp-x` (or normalized). Comparing raw strings showed two cards.
+  const fileRows = [{ entryId: 'mcp-x', serverName: 'x', enabled: true }]
+  assert.deepEqual(pendingAdds({ 'include:mcp-x': { kind: 'add', at: 1 } }, fileRows), [])
+  assert.deepEqual(pendingAdds({ 'mcp-x': { kind: 'add', at: 1 } }, [{ entryId: 'include:mcp-x' }]), [])
+  const map = { 'include:mcp-x': { kind: 'toggle', at: 1000, expectEnabled: true } }
+  assert.deepEqual(settleInflight(map, { profileRows: fileRows, now: 1010 }), {}, 'include: 键也要认 mcp-x 行')
+})

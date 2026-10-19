@@ -45,7 +45,12 @@ cpSync(source, target, {
   // Build inputs and dev-only files stay out of the profile: the deployed copy is loaded
   // through `exports["."] -> ./dist/index.js`, so `src/` would be dead weight and stale
   // TypeScript next to a compiled `dist/` invites reading the wrong one.
-  filter: (src) => !/^(node_modules|\.git|test|scripts|lib\/src|src)(\/|$)|^(esbuild\.config\.mjs|tsconfig\.json|test-.*\.mjs|verify-.*\.mjs)$/.test(src.slice(source.length + 1)),
+  filter: (src) => {
+    // Normalize the separator: `cpSync` hands back Windows paths as `lib\src\...`, and a
+    // regex written for `/` silently copied the whole source tree into the profile.
+    const rel = src.slice(source.length + 1).replace(/\\/g, '/')
+    return !/^(node_modules|\.git|test|scripts|lib\/src|src)(\/|$)|^(esbuild\.config\.mjs|tsconfig\.json|test-.*\.mjs|verify-.*\.mjs)$/.test(rel)
+  },
 })
 console.log(`  ✓ 已部署到 ${target}`)
 console.log('  · 重启 DSH 后生效（Host 半需要重启，Client 半刷新即可）')

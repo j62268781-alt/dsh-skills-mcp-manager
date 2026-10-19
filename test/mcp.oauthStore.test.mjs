@@ -77,7 +77,7 @@ test('normalizeRecord：行里的 URL 优先于文件里记的旧 URL', () => {
   assert.equal(moved.url, 'https://new.example.com/mcp', 'URL 变了，旧凭据可能已经不对，以行为准')
 })
 
-test('store：写入的文件权限是 0600，目录是 0700', async (t) => {
+test('store：写入的文件权限是 0600，目录是 0700', { skip: process.platform === 'win32' ? 'Windows 不实现 POSIX 权限位' : false }, async (t) => {
   const home = await tempHome(t)
   const store = createOAuthStore({ dshHome: home })
   await store.write('github', { ...emptyRecord('github', 'https://x/mcp'), tokens: { access_token: 'secret' } })
