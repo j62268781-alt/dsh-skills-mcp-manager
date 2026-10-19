@@ -465,7 +465,36 @@ if (!response.ok) throw new Error(`HTTP ${response.status}`)   // ← 被下面�
 永远不会来的投影。现在只有 `404/405/401/403` 才换旧通道；其它非 2xx 是**失败**，并且把 Host
 给的原因（响应体里的 `reason`）显示出来。
 
-### 24. 测试
+### 24. 那 4 秒不是写入，是「观察路径」绕了 Loader
+
+写入一直很快：`/rows` 路由直接改 yml，**5 毫秒**。慢的是我们**怎么知道它改了**：
+
+```
+HTTP 路由写 yml                      5ms
+dsh-hmr 监听到文件变更 + 防抖
+重载 profile 插件 → Loader.entries 更新   ≈4s   ← 全卡在这
+publish() 才看得见新行
+```
+
+`configuredMcpRows` 原来读的是 `loader.entries()` —— **Loader 的内存注册表**。而 Loader 是通过
+文件监听才得知这次写入的，所以面板要等整条 profile 重载完。
+
+**但这个文件本来就是我们自己写的。** 现在直接读它：`src/patch/readRows.js` 按 mtime 校验缓存，
+读出所有 mcp-client 行；运行态字段 `phase` 仍从 Loader 按 id 合并（那个只有 Loader 知道）。
+
+分工因此变得清楚：
+
+| 来源 | 回答什么 |
+|---|---|
+| **patch 文件** | 配置真源：有哪些行、字段是什么 |
+| **Loader** | 运行态真源：`phase`（连接状态） |
+
+行进来了但 Loader 还没跟上时，卡片显示「连接中」—— 那**是真的**，不是占位符。Loader 追上后
+自然变「已连接」。
+
+效果：新增一行从 ~4 秒可见变成 **~几十毫秒**（写完之后 `republishSoon` 的第一次就能读到）。
+
+### 25. 测试
 
 新增 78 个用例（399 → 454 全绿），四个文件，**都不 import 宿主包**（CI 上没有宿主
 `node_modules`，导入宿主包会让测试只在 CI 上炸）：

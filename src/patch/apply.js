@@ -42,7 +42,7 @@ export function backupPath() {
  * because those rows declare no volatile fields), reduced to what a panel row
  * needs to show.
  */
-const YAML_JS_TAG = { tag: 'tag:yaml.org,2002:js', resolve: (value) => value }
+export const YAML_JS_TAG = { tag: 'tag:yaml.org,2002:js', resolve: (value) => value }
 import { insertRow, locateRow, removeRow, rowScopeOf, setRowConfigField, setRowDisabled } from './rows.js'
 import { dshHome, parseEnv, spawnEnv, splitArgs } from '../runtime/env.js'
 import { connectionFields } from '../mcp/connection.js'

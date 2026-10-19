@@ -17,7 +17,7 @@
  * @module dsh-skills-mcp-manager
  */
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
 import z from '@deepseek-ai/schemastery'
@@ -35,6 +35,7 @@ import { createSkill, deleteSkill, renameSkill, updateSkill, writableRoots } fro
 import { registerSkillRoute } from './skills/route.js'
 import { serverMountConfig, setMountClient, workingDirectoryOf } from './project/mount.js'
 import { GLOBAL_SCOPE, projectServersFor, serverRows, serverSetKey } from './mcp/serverRows.js'
+import { readMcpRowsFromPatch } from './patch/readRows.js'
 import { connectionDraftOf } from './mcp/connection.js'
 import { toolsByServer } from './mcp/tools.js'
 import { registerRuntimeRoute } from './mcp/runtime.js'
@@ -600,6 +601,50 @@ function loaderOf(ctx) {
 }
 
 /**
+ * 最近一次从 patch 文件读到的行。
+ *
+ * 存在的理由见 `src/patch/readRows.js`：Loader 的注册表要 4 秒才跟上一次写入，而文件是
+ * 立刻变的。这里按 **mtime** 判断缓存是否还有效 —— 不按时间过期，因为「文件没变」和
+ * 「文件变了但内容一样」是两件不同的事，只有 mtime 能区分。
+ */
+let patchRowsCache = { file: '', mtimeMs: -1, entries: null, reading: false }
+/** 由 `apply()` 绑定：文件里出现了新行时立刻发一次投影，而不是等下一个 5 秒定时器。 */
+let onPatchRowsRefreshed = () => {}
+
+/** patch 文件的绝对路径；拿不到 profileContext 时返回空串（此时只看 Loader）。 */
+function patchFileOf(ctx) {
+  try {
+    const profile = ctx.get?.('profileContext') ?? ctx.profileContext
+    if (profile === null || typeof profile !== 'object') return ''
+    if (typeof profile.dir !== 'string' || profile.dir === '') return ''
+    return join(profile.dir, 'cordis.patch.yml')
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * 后台读一次 patch 文件，成功就刷新缓存并立刻发投影。
+ *
+ * 失败不重试、不记错：读不到时本函数什么都不做，调用方继续用 Loader 的视图 ——
+ * 那是原来的行为，不会更差。
+ */
+function refreshPatchRows(file) {
+  if (patchRowsCache.reading === true) return
+  patchRowsCache = { ...patchRowsCache, reading: true }
+  readMcpRowsFromPatch(file)
+    .then((result) => {
+      if (result.ok !== true) {
+        patchRowsCache = { ...patchRowsCache, reading: false }
+        return
+      }
+      patchRowsCache = { file, mtimeMs: result.mtimeMs, entries: result.entries, reading: false }
+      try { onPatchRowsRefreshed() } catch { /* 下一次 publish 会再试 */ }
+    })
+    .catch(() => { patchRowsCache = { ...patchRowsCache, reading: false } })
+}
+
+/**
  * The panel's view of every configured server, in the form its forms need.
  *
  * Built on {@link serverRows} so there is exactly one projection from rows to servers —
@@ -613,9 +658,37 @@ function loaderOf(ctx) {
  */
 function configuredMcpRows(ctx) {
   const loader = loaderOf(ctx)
-  if (loader === null || typeof loader.entries !== 'function') return { loaderFound: false, rows: [] }
+  const liveEntries = loader !== null && typeof loader.entries === 'function' ? [...(loader.entries() ?? [])] : null
+
+  /**
+   * **文件优先，Loader 补运行态。**
+   *
+   * 文件里已经有的行就是配置事实（我们自己刚写进去的）；`phase` 只有 Loader 知道，所以
+   * 按 id 从 Loader 合并。Loader 还没跟上时 `phase` 为空 —— 卡片显示「连接中」，那是真的。
+   */
+  let entries = liveEntries
+  const file = patchFileOf(ctx)
+  if (file !== '') {
+    let mtimeMs = -1
+    try { mtimeMs = statSync(file).mtimeMs } catch { mtimeMs = -1 }
+    if (mtimeMs >= 0) {
+      if (patchRowsCache.file !== file || patchRowsCache.mtimeMs !== mtimeMs) {
+        // 文件变了（或第一次看）：先发起读取，这一轮仍用 Loader 的视图。
+        refreshPatchRows(file)
+      } else if (patchRowsCache.entries !== null) {
+        const live = new Map((liveEntries ?? []).map((entry) => [String(entry?.id ?? ''), entry]))
+        entries = patchRowsCache.entries.map((entry) => {
+          const running = live.get(String(entry.id))
+          // 只借运行态字段，行的配置一律以文件为准。
+          return running === undefined ? entry : { ...entry, fiber: running.fiber, disabled: entry.disabled ?? running.disabled }
+        })
+      }
+    }
+  }
+
+  if (entries === null) return { loaderFound: false, rows: [] }
   try {
-    const rows = serverRows([...(loader.entries() ?? [])]).map((server) => ({
+    const rows = serverRows(entries).map((server) => ({
       entryId: server.entryId,
       serverName: server.serverName,
       scope: server.scope,
@@ -1999,6 +2072,23 @@ export function apply(ctx, config) {
       }
     }
     inner.effect(() => () => { kickProjection = () => {} })
+
+    /**
+     * patch 文件读完、里面出现了 Loader 还没注册的行 —— 立刻发一次投影。
+     *
+     * 这一步就是「4 秒 → 几十毫秒」的全部意义：文件写入后我们马上就能知道新行，不必
+     * 等 Loader 的文件监听把整条 profile 重载完。Loader 追上之后 `phase` 会自然补上，
+     * 卡片从「连接中」变成「已连接」。
+     */
+    onPatchRowsRefreshed = () => {
+      try {
+        tick()
+        publish()
+      } catch (error) {
+        ctx.logger.warn('dsh-skills-mcp-manager: immediate publish after a patch read failed: %s', String(error?.message ?? error))
+      }
+    }
+    inner.effect(() => () => { onPatchRowsRefreshed = () => {} })
 
     // Panel commands against profile-configured rows.
     let applying = false
