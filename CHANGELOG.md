@@ -582,7 +582,40 @@ dsh plugin --profile desktop add <tarball>
 旧键永远清不掉。用产品自己的 `migratePanelConfig()` 在带外跑了一次（同样的锁+备份+原子写），
 18 个条目迁移完成，`config` 变成 `{}`，3 个 MCP 行完好。
 
-### 27. 测试
+### 27. 真正的根因：插件不在 `dsh.profile.bundles` 里（装配清单）
+
+接着上一节。重装之后设置页**仍然**没有「Skills & MCP」，路由依旧全 404。最终在
+`profiles/desktop/hub.log` 里找到决定性证据：
+
+```
+10-20 09:40:06  install  uninstall.start  开始卸载 j62268781-alt/dsh-skills-mcp-manager
+10-20 09:40:06  install  uninstall.done   卸载成功
+```
+
+**DSH 在 09:40 那次重启时自己把这个插件卸载了。** 卸载动作把它的名字从 profile 的装配清单
+里摘掉了：
+
+```json
+"dsh": { "profile": { "bundles": [ … 20 项 … ] } }   ← 没有我们
+```
+
+而 `cordis.patch.yml` 里的条目还在、`node_modules` 里的代码也还在（前一次部署手工拷进去的）。
+于是三样东西看起来都对，唯独装配清单里没有 —— **插件不加载，设置页整块消失，零报错**。
+
+最坑的一点：`dsh plugin add` 在依赖已存在时会直接说「Already up to date」并**跳过注册**，
+所以「再装一次」这个最自然的动作是无效的，反而会让人以为已经装好了。
+
+**正确流程：先 `remove` 再 `add`** —— 这是唯一让管理器完整走一遍注册的组合。照着做完，
+`bundles` 从 20 项变成 21 项，我们的包在其中。
+
+`pack-deploy` 因此改成：
+
+1. `dsh plugin remove` → `dsh plugin add`（强制重新注册）
+2. **装配清单校验**：`dsh.profile.bundles` 里没有我们的包就当场失败并退出。依赖装上了、
+   patch 有条目，都不代表插件会被加载；把这条做成硬失败，才不会又把「设置页为什么空了」
+   留给用户去猜。
+
+### 28. 测试
 
 新增 78 个用例（399 → 454 全绿），四个文件，**都不 import 宿主包**（CI 上没有宿主
 `node_modules`，导入宿主包会让测试只在 CI 上炸）：

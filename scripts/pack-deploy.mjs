@@ -106,6 +106,24 @@ const before = (() => {
     return ''
   }
 })()
+/**
+ * **先 remove 再 add。**
+ *
+ * 真机踩过一次，值得写下来：`dsh plugin add` 在依赖已经存在时会直接说
+ * 「Already up to date」并**跳过注册**，而 profile 的 `dsh.profile.bundles` 才是装配清单
+ * —— 不在里面的包，`cordis.patch.yml` 里写了条目也不会被加载。
+ *
+ * 那次是 DSH 自己在重启时把插件「卸载」了（hub.log: uninstall.done），它从 bundles 里
+ * 摘掉了这一项，但 patch 里的条目还在、`node_modules` 里的代码也还在（我先前手工拷进去的）。
+ * 于是三样东西看起来都对，唯独装配清单里没有 —— 插件不加载，设置页整块消失，**零报错**。
+ *
+ * `remove` + `add` 是唯一能让管理器完整走一遍注册流程的组合；只 `add` 会被判定为无事可做。
+ */
+try {
+  execFileSync('dsh', ['plugin', '--profile', profileName, 'remove', PKG], { cwd: source, stdio: 'inherit' })
+} catch {
+  // 本来就没装：正常，继续 add。
+}
 try {
   execFileSync('dsh', ['plugin', '--profile', profileName, 'add', tarballPath], { cwd: source, stdio: 'inherit' })
 } catch (error) {
@@ -114,6 +132,20 @@ try {
   process.exit(1)
 }
 console.log(`  ✓ profile 依赖：${before || '(none)'} → file:${tarballName}`)
+
+// **装配清单校验。** 依赖装上了、patch 里有条目，都不代表插件会被加载 —— 真正决定的是
+// `dsh.profile.bundles`。这一项没进清单时，DSH 加载不到插件且不给任何提示，所以必须在这里
+// 当场失败，而不是留给用户去猜「设置页为什么空了」。
+{
+  const manifest = JSON.parse(readFileSync(profileManifestPath, 'utf8'))
+  const bundles = manifest?.dsh?.profile?.bundles ?? []
+  if (!bundles.includes(PKG)) {
+    console.log(`  ✗ ${PKG} 不在 profile 的 dsh.profile.bundles 里 —— 插件不会被加载`)
+    console.log('    修法：先 `dsh plugin --profile <name> remove <pkg>` 再 add。')
+    process.exit(1)
+  }
+  console.log(`  ✓ 已在装配清单 dsh.profile.bundles 里（共 ${bundles.length} 项）`)
+}
 
 // 曾经这里还会跑一次 `deploy.mjs`，把**整个仓库目录**拷进 profile 的 node_modules，
 // 好让「不重建 profile 也立刻生效」。现在不需要了：上面那条官方命令已经把它装好了。
