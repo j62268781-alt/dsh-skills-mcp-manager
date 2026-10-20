@@ -65,6 +65,24 @@ if (dryRun) {
   process.exit(0)
 }
 
+/**
+ * 0. Host 冒烟。**打包之前**跑。
+ *
+ * 这一步曾经是 `deploy.mjs` 顺带做的，而我后来把 `deploy.mjs` 从流程里去掉（它会把整个仓库
+ * 拷进 profile 的 node_modules，正是「安装状态分裂」的另一半），冒烟**跟着一起消失了** ——
+ * 部署脚本于是变成「打包 + 改写依赖」，能装上去一个**加载不起来**的包，而没有任何一步会
+ * 发现。这正是冒烟存在的理由：编译和单测都看不见「插件在真实 DSH 里 apply 时炸掉」。
+ *
+ * 找不到 app 的 node_modules 时它自己会跳过（并在 CI 里明确标注「未运行」），所以这一步
+ * 不会让没有 DSH 本体的机器部署不了。
+ */
+try {
+  execFileSync(process.execPath, ['scripts/host-smoke.mjs'], { cwd: source, stdio: 'inherit' })
+} catch (error) {
+  console.log(`  ✗ Host 冒烟失败，已中止部署：${String(error?.message ?? error)}`)
+  process.exit(1)
+}
+
 // 1. Pack. `npm pack` runs `prepare` (build), so dist/ and lib/client.js are fresh.
 mkdirSync(packagesDir, { recursive: true })
 console.log('  · npm pack（会跑 prepare → build）…')
