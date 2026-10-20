@@ -515,7 +515,41 @@ publish() 才看得见新行
 
 效果：新增一行从 ~4 秒可见变成 **~几十毫秒**（写完之后 `republishSoon` 的第一次就能读到）。
 
-### 25. 测试
+### 25. 重构之后 smoke 全红：改的是通道，断言还在测旧通道
+
+`13488ff` 把 settings 文档里的队列与投影整个拿掉了（技能只落磁盘、MCP 只做文件 CRUD），
+单测跟着改了，**`scripts/host-smoke.mjs` 没改**：它还在断言 `skillRequest` / `skillResult` /
+`rowOps` / `profileServers` / `oauthState` / `probeState` / `reconnectRequest` 这些已经不存在
+的字段，46 条全红，脚本自己还崩了一次。
+
+关键是**门禁当时是绿的**：`host-smoke.mjs` 找不到 app 的 node_modules 时会
+
+```js
+console.log('· 跳过 Host 冒烟…')
+process.exit(0)          // ← 跳过 = 成功
+```
+
+CI 里没有 DSH 本体，所以这一关从未真正跑过。这个洞以前就有，只是当时冒烟是绿的，没人注意；
+这一晚它正好把一条完全红的分支藏住了。
+
+**冒烟重写**，与新架构对齐（121 条断言）：
+
+| 旧（settings 通道） | 新（HTTP 路由 / 文件） |
+|---|---|
+| `skillRequest` 队列 + `skillResult` 回执 | `POST /skills` 就地回执 **且** 磁盘真的变了 |
+| `rowOps` 排空 | `POST /rows` 直接把 patch 写掉，**响应里就带着新行** |
+| `profileServers` 投影 | `GET /runtime` 现算（`servers` / `skills` / `probe` / `filter` / `oauth`） |
+| — | 7 条路由全部注册、写路由只收 POST、非 JSON 被拒 415 |
+| — | 技能读取只收 GET，且拒绝不在扫描结果里的路径（不能读任意文件） |
+| — | `Host 从不写 settings`（实测 0 次） |
+
+其中「响应里就带着新行」是这次 4 秒问题的回归钉子：它断言 `applyRowOp` 写完 **回读文件** 再
+作答，不等 Loader 重载。反向验证过 —— 把那行回读去掉，两条断言立刻失败。
+
+顺带把那个洞堵上：跳过时打 ⚠ 并明说「跳过不等于通过」，另加 `SMP_SMOKE_REQUIRED=1`
+把跳过变成失败，发布流程可以用它确保这一关真的过了。
+
+### 26. 测试
 
 新增 78 个用例（399 → 454 全绿），四个文件，**都不 import 宿主包**（CI 上没有宿主
 `node_modules`，导入宿主包会让测试只在 CI 上炸）：
