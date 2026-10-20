@@ -615,7 +615,43 @@ dsh plugin --profile desktop add <tarball>
    patch 有条目，都不代表插件会被加载；把这条做成硬失败，才不会又把「设置页为什么空了」
    留给用户去猜。
 
-### 28. 测试
+### 28. 「导入 MCP 能不能写进 yml」这条链路的测试缺口
+
+导入在 0.5.6 里被拆成两段：`POST /import` **只扫描**（返回预览，绝不写盘），面板再对每台调
+`POST /rows` 的 add。两段各自都有测试，**接缝没有** —— 而接缝正是最容易坏的地方：
+
+| 扫描给出的形状 | `RowOp` 要求的形状 |
+|---|---|
+| `args: string[]` | `args: ' '` 分隔的字符串 |
+| `env: object` | `env: 'KEY=VALUE'` 多行字符串 |
+| `headers: object` | `headers: 'KEY=VALUE'` 多行字符串 |
+
+转换只发生在面板那一行 `addServerOp({...})` 里。**转错不会报错**：行照样写进 yml，只是 stdio
+行少了参数、http 行丢了 `Authorization` —— 表现为「导入成功但服务器连不上」，而没人会联想到
+是导入时丢的。
+
+新增 `test/import.toPatch.test.mjs`（5 条），从**真实的外部配置文件**开始走完整条链路，
+最后逐字段断言 yml：
+
+- stdio：`command` / `args` 还原成数组 / `env` 用户变量保留 / 项目行 `disabled: true`
+- http：`url` / `headers` 两个键都保住 / 全局行不写 `scope` 键
+- 多台一次导入：各自成行，不互相覆盖
+- 同一台导入两次：按行 id 收敛，只留一行且取最新配置（多一行会让同一服务器连两次）
+- 扫描本身**绝不写盘**（否则「预览后取消」无从谈起）
+
+反向验证过两次：把 `args` 的转换改坏 → stdio 那条失败；把 `headers` 丢掉 → http 那条失败。
+
+同一条链路也进了 Host 冒烟（8 条断言），因为它是真实写 yml 的路径：
+
+```
+✓ 导入扫描识别出 2 台（收到 ["imported-http","imported-stdio"]）
+✓ 导入的两台都写进了 cordis.patch.yml
+✓ 导入的 http 行保住了 headers（收到 {"Authorization":"Bearer smoke"}）
+✓ 导入的 stdio 行 args 还原成数组（收到 ["-y","@smoke/pkg"]）
+✓ 项目级导入写成 disabled: true
+```
+
+### 29. 测试
 
 新增 78 个用例（399 → 454 全绿），四个文件，**都不 import 宿主包**（CI 上没有宿主
 `node_modules`，导入宿主包会让测试只在 CI 上炸）：

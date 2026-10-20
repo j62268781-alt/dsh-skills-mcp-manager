@@ -35,7 +35,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { stringify } from 'yaml'
+import { parse, stringify } from 'yaml'
 import { RUNTIME_PATH } from '../src/mcp/runtime.js'
 import { ROWS_PATH } from '../src/mcp/rows.js'
 import { SKILLS_PATH } from '../src/skills/route.js'
@@ -693,6 +693,63 @@ try {
     `无法识别的来源给出了原因而不是抛错（收到「${badImport.json?.error ?? ''}」）`)
   note(Array.isArray(badImport.json?.servers) && badImport.json.servers.length === 0,
     '无法识别的来源不会凭空给出服务器')
+
+  /**
+   * 导入预览 → 真的写进 patch。
+   *
+   * 导入拆成了两段（`/import` 只扫描、`/rows` 才写），所以单测那层接缝必须也在真机上过一遍：
+   * 扫描出来的字段形状（`args` 数组、`env`/`headers` 对象）与 `RowOp` 的形状完全不同，
+   * 转换只发生在面板里。转换错了 yml 照样生成，只是行少了参数或丢了 Authorization ——
+   * 表现为「导入成功但连不上」，最难联想到导入。
+   */
+  {
+    const importDir = join(stage, 'import-proj')
+    await mkdir(join(importDir, '.cursor'), { recursive: true })
+    await writeFile(join(importDir, '.cursor', 'mcp.json'), JSON.stringify({
+      mcpServers: {
+        'imported-http': { url: 'https://imported.invalid/mcp', headers: { Authorization: 'Bearer smoke' } },
+        'imported-stdio': { command: 'npx', args: ['-y', '@smoke/pkg'], env: { SMOKE: '1' } },
+      },
+    }))
+    const scanned = await callRoute(IMPORT_PATH, {
+      body: { source: 'cursor', scope: 'project', project: importDir },
+    })
+    const found = Array.isArray(scanned.json?.servers) ? scanned.json.servers : []
+    note(found.length === 2, `导入扫描识别出 2 台（收到 ${JSON.stringify(found.map((s) => s.serverName))}）`)
+    // 面板的转换，逐字照抄 lib/src/client.js 的导入 onClick。
+    for (const server of found) {
+      await callRoute(ROWS_PATH, {
+        body: {
+          op: 'add', entryId: '',
+          serverName: server.serverName, transport: server.transport,
+          url: server.transport === 'stdio' ? '' : server.url,
+          command: server.transport === 'stdio' ? server.command : '',
+          args: server.transport === 'stdio' ? (server.args ?? []).join(' ') : '',
+          env: server.env ?? '', headers: server.headers ?? '',
+          failOnStartupError: false, reconnectInitialDelayMs: '', reconnectMaxDelayMs: '',
+          reconnectMaxAttempts: '', toolCallTimeoutMs: '', connTimeoutMs: '',
+          enabled: true, scope: importDir, scopeChanged: true,
+        },
+      })
+    }
+    const written = parse(readFileSync(patchPath, 'utf8'))
+    const rowsWritten = []
+    for (const top of written) {
+      const insert = top?.insert
+      if (Array.isArray(insert)) rowsWritten.push(...insert)
+    }
+    const httpRow = rowsWritten.find((row) => row?.config?.serverName === 'imported-http')
+    const stdioRow = rowsWritten.find((row) => row?.config?.serverName === 'imported-stdio')
+    note(httpRow !== undefined && stdioRow !== undefined,
+      `导入的两台都写进了 cordis.patch.yml（收到 ${JSON.stringify(rowsWritten.map((r) => r?.config?.serverName))}）`)
+    note(httpRow?.config?.url === 'https://imported.invalid/mcp', '导入的 http 行带上了 url')
+    note(httpRow?.config?.headers?.Authorization === 'Bearer smoke',
+      `导入的 http 行保住了 headers（收到 ${JSON.stringify(httpRow?.config?.headers)}）`)
+    note(Array.isArray(stdioRow?.config?.args) && stdioRow.config.args.length === 2,
+      `导入的 stdio 行 args 还原成数组（收到 ${JSON.stringify(stdioRow?.config?.args)}）`)
+    note(stdioRow?.config?.env?.SMOKE === '1', '导入的 stdio 行保住了 env')
+    note(httpRow?.disabled === true, '项目级导入写成 disabled: true（否则 Loader 会重复连接）')
+  }
 
   // A server the profile does not configure cannot be reconnected, so the request must still
   // be answered — silently swallowing it would leave the panel showing 「重连中…」 forever.
