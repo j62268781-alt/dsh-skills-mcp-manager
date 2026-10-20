@@ -294,7 +294,7 @@ test('update：未改动的请求头不会被写坏（headersChanged 为假且�
   assert.match(out, /mcp2/)
 })
 
-test('update：stdio 的环境变量可写入、可清空（PATH 例外，它必须保留）', async () => {
+test('update：stdio 的环境变量可写入、可清空（PATH 不再落盘）', async () => {
   const { ctx, text } = await fresh()
   await applyRowOp(ctx, {
     op: 'update', entryId: 'mcp-context7', serverName: 'ctx', transport: 'stdio',
@@ -307,11 +307,35 @@ test('update：stdio 的环境变量可写入、可清空（PATH 例外，它必
     command: 'npx', args: '-y pkg', env: '', envChanged: true,
   })
   const out = await text()
-  // 用户填的变量被清掉
+  // 用户填的变量被清掉，**PATH 也不该出现**。
+  //
+  // 这里原来断言「PATH 会留下」（spawnEnv 总要注入它）。那条注解现在已经不成立：PATH 属于
+  // 运行环境而不是配置，改在启动子进程时注入（`stdioMountConfig`）。写进 yml 的代价是
+  // profile 变成「只在这台机器上对」，而且面板会把那条几百字符的 PATH 显示给用户去编辑。
   assert.doesNotMatch(out, /TOKEN/)
-  // 但 PATH 会留下：spawnEnv 总要注入它，否则 stdio 行里的 node/npx 找不到可执行文件
-  assert.match(out, /env:/)
-  assert.match(out, /PATH:/)
+  assert.doesNotMatch(out, /PATH/, `清空环境变量后不应残留任何 env（实际：${out.slice(0, 400)}）`)
+})
+
+test('env：用户填的变量原样写入，不注入宿主机 PATH', async () => {
+  /**
+   * PATH 是**运行环境**，不是配置。把它写进 profile 的后果：
+   *   · 这份 profile 拷到另一台机器，PATH 就是错的；
+   *   · 面板的「环境变量」文本框会把几百字符的宿主机路径显示给用户（既不该看见也不该编辑）；
+   *   · 每次保存都重写一遍，diff 全是噪音。
+   *
+   * 启动子进程时本来就会注入（`stdioMountConfig` 还会把 `npx -y <pkg>` 换成内置 runtime
+   * 的 node + pnpx），所以落盘那份从来是冗余的。
+   */
+  const { ctx, text } = await fresh()
+  await applyRowOp(ctx, {
+    op: 'add', entryId: 'mcp-envonly', serverName: 'envonly', transport: 'stdio',
+    command: 'node', args: 'server.js', env: 'TOKEN=abc\nFOO=bar', headers: '',
+  })
+  const out = await text()
+  assert.match(out, /TOKEN: abc/, '用户填的变量必须保留')
+  assert.match(out, /FOO: bar/, '第二个变量也要保留')
+  assert.doesNotMatch(out, /PATH/, '不得注入宿主机 PATH')
+  assert.doesNotMatch(out, /\/Users\//, '不得把宿主机路径写进 profile')
 })
 
 test('update：未改动的环境变量不会被写坏（envChanged 为假且字段为空）', async () => {

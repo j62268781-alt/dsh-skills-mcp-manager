@@ -277,3 +277,64 @@ test('可选：在真实 cordis.patch.yml 副本上验证无损（SMP_REAL_PATCH
   assert.match(text, /^# Your patch layer for this dsh profile/m, '原始头部注释必须保留')
   console.log(`    · 真实配置：${before.length} 个条目，目标行 ${target.id}，行数 ${originalLines} → ${text.split('\n').length}`)
 })
+
+test('迁移：清掉旧版本注入到 stdio 行里的 PATH（配置里不该有宿主机路径）', async () => {
+  /**
+   * 0.5.x 写 stdio 行时会把宿主机整条 PATH 塞进 `config.env` —— 桌面启动的 Host 环境里
+   * 没有 node，当时的做法是把它写进配置。现在只在启动子进程时注入，配置里那份是冗余的，
+   * 而且有害：profile 变成「只在这台机器上对」，面板还会把几百字符的宿主机路径显示给用户。
+   *
+   * 升级时必须主动清掉，否则老用户的配置会一直带着一条错 PATH —— 新代码不再写它，
+   * 但也不会去改已经存在的键。
+   */
+  usePlainIO()
+  const content = `- insert:
+    - id: mcp-context7
+      name: "@deepseek-ai/dsh-mcp-client"
+      config:
+        serverName: context7
+        transport: stdio
+        command: npx
+        env:
+          PATH: "/Users/someone/.dsh/runtimes/x/bin:/usr/bin:/bin"
+          TOKEN: keep-me
+    - id: mcp-http
+      name: "@deepseek-ai/dsh-mcp-client"
+      config:
+        serverName: http
+        transport: streamable-http
+        url: https://x.invalid/mcp
+`
+  const dir = makeProfile(content)
+  const path = join(dir, 'cordis.patch.yml')
+  await migratePanelConfig(ctxFor(dir))
+
+  const after = readPatch(path)
+  const stdio = findRowDeep(after, (item) => item.id === 'mcp-context7')
+  const http = findRowDeep(after, (item) => item.id === 'mcp-http')
+
+  assert.equal(stdio.config.env.PATH, undefined, 'PATH 必须被删掉')
+  assert.equal(stdio.config.env.TOKEN, 'keep-me', '用户自己填的变量必须保留')
+  assert.equal(http.config.env, undefined, '没有 env 的行不该被凭空造出来')
+  const text = readFileSync(path, 'utf8')
+  assert.doesNotMatch(text, /\/Users\/someone/, '宿主机路径不得留在配置里')
+})
+
+test('迁移：env 里只有 PATH 时，整个 env 键一起去掉（不留 env: {}）', async () => {
+  usePlainIO()
+  const content = `- insert:
+    - id: mcp-only-path
+      name: "@deepseek-ai/dsh-mcp-client"
+      config:
+        serverName: onlypath
+        transport: stdio
+        command: node
+        env:
+          PATH: "/usr/bin:/bin"
+`
+  const dir = makeProfile(content)
+  const path = join(dir, 'cordis.patch.yml')
+  await migratePanelConfig(ctxFor(dir))
+  const row = findRowDeep(readPatch(path), (item) => item.id === 'mcp-only-path')
+  assert.equal(row.config.env, undefined, '空 env 不该留下一个 `env: {}`')
+})

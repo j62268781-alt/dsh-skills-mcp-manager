@@ -43,12 +43,39 @@ export function backupPath() {
  * needs to show.
  */
 export const YAML_JS_TAG = { tag: 'tag:yaml.org,2002:js', resolve: (value) => value }
-import { insertRow, locateRow, removeRow, rowScopeOf, setRowConfigField, setRowDisabled } from './rows.js'
-import { dshHome, parseEnv, spawnEnv, splitArgs } from '../runtime/env.js'
+import { MCP_MODULE, insertRow, locateRow, removeRow, rowScopeOf, setRowConfigField, setRowDisabled } from './rows.js'
+import { dshHome, parseEnv, splitArgs } from '../runtime/env.js'
 import { connectionFields } from '../mcp/connection.js'
 import { NAME, LEGACY_NAME } from '../identity.js'
 import { scopeRoot } from '../skills/reconcile.js'
 import { renderSkillMarkdown } from '../skills/write.js'
+
+/**
+ * 用户填的环境变量：**原样保留，一个字节都不注入**。
+ *
+ * ## 为什么不把 PATH 写进 profile
+ *
+ * 曾经这里是 `spawnEnv(env)` —— 它会把宿主机整条 PATH 塞进行的 `env` 里，理由是桌面启动的
+ * Host 环境里 `PATH=/usr/bin:/bin:/usr/sbin:/sbin`，不含 `node`，stdio 行会死在
+ * `#!/usr/bin/env node` 上。那个理由是真的，但**解法放错了层**：
+ *
+ *   · 后果一：profile 里出现 `PATH=/Users/<某人>/…`。这份配置拷到另一台机器就是错的，
+ *     而它看起来只是一行普通环境变量，没人会想到要删；
+ *   · 后果二：面板的「环境变量」文本框会把这几百字符**显示给用户**（用户并不需要看见，
+ *     也不该编辑它）；
+ *   · 后果三：每次保存都把它再写一遍，diff 里永远是噪音。
+ *
+ * PATH 属于**运行环境**，不是配置。所以现在只在这里存用户填的东西，PATH 由启动子进程时
+ * 注入 —— 那一步本来就在做，而且做得更对（`stdioMountConfig` 会把
+ * `npx -y <pkg>` 换成 `<内置 runtime 的 node> <pnpx.mjs> <pkg>`，并把 runtime 的 bin
+ * 目录放进子进程 PATH）。落到 yml 里的那份从来是冗余的。
+ *
+ * @param env - 用户填写的变量（`parseEnv` 的结果）。
+ * @returns 同一组变量，不做任何注入。
+ */
+export function userEnvOnly(env) {
+  return { ...(env ?? {}) }
+}
 
 let io = {
   withFileLock: (_key, run) => run(),
@@ -125,7 +152,8 @@ export function legacyServerRowConfig(entry) {
         ? entry.env
         : Object.entries(entry.env).map(([key, value]) => `${key}=${String(value)}`).join('\n')
     const env = parseEnv(envLines)
-    if (Object.keys(env).length > 0) config.env = spawnEnv(env)
+    // 只写用户填的变量。PATH 不落盘 —— 见 {@link userEnvOnly}。
+    if (Object.keys(env).length > 0) config.env = userEnvOnly(env)
   } else {
     config.url = String(entry?.url ?? '')
     const headerLines = entry?.headers === null || entry?.headers === undefined
@@ -186,8 +214,36 @@ export async function migratePanelConfig(ctx) {
     let changed = 0
     const existing = rowIdsOf(document)
 
+    /**
+     * 删掉旧版本注入到行里的 PATH。
+     *
+     * 0.5.x 写 stdio 行时会把宿主机整条 PATH 塞进 `config.env`（桌面启动的 Host 环境里
+     * 没有 node，当时的做法是把它写进配置）。现在 PATH 只在启动子进程时注入，配置里那份
+     * 是冗余的 —— 而且有害：它让 profile 变成「只在这台机器上对」，面板还会把这几百字符
+     * 的宿主机路径显示给用户。
+     *
+     * 升级时要**主动清掉**，否则老用户的配置会一直带着一条错的 PATH：新代码不再写它，
+     * 但也不会去改已经存在的键。
+     */
+    const dropInjectedPath = (row) => {
+      if (!isMap(row)) return
+      const config = row.get('config')
+      if (!isMap(config)) return
+      const env = config.get('env')
+      if (!isMap(env) || !env.has('PATH')) return
+      // 只认「像被注入过」的 PATH：含宿主机绝对路径分隔结果。用户手填的 PATH 也删 ——
+      // 它同样没有意义（运行时会覆盖），留着只会误导。
+      env.delete('PATH')
+      changed += 1
+      // 删空了就把整个 env 键去掉，别留一个 `env: {}`
+      if (env.items.length === 0) config.delete('env')
+    }
+
     const clean = async (row) => {
-      if (!isMap(row) || ![NAME, LEGACY_NAME].includes(row.get('id'))) return
+      if (!isMap(row)) return
+      // 行内的 PATH 清理对所有 mcp-client 行都做，不限于本插件自己的条目。
+      if (row.get('name') === MCP_MODULE) dropInjectedPath(row)
+      if (![NAME, LEGACY_NAME].includes(row.get('id'))) return
       if (row.get('id') === LEGACY_NAME) {
         row.set('id', NAME)
         changed += 1
@@ -283,7 +339,7 @@ export async function applyRowOp(ctx, op) {
       if (transport === 'stdio') {
         config.command = op.command === '' ? 'npx' : op.command
         config.args = splitArgs(op.args)
-        config.env = spawnEnv(parseEnv(op.env))
+        config.env = userEnvOnly(parseEnv(op.env))
       } else {
         config.url = op.url
         const headers = parseEnv(op.headers)
@@ -379,10 +435,10 @@ export async function applyRowOp(ctx, op) {
         // 环境变量：只有客户端确认「用户改过」时才动，清空即删键。
         // 未改动时保持原样，否则一个没回填这些字段的旧面板会把已配好的值抹掉。
         if (op.envChanged === true) {
-          const env = spawnEnv(parseEnv(op.env))
+          const env = userEnvOnly(parseEnv(op.env))
           fields.env = Object.keys(env).length > 0 ? env : null
         } else if (op.env !== '') {
-          fields.env = spawnEnv(parseEnv(op.env))
+          fields.env = userEnvOnly(parseEnv(op.env))
         }
       } else {
         fields.url = op.url

@@ -651,7 +651,40 @@ dsh plugin --profile desktop add <tarball>
 ✓ 项目级导入写成 disabled: true
 ```
 
-### 29. 测试
+### 29. PATH 不再写进 profile：改成运行时注入
+
+0.5.x 写 stdio 行时会把**宿主机整条 PATH** 塞进 `config.env`。理由是真的（桌面启动的 Host
+环境里 `PATH=/usr/bin:/bin:/usr/sbin:/sbin`，不含 `node`，stdio 行会死在
+`#!/usr/bin/env node` 上），但**解法放错了层**：
+
+| 问题 | 表现 |
+|---|---|
+| profile 变成「只在这台机器上对」 | 拷到别的机器，`PATH=/Users/<某人>/…` 就是错的 |
+| 面板把它显示给用户 | 「环境变量」文本框里出现几百字符的宿主机路径，既不该看见也不该编辑 |
+| 每次保存重写一遍 | diff 里永远是噪音 |
+
+PATH 属于**运行环境**，不是配置。所以：
+
+- `applyRowOp` 的 4 处写盘改为 `userEnvOnly()` —— 只存用户填的变量，一个字节都不注入；
+- PATH 由启动子进程时注入，那一步本来就在做，而且做得更对：`stdioMountConfig` 会把
+  `npx -y <pkg>` 换成 `<内置 runtime 的 node> <pnpx.mjs> <pkg>`（绕开 pnpm 严格布局下的
+  `ERR_PACKAGE_PATH_NOT_EXPORTED`），并把 runtime 的 bin 目录放进子进程 PATH。
+
+**升级时主动清理**：新代码不再写 PATH，但也不会去改已经存在的键，所以迁移里加了一步
+`dropInjectedPath()` —— 删掉所有 mcp-client 行 `env` 里的 `PATH`，删空了连 `env` 键一起去掉。
+
+配套测试（改 1 条 / 加 5 条）：
+
+- 原来那条「PATH 例外，它必须保留」改成「PATH 不再落盘」，并断言清空后不残留任何 env
+- 新增「用户变量原样写入、不注入宿主机 PATH」：断言 yml 里**没有** `PATH`、**没有** `/Users/`
+- 迁移两条：旧 PATH 被删且用户变量保留 / `env` 里只剩 PATH 时整个键去掉
+- 新增 `test/project.mount.stdio.test.mjs`（3 条）：钉住**运行时注入**本身 —— 子进程 PATH
+  里必须有内置 runtime 的 bin 目录，否则这一改会把 stdio 服务器彻底弄坏，而配置文件看上去
+  完全正常
+
+反向验证：关掉 `dropInjectedPath` → 两条迁移测试立刻失败。
+
+### 30. 测试
 
 新增 78 个用例（399 → 454 全绿），四个文件，**都不 import 宿主包**（CI 上没有宿主
 `node_modules`，导入宿主包会让测试只在 CI 上炸）：

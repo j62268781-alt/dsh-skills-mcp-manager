@@ -8,7 +8,7 @@
 import { isMap, isSeq } from 'yaml'
 
 /** The shipped MCP client every managed row instantiates. */
-const MCP_MODULE = '@deepseek-ai/dsh-mcp-client'
+export const MCP_MODULE = '@deepseek-ai/dsh-mcp-client'
 
 /** Find a row by id, whether it sits at the top level or inside an `insert:` list. */
 export function locateRow(document, rawEntryId) {
