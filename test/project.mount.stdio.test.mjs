@@ -12,6 +12,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { stdioMountConfig } from '../src/project/mount.js'
+import { bundledRuntime } from '../src/runtime/env.js'
 
 test('stdio 挂载：默认用系统 npx（内置 pnpx 只做兜底）', () => {
   /**
@@ -36,10 +37,26 @@ test('stdio 挂载：默认用系统 npx（内置 pnpx 只做兜底）', () => {
   assert.deepEqual(config.args, ['-y', '@scope/pkg'], '`-y` 要保留（系统 npx 需要它）')
 })
 
-test('stdio 挂载：runtime=auto 显式要求时才换内置 node + pnpx', () => {
+test('stdio 挂载：runtime=auto 显式要求时才换内置 node + pnpx（有内置 runtime 时）', () => {
+  /**
+   * `auto` 的落点取决于**这台机器有没有内置 runtime**：
+   *   · 有（开发机）→ `<runtime>/node <runtime>/pnpx.mjs`；
+   *   · 没有（CI：`$DSH_HOME/dsh-runtimes` 不存在）→ 回落到系统命令。
+   *
+   * 后者是兜底契约的一部分，不是失败。第一版断言「一定换成内置 node」，等于断言了一个
+   * 环境事实，CI 上必红。
+   */
+  const runtime = bundledRuntime()
   const config = stdioMountConfig({
     serverName: 'npm-server', command: 'npx', args: ['-y', '@scope/pkg'], runtime: 'auto',
   })
+
+  if (runtime === null) {
+    assert.match(config.command, /npx|node/, `没有内置 runtime 时应回落（收到 ${config.command}）`)
+    assert.ok(!String(config.args.join(' ')).includes('pnpx.mjs'), '没有内置 runtime 时不该引用 pnpx')
+    return
+  }
+
   assert.match(config.command, /node$/, `应换成内置 node（收到 ${config.command}）`)
   assert.ok(config.args.some((arg) => /pnpx\.mjs$/.test(arg)), `应走 pnpx（收到 ${JSON.stringify(config.args)}）`)
   assert.ok(!config.args.includes('-y'), '`-y` 要去掉（pnpx 不需要）')

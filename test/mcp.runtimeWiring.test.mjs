@@ -22,6 +22,7 @@ import { parseDocument } from 'yaml'
 import { applyRowOp, setPatchIO } from '../src/patch/apply.js'
 import { serverRows } from '../src/mcp/serverRows.js'
 import { stdioMountConfig } from '../src/project/mount.js'
+import { bundledRuntime } from '../src/runtime/env.js'
 import { addServerOp, draftFromRow } from '../lib/src/crud/servers.js'
 
 async function scratch() {
@@ -79,16 +80,34 @@ test('从 yml 读回时 system 是缺省值（旧配置不能意外变成 pnpx�
 })
 
 test('最终启动命令：system 走系统 npx，auto 换成内置 node + pnpx', () => {
+  /**
+   * **这台机器上有没有内置 runtime，决定了 `auto` 的落点**，两件事都必须对：
+   *
+   *   · 有内置 runtime → `auto` 换成 `<runtime>/node <runtime>/pnpx.mjs`；
+   *   · 没有（CI 就是这样，`$DSH_HOME/dsh-runtimes` 不存在）→ 回落到系统 `npx`。
+   *
+   * 后者不是「失败」，而是 `stdioMountConfig` 的兜底契约：宁可走系统命令，也不要拿一个
+   * 不存在的解释器去 spawn。第一版测试假定内置 runtime 一定存在，于是在 CI 上必红 ——
+   * 断言了一个环境事实，而不是代码契约。
+   */
   const make = (runtime) => serverRows([{
     id: 'mcp-x', options: { name: '@deepseek-ai/dsh-mcp-client', config: { serverName: 'x', transport: 'stdio', command: 'npx', args: ['-y', 'pkg'], runtime } },
   }])[0]
 
   const viaSystem = stdioMountConfig(make('system'))
   assert.match(viaSystem.command, /npx$/, `system 应走系统 npx（收到 ${viaSystem.command}）`)
+  assert.doesNotMatch(viaSystem.command, /pnpx/, 'system 不该被换成本地 pnpx')
 
+  const runtime = bundledRuntime()
   const viaAuto = stdioMountConfig(make('auto'))
-  assert.match(viaAuto.command, /node$/, `auto 应换成内置 node（收到 ${viaAuto.command}）`)
-  assert.ok(viaAuto.args.some((a) => /pnpx\.mjs$/.test(a)), 'auto 应走 pnpx')
+  if (runtime === null) {
+    // 没有内置 runtime：`auto` 必须回落到系统命令，而不是 spawn 一个不存在的解释器。
+    assert.match(viaAuto.command, /npx|node/, `没有内置 runtime 时 auto 应回落（收到 ${viaAuto.command}）`)
+    assert.ok(!String(viaAuto.args.join(' ')).includes('pnpx.mjs'), '没有内置 runtime 时不该引用 pnpx')
+  } else {
+    assert.match(viaAuto.command, /node$/, `auto 应换成内置 node（收到 ${viaAuto.command}）`)
+    assert.ok(viaAuto.args.some((a) => /pnpx\.mjs$/.test(a)), 'auto 应走 pnpx')
+  }
 })
 
 test('编辑读回：draftFromRow 保留 auto，不会被重置成 system', () => {
