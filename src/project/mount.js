@@ -65,9 +65,24 @@ export function stdioMountConfig(server) {
   const userEnv = envObject(server.env)
   const base = raw.split('/').pop() ?? ''
   const npmFamily = /^(npx|npm|pnpx|pnpm)(-cli)?(\.(js|cjs|mjs))?$/.test(base)
-  // Some published servers break under pnpm's strict dependency layout
-  // (ERR_PACKAGE_PATH_NOT_EXPORTED), so an entry may opt into the user's npx.
-  const runtime = server.runtime === 'system' ? null : bundledRuntime()
+  /**
+   * 用哪个 npm 家族。
+   *
+   * **默认用系统 `npx`**，内置 pnpx 只做兜底 —— 这个默认值原先反了，真机上炸得很彻底：
+   * `npx -y @modelcontextprotocol/server-filesystem` 被换成「内置 node + pnpx.mjs」之后，
+   * 解析到的是 pnpm store 里那份包，而它的依赖没有被链接进 store 的 links 目录，于是
+   * `Cannot find package 'zod'` 直接退出。`server-memory` 同样失败，`server-everything`
+   * 却正常 —— 说明这不是个别包的毛病，而是「用 pnpx 跑第三方包」在 pnpm 严格布局下的通病。
+   *
+   * 内置 runtime 的**存在理由仍然成立**：桌面启动的 Host `PATH` 里可能没有 node。所以它
+   * 保留为兜底 —— 只有当系统找不到 `npx` 时才用它。顺序反过来的代价是「默认路径不可靠」，
+   * 而用户根本看不到这个开关（`runtime` 既不在 schema 也不在面板上，只能手改 yml）。
+   *
+   * 显式写 `runtime: auto` 仍可强制走内置（保留旧行为），`system` 强制走系统。
+   */
+  const systemHasNpx = resolveCommand(raw) !== raw
+  const preferBundled = server.runtime === 'auto' || (server.runtime !== 'system' && !systemHasNpx)
+  const runtime = preferBundled ? bundledRuntime() : null
   if (runtime !== null && npmFamily) {
     // `npx -y <pkg> …` → `<node> <pnpx.mjs> <pkg> …`
     const cleaned = args.filter((arg) => arg !== '-y' && arg !== '--yes')

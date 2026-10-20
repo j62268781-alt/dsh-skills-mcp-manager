@@ -287,6 +287,32 @@ export async function bootPanel(doc = emptyDoc(), options = {}) {
     },
   }
 
+  /**
+   * `document` 桩。
+   *
+   * 面板里有一句 `document.visibilityState === 'hidden' → 跳过拉取`，而 harness 原先**根本
+   * 没有 `document`** —— 于是 `typeof document !== 'undefined'` 为假，那条分支在测试里从没
+   * 执行过，「隐藏时倒计时会冻住」这个真机 bug 也就永远测不出来。
+   *
+   * `visibilityState` 可传 `options.visibilityState`（默认 `visible`），并且支持在运行中改，
+   * 这样测试能同时覆盖「可见」与「隐藏降频」两条路。
+   */
+  const listeners = new Map()
+  let visibilityState = options.visibilityState ?? 'visible'
+  globalThis.document = {
+    get visibilityState() { return visibilityState },
+    addEventListener(type, fn) {
+      if (!listeners.has(type)) listeners.set(type, new Set())
+      listeners.get(type).add(fn)
+    },
+    removeEventListener(type, fn) { listeners.get(type)?.delete(fn) },
+  }
+  /** Test-only: 切换可见性并像浏览器那样派发一次 `visibilitychange`。 */
+  const setVisibility = (next) => {
+    visibilityState = next
+    for (const fn of listeners.get('visibilitychange') ?? []) fn({ type: 'visibilitychange' })
+  }
+
   const find = (predicate) => {
     let hit = null
     visit(runtime.tree, (node) => { if (hit === null && typeof node.type === 'string' && predicate(node)) hit = node })
@@ -422,9 +448,10 @@ export async function bootPanel(doc = emptyDoc(), options = {}) {
     globalThis.setTimeout = realTimeout
     delete globalThis.window
     delete globalThis.location
+    delete globalThis.document
     if (realBroadcastChannel === undefined) delete globalThis.BroadcastChannel
     else globalThis.BroadcastChannel = realBroadcastChannel
   }
 
-  return { doc, runtime, settle, find, findAll, byClass, byText, byPlaceholder, click, change, toggle, switchNamed, flip, text, openMenu, restore, channels }
+  return { doc, runtime, settle, find, findAll, byClass, byText, byPlaceholder, click, change, toggle, switchNamed, flip, text, openMenu, restore, channels, setVisibility }
 }

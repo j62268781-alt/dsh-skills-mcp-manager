@@ -13,12 +13,33 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { stdioMountConfig } from '../src/project/mount.js'
 
-test('stdio 挂载：npx 换成内置 runtime 的 node + pnpx，并把 bin 目录放进子进程 PATH', () => {
+test('stdio 挂载：默认用系统 npx（内置 pnpx 只做兜底）', () => {
+  /**
+   * **默认值曾经是反的**，真机上炸得很彻底：
+   *
+   *   `npx -y @modelcontextprotocol/server-filesystem`
+   *   → 换成「内置 node + pnpx.mjs」→ 解析到 pnpm store 里那份包
+   *   → `Cannot find package 'zod'`，进程直接退出，服务器永远连不上。
+   *
+   * 实测：`server-filesystem` 和 `server-memory` 都失败，`server-everything` 正常 ——
+   * 所以不是个别包的毛病，而是「用 pnpx 跑第三方包」在 pnpm 严格布局下的通病。
+   *
+   * 内置 runtime 的存在理由仍然成立（桌面启动的 Host PATH 里可能没有 node），所以它保留为
+   * **兜底**：只有系统找不到 `npx` 时才用。顺序反过来的代价是「默认路径不可靠」，而用户
+   * 根本看不到这个开关（`runtime` 既不在 schema 也不在面板上）。
+   */
   const config = stdioMountConfig({
     serverName: 'npm-server', command: 'npx', args: ['-y', '@scope/pkg'],
   })
-  // `npx -y <pkg> …` 在 pnpm 的严格布局下会 ERR_PACKAGE_PATH_NOT_EXPORTED，
-  // 所以换成 <node> <pnpx.mjs> <pkg>。
+  assert.match(config.command, /npx$/, `默认应走系统 npx（收到 ${config.command}）`)
+  assert.ok(!config.args.some((arg) => /pnpx\.mjs$/.test(arg)), '默认不该换成本地 pnpx')
+  assert.deepEqual(config.args, ['-y', '@scope/pkg'], '`-y` 要保留（系统 npx 需要它）')
+})
+
+test('stdio 挂载：runtime=auto 显式要求时才换内置 node + pnpx', () => {
+  const config = stdioMountConfig({
+    serverName: 'npm-server', command: 'npx', args: ['-y', '@scope/pkg'], runtime: 'auto',
+  })
   assert.match(config.command, /node$/, `应换成内置 node（收到 ${config.command}）`)
   assert.ok(config.args.some((arg) => /pnpx\.mjs$/.test(arg)), `应走 pnpx（收到 ${JSON.stringify(config.args)}）`)
   assert.ok(!config.args.includes('-y'), '`-y` 要去掉（pnpx 不需要）')

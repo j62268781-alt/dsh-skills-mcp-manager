@@ -695,7 +695,63 @@ PATH 属于**运行环境**，不是配置。所以：
 现在冒烟放在**打包之前**显式跑，失败就中止部署。找不到 app 的 `node_modules` 时它自己会跳过
 （并明确标注「未运行」），所以没有 DSH 本体的机器照样能部署。
 
-### 31. 测试
+### 31. stdio 服务器连不上：默认用 pnpx，而 pnpx 拉不到依赖
+
+真机：新增 `npx -y @modelcontextprotocol/server-filesystem`，一直「连接中」，最后没连上。
+手工按 mount 层解析出来的命令启动，拿到真实错误：
+
+```
+Cannot find package 'zod' imported from .../pnpm/store/v11/links/@modelcontextprotocol/
+server-filesystem/2026.8.31/.../dist/index.js
+```
+
+`stdioMountConfig` 把 npm 家族一律换成「内置 node + pnpx.mjs」。而 pnpx 解析到的是 pnpm store
+里那份包，**它的依赖没有被链接进 store 的 links 目录**，于是启动即退出。
+
+对照实验，三个包：
+
+| 包 | 内置 pnpx | 系统 npx |
+|---|---|---|
+| `server-everything` | ✓ | ✓ |
+| `server-memory` | ✗ `ERR_MODULE_NOT_FOUND` | ✓ |
+| `server-filesystem` | ✗ `ERR_MODULE_NOT_FOUND` | ✓ |
+
+不是个别包的毛病，而是「用 pnpx 跑第三方包」在 pnpm 严格布局下的通病 —— 这正是
+`stdioMountConfig` 注释里提到的 `ERR_PACKAGE_PATH_NOT_EXPORTED` 那一类。
+
+**默认值选反了**。`runtime` 既不在 schema 也不在面板上（只能手改 yml），所以「让用户自己
+选 system」这条路是断的。改成：
+
+- **默认走系统 `npx`**（`resolveCommand` 能正确解析到 `/usr/local/bin/npx`）；
+- 内置 runtime 保留为**兜底**：只有系统找不到 `npx` 时才用 —— 它的存在理由仍然成立
+  （桌面启动的 Host `PATH` 里可能没有 node）；
+- `runtime: auto` 仍可显式强制走内置（保留旧行为），`system` 强制走系统。
+
+修复后再手工启动同一个包：`{"serverInfo":{"name":"secure-filesystem-server","version":"2.0.0"}}` ✓
+
+### 32. 「连接中 约 54s」不会自己走，点一下才刷新
+
+`/runtime` 轮询里有这么一句：
+
+```js
+if (document.visibilityState === 'hidden') return
+```
+
+它把**「不可见」当成「不该更新」**。页面一旦被判成 hidden（浏览器切后台、DSH 的 Web 视图、
+某些嵌入场景），倒计时就永远停在某个数字上，界面上没有任何迹象说明它在冻着。用户唯一能做
+的是切换卡片 —— 那会重建 effect、立刻拉一次，于是现象变成「点一下才刷新」。
+
+改成**降频而不是停止**：hidden 时距上次成功拉取不足 15 秒就跳过，超过了照常拉。回到前台由
+`visibilitychange` 立刻补一次。后台每 15 秒一次的成本可以忽略，换来「计时器永远在走」。
+
+**测试环境的坑**：harness 里原先**根本没有 `document`**，所以 `typeof document !==
+'undefined'` 为假，那条 guard 在测试里从没执行过 —— 这个 bug 也就永远测不出来。给 harness
+补了 `document` 桩（`visibilityState` 可配置，并能在运行中切换、派发 `visibilitychange`）。
+
+新增测试驱动 5s 定时器两次：① 刚拉过时不该空转（降频生效）；② 把时钟推过 15s 后必须再拉
+（不会冻住）。反向验证：把 guard 写回 `return` → 第 ② 条立刻失败。
+
+### 33. 测试
 
 新增 78 个用例（399 → 454 全绿），四个文件，**都不 import 宿主包**（CI 上没有宿主
 `node_modules`，导入宿主包会让测试只在 CI 上炸）：
