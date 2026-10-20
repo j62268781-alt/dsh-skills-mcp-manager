@@ -81,6 +81,18 @@ const RowOp = z.object({
   env: z.string().default(''),
   /** HTTP headers, one KEY=VALUE per line. */
   headers: z.string().default(''),
+  /**
+   * stdio 用哪个 npm 家族：`system`（默认）或 `auto`（跟随 Harness 自带的 node + pnpx）。
+   *
+   * 这个字段**原先根本不存在**，于是面板上那个「运行时」下拉是个纯装饰：选择写进 draft、
+   * 却既不进 RowOp 也不落盘，Host 一律按默认分支走。用户的直觉是对的 —— 选什么都不生效，
+   * 那就是 bug。
+   *
+   * `system` 是默认值，因为 `auto` 走 pnpx 时解析到的 pnpm store 里依赖没有链接进去：
+   * `server-memory` / `server-filesystem` 会 `Cannot find package 'zod'` 直接退出。
+   * 只有系统找不到 npx 时才回落到 pnpx（见 src/project/mount.js）。
+   */
+  runtime: z.string().default('system'),
   /** Connection policy written into the row's config (see src/mcp/connection.js). */
   failOnStartupError: z.boolean().default(false),
   reconnectInitialDelayMs: z.string().default(''),
@@ -412,6 +424,8 @@ function configuredMcpRows(ctx) {
       headersText: Object.entries(server.headers).map(([key, value]) => `${key}=${String(value)}`).join('\n'),
       // Connection policy travels with the row so 编辑 can show what is set.
       ...connectionDraftOf(server),
+      // 面板要能读回当前值，否则「编辑」永远显示默认，用户改过的看不出效果。
+      runtime: server.runtime,
       enabled: server.enabled,
       phase: server.phase,
     }))

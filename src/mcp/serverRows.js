@@ -102,6 +102,17 @@ export function serverFromRow(entry) {
     // 绝对不能意外地打开它。
     allowInsecureTokenEndpoint: row.allowInsecureTokenEndpoint === true,
     enabled: userEnabled(row, entry, scope),
+    /**
+     * stdio 用哪个 npm 家族。
+     *
+     * **只从行里读**，缺省即 `system` —— 与 `allowInsecureTokenEndpoint` 同一条规矩：
+     * 一份没有这个键的旧配置要按新的（可靠的）默认走，而不是意外打开 pnpx。
+     *
+     * 少了这一行，面板上那个「运行时」下拉就是个装饰：选择写进 draft、却不落盘、也不被读回，
+     * 用户选什么都没用。这类「字段清单漏带一项」本仓库已经出过三次，所以新增连接相关字段时
+     * 这里与 `serverSetKey` 必须一起改。
+     */
+    runtime: row.runtime === 'auto' ? 'auto' : 'system',
     phase: phaseOf(entry),
     /** True for rows the Loader connects itself (global scope). */
     loaderManaged: scope === GLOBAL_SCOPE,

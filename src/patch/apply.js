@@ -340,6 +340,9 @@ export async function applyRowOp(ctx, op) {
         config.command = op.command === '' ? 'npx' : op.command
         config.args = splitArgs(op.args)
         config.env = userEnvOnly(parseEnv(op.env))
+        // `system` 是默认值，不写键 —— 省得每一行都带一句「用系统的」，而那是绝大多数
+        // 情况。只有显式选 `auto`（跟随 Harness 的 pnpx）才落盘。
+        if (op.runtime === 'auto') config.runtime = 'auto'
       } else {
         config.url = op.url
         const headers = parseEnv(op.headers)
@@ -440,6 +443,9 @@ export async function applyRowOp(ctx, op) {
         } else if (op.env !== '') {
           fields.env = userEnvOnly(parseEnv(op.env))
         }
+        // 运行时的改法与 env 同理：只有显式选了 `auto` 才写，选 `system` 就删掉这个键
+        // （它等价于默认）。这样「改回系统 npx」不会在文件里留一句废话。
+        fields.runtime = op.runtime === 'auto' ? 'auto' : null
       } else {
         fields.url = op.url
         fields.command = null

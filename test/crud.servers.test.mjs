@@ -42,7 +42,19 @@ test('draftFromRow：stdio 行用原始 command 回填，不用拼好的 target'
   assert.equal(draft.url, '')
   assert.equal(draft.args, '-y p')
   assert.equal(draft.env, 'T=1')
-  assert.equal(draft.runtime, 'auto')
+  // 没写 runtime 的行按 `system` 读（可靠的默认），**不是** `auto`。
+  //
+  // 这里原先是 `'auto'`，锁的是旧默认 —— 而 `auto` 走的 pnpx 在真机上会
+  // `Cannot find package 'zod'` 直接退出，所以默认值换成了 system。
+  assert.equal(draft.runtime, 'system')
+})
+
+test('draftFromRow：runtime 回填行里的实际值（选过 auto 不能被悄悄改回 system）', () => {
+  // 写死默认值会让「编辑一次就丢掉用户的选择」，而且改动发生在用户没碰过的控件上。
+  const viaAuto = draftFromRow({ serverName: 'x', transport: 'stdio', command: 'npx', args: '', runtime: 'auto' })
+  assert.equal(viaAuto.runtime, 'auto')
+  const viaSystem = draftFromRow({ serverName: 'x', transport: 'stdio', command: 'npx', args: '', runtime: 'system' })
+  assert.equal(viaSystem.runtime, 'system')
 })
 
 test('draftFromRow：http 行用 url 回填地址', () => {

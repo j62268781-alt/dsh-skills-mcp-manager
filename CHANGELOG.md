@@ -751,7 +751,38 @@ if (document.visibilityState === 'hidden') return
 新增测试驱动 5s 定时器两次：① 刚拉过时不该空转（降频生效）；② 把时钟推过 15s 后必须再拉
 （不会冻住）。反向验证：把 guard 写回 `return` → 第 ② 条立刻失败。
 
-### 33. 测试
+### 33. 「运行时」下拉是纯装饰：选什么都不生效
+
+用户问得对：「我选择 stdio 选择 harness 运行时，启动不起来，那不就是有 bug 了吗，那默认用的
+是运行时」。查下去比这更糟 —— **那个选择从来没到达 Host**：
+
+| 环节 | 有没有 `runtime` |
+|---|---|
+| 面板下拉框 | ✓ 有 |
+| `commonFields()`（发出命令） | **✗ 没有** |
+| `RowOp` schema | **✗ 没有** |
+| `applyRowOp` 写盘 | **✗ 没有** |
+| `serverFromRow` 读回 | **✗ 没有** |
+
+所以 Host 永远走自己的默认分支，用户选什么都一样，而且 yml 里不留任何痕迹、界面上也看不出
+异常。这就是「控件不接线」那一类最难自己发现的 bug。
+
+现在整条链路打通，并加了 `test/mcp.runtimeWiring.test.mjs`（5 条）逐层钉住：
+
+```
+面板选择 system  →  命令带 system  →  yml 不写键（默认）→  读回 system  →  启动 npx
+面板选择 auto    →  命令带 auto    →  yml 写 runtime: auto → 读回 auto   →  启动 内置 node+pnpx
+```
+
+**默认值改成 `system`**，因为这个选择器原本标着「跟随 Harness（自带 node + pnpx，**推荐**）」——
+而推荐的那一侧正是跑不起来的：pnpx 解析 pnpx store 里那份包时依赖没有被链接进去
+（`Cannot find package 'zod'`）。文案也改成如实描述适用范围。
+
+顺带修掉一条测试抓到的回归：`draftFromRow` 把 `runtime` 写死成默认值，导致**用户选过
+`auto`、只要编辑一次就被悄悄改回 `system`** —— 改动还发生在用户没碰过的控件上。现在回填
+行里的实际值。
+
+### 34. 测试
 
 新增 78 个用例（399 → 454 全绿），四个文件，**都不 import 宿主包**（CI 上没有宿主
 `node_modules`，导入宿主包会让测试只在 CI 上炸）：
